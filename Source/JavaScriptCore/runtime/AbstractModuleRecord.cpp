@@ -126,6 +126,11 @@ ScriptFetchParameters::Type AbstractModuleRecord::ModuleRequest::type(ScriptFetc
     return fallback;
 }
 
+ModuleMapKey AbstractModuleRecord::ModuleRequest::moduleMapKey() const
+{
+    return makeModuleMapKey(m_specifier.impl(), type(), m_attributes.get());
+}
+
 AbstractModuleRecord::LoadedModuleRequest::LoadedModuleRequest(VM& vm, ModuleRequest moduleRequest, AbstractModuleRecord* loadedModule, JSCell* owner)
     : ModuleRequest(WTF::move(moduleRequest))
     , m_module(vm, owner, loadedModule)
@@ -143,8 +148,15 @@ bool AbstractModuleRecord::ModuleRequest::operator==(const ModuleRequest& other)
     if (!!m_attributes != !!other.m_attributes)
         return false;
 
-    if (m_attributes)
-        return m_attributes->type() == other.m_attributes->type();
+    if (m_attributes) {
+        if (m_attributes->type() != other.m_attributes->type())
+            return false;
+#if USE(BUN_JSC_ADDITIONS)
+        // ModuleRequestsEqual compares the whole attribute list, and for Bun's
+        // host-defined types the `type` attribute string is the discriminant.
+        return m_attributes->hostDefinedImportType() == other.m_attributes->hostDefinedImportType();
+#endif
+    }
 
     return true;
 }
@@ -240,10 +252,9 @@ void AbstractModuleRecord::setImportedModule(JSGlobalObject* globalObject, const
     // getImportedModule(), so records that are linked outside the loader (Bun's
     // node:vm SourceTextModule) need this map populated too. Reuse the original
     // ModuleRequest (specifier + attributes) so a `with { type: "json" }` /
-    // HostDefined import lands in the same (specifier, type) bucket that
-    // getImportedModule()'s typed lookup will use.
-    ModuleMapKey key { request.m_specifier.impl(), request.type() };
-    m_loadedModules.set(key, LoadedModuleRequest { vm, request, record, this });
+    // HostDefined import lands in the same bucket that getImportedModule()'s
+    // typed lookup will use.
+    m_loadedModules.set(request.moduleMapKey(), LoadedModuleRequest { vm, request, record, this });
 }
 
 auto AbstractModuleRecord::resolveImport(JSGlobalObject* globalObject, const Identifier& localName) -> Resolution
