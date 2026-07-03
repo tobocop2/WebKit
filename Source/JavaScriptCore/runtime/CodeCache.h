@@ -266,9 +266,15 @@ UnlinkedEvalCodeBlock* generateUnlinkedCodeBlockForDirectEval(VM&, DirectEvalExe
 UnlinkedProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForProgram(VM&, const SourceCode&, LexicallyScopedFeatures, JSParserScriptMode, OptionSet<CodeGenerationMode>, ParserError&, EvalContextType);
 UnlinkedModuleProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForModuleProgram(VM&, const SourceCode&, LexicallyScopedFeatures, JSParserScriptMode, OptionSet<CodeGenerationMode>, ParserError&, EvalContextType);
 
+// Eagerly compile `executable` and every function nested beneath it, so that the whole
+// tree can be serialized with encodeFunctionExecutable(). `parentSource` is the source
+// the executable was created from, not its own linked sub-range.
+JS_EXPORT_PRIVATE UnlinkedFunctionCodeBlock* recursivelyGenerateUnlinkedCodeBlockForFunctionExecutable(VM&, UnlinkedFunctionExecutable*, const SourceCode& parentSource, ParserError&);
+
 void writeCodeBlock(const SourceCodeKey&, const SourceCodeValue&);
 RefPtr<CachedBytecode> serializeBytecode(VM&, UnlinkedCodeBlock*, const SourceCode&, SourceCodeType, LexicallyScopedFeatures, JSParserScriptMode, FileSystem::FileHandle&, BytecodeCacheError&, OptionSet<CodeGenerationMode>);
 SourceCodeKey sourceCodeKeyForSerializedProgram(VM&, const SourceCode&);
 SourceCodeKey sourceCodeKeyForSerializedModule(VM&, const SourceCode&);
+JS_EXPORT_PRIVATE SourceCodeKey sourceCodeKeyForSerializedFunctionExecutable(VM&, const SourceCode&, const String& name);
 
 } // namespace JSC
