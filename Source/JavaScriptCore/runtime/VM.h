@@ -1086,6 +1086,13 @@ public:
     JS_EXPORT_PRIVATE bool hasExceptionsAfterHandlingTraps();
 
     CONCURRENT_SAFE void notifyNeedDebuggerBreak() { traps().fireTrap(VMTraps::NeedDebuggerBreak); }
+#if USE(BUN_JSC_ADDITIONS)
+    // Invoked from VMTraps::handleTraps for NeedDebuggerBreak after
+    // invalidateCodeBlocksOnStack, on the VM's owning thread at a safe point.
+    using DebuggerTrapCallback = void (*)(VM&);
+    CONCURRENT_SAFE void setDebuggerTrapCallback(DebuggerTrapCallback cb) { m_debuggerTrapCallback.store(cb, std::memory_order_release); }
+    DebuggerTrapCallback debuggerTrapCallback() const { return m_debuggerTrapCallback.load(std::memory_order_acquire); }
+#endif
     CONCURRENT_SAFE void notifyNeedShellTimeoutCheck() { traps().fireTrap(VMTraps::NeedShellTimeoutCheck); }
     CONCURRENT_SAFE void notifyNeedTermination() { traps().fireTrap(VMTraps::NeedTermination); }
     CONCURRENT_SAFE void notifyNeedWatchdogCheck() { traps().fireTrap(VMTraps::NeedWatchdogCheck); }
@@ -1340,6 +1347,9 @@ private:
     const Ref<Waiter> m_syncWaiter;
 
     std::atomic<int64_t> m_numberOfActiveJITPlans { 0 };
+#if USE(BUN_JSC_ADDITIONS)
+    std::atomic<DebuggerTrapCallback> m_debuggerTrapCallback { nullptr };
+#endif
 
     Vector<Function<void()>> m_didPopListeners;
 

@@ -484,6 +484,10 @@ bool VMTraps::handleTraps(VMTraps::BitField mask)
         switch (event) {
         case NeedDebuggerBreak:
             invalidateCodeBlocksOnStack(vm.topCallFrame);
+#if USE(BUN_JSC_ADDITIONS)
+            if (auto callback = vm.debuggerTrapCallback())
+                callback(vm);
+#endif
             didHandleTrap = true;
             break;
 

@@ -153,7 +153,10 @@ DebuggerScope* DebuggerCallFrame::scope(VM& vm)
         CodeBlock* codeBlock = m_validMachineFrame->isNativeCalleeFrame() ? nullptr : m_validMachineFrame->codeBlock();
         if (isTailDeleted())
             scope = m_shadowChickenFrame.scope;
-        else if (codeBlock && codeBlock->scopeRegister().isValid())
+        // Code compiled without CodeGenerationMode::Debugger may have its scope
+        // register repurposed by DFGStackLayoutPhase (needsScopeRegister() is
+        // false), leaving stale data in the slot. Fall through to callee->scope().
+        else if (codeBlock && codeBlock->scopeRegister().isValid() && codeBlock->wasCompiledWithDebuggingOpcodes())
             scope = m_validMachineFrame->scope(codeBlock->scopeRegister().offset());
         else if (JSCallee* callee = dynamicDowncast<JSCallee>(m_validMachineFrame->jsCallee()))
             scope = callee->scope();

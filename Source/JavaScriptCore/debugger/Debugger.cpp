@@ -163,15 +163,14 @@ Debugger::~Debugger()
         globalObject->setDebugger(nullptr);
 }
 
-void Debugger::attach(JSGlobalObject* globalObject)
+void Debugger::notifySourceParsedForExistingCode(JSGlobalObject* globalObject)
 {
-    ASSERT(!globalObject->debugger());
-    globalObject->setDebugger(this);
-    m_globalObjects.add(globalObject);
+    // Enumerate source providers for scripts already loaded before the
+    // debugger attached and replay sourceParsed for each so observers
+    // (e.g. InspectorDebuggerAgent) can send scriptParsed events.
+    if (!canDispatchFunctionToObservers())
+        return;
 
-    m_vm.setShouldBuildPCToCodeOriginMapping();
-
-    // Call `sourceParsed` after iterating because it will execute JavaScript in Web Inspector.
     UncheckedKeyHashSet<RefPtr<SourceProvider>> sourceProviders;
     {
         JSLockHolder locker(m_vm);
@@ -189,6 +188,26 @@ void Debugger::attach(JSGlobalObject* globalObject)
     }
     for (auto& sourceProvider : sourceProviders)
         sourceParsed(globalObject, sourceProvider.get(), -1, nullString());
+}
+
+void Debugger::attach(JSGlobalObject* globalObject)
+{
+#if USE(BUN_JSC_ADDITIONS)
+    if (globalObject->debugger() == this) {
+        // Already attached (e.g. pre-attached for runtime activation before
+        // observers registered). Replay sourceParsed now that observers exist.
+        notifySourceParsedForExistingCode(globalObject);
+        return;
+    }
+#endif
+    ASSERT(!globalObject->debugger());
+    globalObject->setDebugger(this);
+    m_globalObjects.add(globalObject);
+
+    m_vm.setShouldBuildPCToCodeOriginMapping();
+
+    // Call `sourceParsed` after iterating because it will execute JavaScript in Web Inspector.
+    notifySourceParsedForExistingCode(globalObject);
 }
 
 void Debugger::detach(JSGlobalObject* globalObject, ReasonForDetach reason)
