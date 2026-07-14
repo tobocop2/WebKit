@@ -800,11 +800,27 @@ static void promiseFinallyReactionJob(JSGlobalObject* globalObject, VM& vm, JSPr
     context->setHandlerOrContext(vm, valueOrReason);
     context->setPerCellBit(status == JSPromise::Status::Fulfilled);
 
+#if USE(BUN_JSC_ADDITIONS)
+    // PromiseFinallyAwaitJob may run as a later microtask (scheduled below via
+    // performPromiseThenWithInternalMicrotask or
+    // createResolvingFunctionsWithInternalMicrotask), after this call's async
+    // context has been unwound. Capture it with the reaction so that phase 2
+    // can restore it, like PromiseFinallyReactionJob does for phase 1.
+    JSValue scheduledContext = context;
+    if (auto* asyncContextData = globalObject->m_asyncContextData.get()) {
+        JSValue asyncContext = asyncContextData->getInternalField(0);
+        if (!asyncContext.isUndefined())
+            scheduledContext = InternalFieldTuple::create(vm, globalObject->internalFieldTupleStructure(), context, asyncContext);
+    }
+#else
+    JSValue scheduledContext = context;
+#endif
+
     if (result.inherits<JSPromise>()) {
         auto* promise = uncheckedDowncast<JSPromise>(result);
         if (promise->realm() == globalObject && promise->isThenFastAndNonObservable()) {
             scope.release();
-            promise->performPromiseThenWithInternalMicrotask(vm, InternalMicrotask::PromiseFinallyAwaitJob, resultPromise, context);
+            promise->performPromiseThenWithInternalMicrotask(vm, InternalMicrotask::PromiseFinallyAwaitJob, resultPromise, scheduledContext);
             return;
         }
     }
@@ -846,7 +862,7 @@ static void promiseFinallyReactionJob(JSGlobalObject* globalObject, VM& vm, JSPr
         return;
     }
 
-    auto [resolve, reject] = JSPromise::createResolvingFunctionsWithInternalMicrotask(vm, globalObject, InternalMicrotask::PromiseFinallyAwaitJob, context);
+    auto [resolve, reject] = JSPromise::createResolvingFunctionsWithInternalMicrotask(vm, globalObject, InternalMicrotask::PromiseFinallyAwaitJob, scheduledContext);
     scope.release();
     promiseResolveThenableJob(globalObject, resolutionObject, then, resolve, reject);
 }
@@ -2215,7 +2231,39 @@ void runInternalMicrotask(JSGlobalObject* globalObject, VM& vm, InternalMicrotas
         // arguments[0] = unused (we get resultPromise from context)
         // arguments[1] = settled value from onFinally's result
         // arguments[2] = context (JSSlimPromiseReaction: promise=resultPromise, handlerOrContext=originalValue, perCellBit=wasFulfilled)
+        //                OR InternalFieldTuple: [context, asyncContext] when Bun async context is present
         // payload = status of onFinally's result
+#if USE(BUN_JSC_ADDITIONS)
+        JSValue contextArg = arguments[2];
+        JSSlimPromiseReaction* context;
+        JSValue asyncContext = jsUndefined();
+        if (auto* tuple = dynamicDowncast<InternalFieldTuple>(contextArg)) {
+            context = uncheckedDowncast<JSSlimPromiseReaction>(tuple->getInternalField(0));
+            asyncContext = tuple->getInternalField(1);
+        } else {
+            context = uncheckedDowncast<JSSlimPromiseReaction>(contextArg);
+        }
+
+        InternalFieldTuple* asyncContextData = nullptr;
+        JSValue restoreAsyncContext;
+        if (!asyncContext.isUndefined()) {
+            asyncContextData = globalObject->m_asyncContextData.get();
+            if (asyncContextData) {
+                restoreAsyncContext = asyncContextData->getInternalField(0);
+                asyncContextData->putInternalField(vm, 0, asyncContext);
+            }
+        }
+
+        auto* resultPromise = uncheckedDowncast<JSPromise>(context->promise());
+        scope.release();
+        promiseFinallyAwaitJob(resultPromise->realm(), vm,
+            arguments[1],
+            context,
+            static_cast<JSPromise::Status>(payload));
+
+        if (asyncContextData)
+            asyncContextData->putInternalField(vm, 0, restoreAsyncContext);
+#else
         auto* context = uncheckedDowncast<JSSlimPromiseReaction>(arguments[2]);
         auto* resultPromise = uncheckedDowncast<JSPromise>(context->promise());
         scope.release();
@@ -2223,6 +2271,7 @@ void runInternalMicrotask(JSGlobalObject* globalObject, VM& vm, InternalMicrotas
             arguments[1],
             context,
             static_cast<JSPromise::Status>(payload));
+#endif
         return;
     }
 
