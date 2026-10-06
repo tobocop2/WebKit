@@ -237,6 +237,9 @@ void ContentVisibilityDocumentState::updateContentRelevancyForScrollIfNeeded(con
 
     if (RefPtr scrollAnchorRoot = findSkippedContentRoot(scrollAnchor)) {
         updateViewportProximity(*scrollAnchorRoot, ViewportProximity::Near);
+        // Proximity was forced Near out-of-band, so re-sync the observer to re-evaluate after the scroll.
+        if (RefPtr observer = m_observer)
+            observer->resetPreviousThresholdIndexForTarget(*scrollAnchorRoot);
         // Since we may not have determined initial visibility yet, force scheduling the content relevancy update.
         protect(scrollAnchorRoot->document())->scheduleContentRelevancyUpdate(ContentRelevancy::OnScreen);
         protect(scrollAnchorRoot->document())->updateRelevancyOfContentVisibilityElements();
@@ -245,13 +248,14 @@ void ContentVisibilityDocumentState::updateContentRelevancyForScrollIfNeeded(con
 
 void ContentVisibilityDocumentState::updateViewportProximity(const Element& element, ViewportProximity viewportProximity)
 {
+    auto result = m_elementViewportProximities.ensure(element, [] {
+        return ViewportProximity::Far;
+    });
     // No need to schedule content relevancy update for first time call, since
     // that will be handled by determineInitialVisibleContentVisibility.
-    if (m_elementViewportProximities.contains(element))
+    if (!result.isNewEntry)
         protect(element.document())->scheduleContentRelevancyUpdate(ContentRelevancy::OnScreen);
-    m_elementViewportProximities.ensure(element, [] {
-        return ViewportProximity::Far;
-    }).iterator->value = viewportProximity;
+    result.iterator->value = viewportProximity;
 }
 
 void ContentVisibilityDocumentState::removeViewportProximity(const Element& element)

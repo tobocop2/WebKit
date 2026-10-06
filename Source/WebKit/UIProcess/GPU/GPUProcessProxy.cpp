@@ -39,6 +39,8 @@
 #include "OverrideLanguages.h"
 #include "ProcessTerminationReason.h"
 #include "ProvisionalPageProxy.h"
+#include "RemoteMediaSessionManagerProxy.h"
+#include "SecurityFlagsController.h"
 #include "SharedFileHandle.h"
 #include "WebKitServiceNames.h"
 #include "WebPageGroup.h"
@@ -173,6 +175,7 @@ GPUProcessProxy::GPUProcessProxy()
 
     GPUProcessCreationParameters parameters;
     parameters.auxiliaryProcessParameters = auxiliaryProcessParameters();
+    parameters.securityFlags.replaceWith(SecurityFlagsController::singleton().securityFlags());
     parameters.overrideLanguages = overrideLanguages();
 
 #if ENABLE(MEDIA_STREAM)
@@ -205,6 +208,11 @@ GPUProcessProxy::GPUProcessProxy()
 
 #if USE(GBM)
     parameters.drmDevice = drmMainDevice();
+#endif
+
+#if ENABLE(VIDEO) || ENABLE(WEB_AUDIO)
+    if (RefPtr mediaSessionManagerProxy = RemoteMediaSessionManagerProxy::singletonIfCreated())
+        parameters.nowPlayingFallbackSession = mediaSessionManagerProxy->computeNowPlayingFallbackSession();
 #endif
 
 #if PLATFORM(COCOA)
@@ -421,13 +429,13 @@ void GPUProcessProxy::updateSandboxAccess(bool allowAudioCapture, bool allowVide
 #endif // PLATFORM(COCOA)
 }
 
-void GPUProcessProxy::updateCaptureAccess(bool allowAudioCapture, bool allowVideoCapture, bool allowDisplayCapture, WebCore::ProcessIdentifier processID, WebPageProxyIdentifier pageIdentifier, CompletionHandler<void()>&& completionHandler)
+void GPUProcessProxy::updateCaptureAccess(bool allowAudioCapture, bool allowVideoCapture, bool allowDisplayCapture, bool willUseEchoCancellation, WebCore::ProcessIdentifier processID, WebPageProxyIdentifier pageIdentifier, CompletionHandler<void()>&& completionHandler)
 {
     if (allowAudioCapture)
         m_lastPageUsingMicrophone = pageIdentifier;
 
     updateSandboxAccess(allowAudioCapture, allowVideoCapture, allowDisplayCapture);
-    sendWithAsyncReply(Messages::GPUProcess::UpdateCaptureAccess { allowAudioCapture, allowVideoCapture, allowDisplayCapture, processID }, WTF::move(completionHandler));
+    sendWithAsyncReply(Messages::GPUProcess::UpdateCaptureAccess { allowAudioCapture, allowVideoCapture, allowDisplayCapture, willUseEchoCancellation, processID }, WTF::move(completionHandler));
 }
 
 void GPUProcessProxy::updateCaptureOrigin(const WebCore::SecurityOriginData& originData, WebCore::ProcessIdentifier processID)
@@ -546,6 +554,11 @@ void GPUProcessProxy::sharedPreferencesForWebProcessDidChange(WebProcessProxy& w
     sendWithAsyncReply(Messages::GPUProcess::SharedPreferencesForWebProcessDidChange { webProcessProxy.coreProcessIdentifier(), WTF::move(sharedPreferencesForWebProcess) }, WTF::move(completionHandler));
 }
 
+void GPUProcessProxy::securityFlagsDidChange(const SecurityFlags& securityFlags)
+{
+    send(Messages::GPUProcess::SecurityFlagsDidChange { securityFlags }, 0);
+}
+
 void GPUProcessProxy::gpuProcessExited(ProcessTerminationReason reason)
 {
     Ref protectedThis { *this };
@@ -573,6 +586,12 @@ void GPUProcessProxy::gpuProcessExited(ProcessTerminationReason reason)
 
 #if ENABLE(EXTENSION_CAPABILITIES)
     ExtensionCapabilityGranter::invalidateGrants(moveToVector(std::exchange(extensionCapabilityGrants(), { }).values()));
+#endif
+
+#if ENABLE(VIDEO) || ENABLE(WEB_AUDIO)
+    // The election dies with the process, and a replacement starts with no candidates, so it has no owner change
+    // to report. Retire the current owner here or its page keeps claiming the NowPlaying session forever.
+    nowPlayingOwnerDidChange(std::nullopt);
 #endif
 
     if (keptAliveGPUProcessProxy() == this)
@@ -620,7 +639,7 @@ void GPUProcessProxy::didReceiveInvalidMessage(IPC::Connection& connection, IPC:
     WebProcessPool::didReceiveInvalidMessage(messageName);
 
     // Terminate the GPU process.
-    terminate();
+    terminate(messageName);
 
     // Since we've invalidated the connection we'll never get a IPC::Connection::Client::didClose
     // callback so we'll explicitly call it here instead.
@@ -641,7 +660,7 @@ void GPUProcessProxy::didFinishLaunching(ProcessLauncher* launcher, IPC::Connect
     }
 
 #if PLATFORM(COCOA)
-    if (auto networkProcess = NetworkProcessProxy::defaultNetworkProcess())
+    if (RefPtr networkProcess = NetworkProcessProxy::defaultNetworkProcess())
         networkProcess->sendXPCEndpointToProcess(*this);
 #endif
 
@@ -655,9 +674,8 @@ void GPUProcessProxy::didFinishLaunching(ProcessLauncher* launcher, IPC::Connect
         if (!isPowerLoggingInTaskMode())
             return;
         RunLoop::mainSingleton().dispatch([weakThis = WTF::move(weakThis)] () {
-            if (!weakThis)
-                return;
-            weakThis->enablePowerLogging();
+            if (RefPtr protectedThis = weakThis)
+                protectedThis->enablePowerLogging();
         });
     }).get());
 #endif
@@ -762,12 +780,65 @@ void GPUProcessProxy::sendProcessDidResume(ResumeReason)
         send(Messages::GPUProcess::ProcessDidResume(), 0);
 }
 
-void GPUProcessProxy::terminateWebProcess(WebCore::ProcessIdentifier webProcessIdentifier)
+void GPUProcessProxy::terminateWebProcess(WebCore::ProcessIdentifier webProcessIdentifier, IPC::MessageName invalidMessageName)
 {
     RELEASE_LOG_ERROR(Process, "GPUProcessProxy::terminateWebProcess: webProcessIdentifier=%" PRIu64, webProcessIdentifier.toUInt64());
     if (auto process = WebProcessProxy::processForIdentifier(webProcessIdentifier))
-        process->requestTermination(ProcessTerminationReason::RequestedByGPUProcess);
+        process->requestTermination(ProcessTerminationReason::RequestedByGPUProcess, invalidMessageName);
 }
+
+#if ENABLE(VIDEO) || ENABLE(WEB_AUDIO)
+static RefPtr<WebPageProxy> pageForNowPlayingOwner(const WebCore::QualifiedPageIdentifier& owner)
+{
+    RefPtr process = WebProcessProxy::processForIdentifier(owner.processIdentifier());
+    if (!process)
+        return nullptr;
+
+    // Under site isolation a page has a different WebCore::PageIdentifier in each of the processes hosting its
+    // frames, so the identifier only resolves within the process the GPU process saw it in.
+    for (Ref page : process->pages()) {
+        if (page->webPageIDInProcess(*process) == owner.object())
+            return page.ptr();
+    }
+    return nullptr;
+}
+
+void GPUProcessProxy::nowPlayingOwnerDidChange(std::optional<WebCore::QualifiedPageIdentifier> ownerPage)
+{
+    if (m_nowPlayingOwnerPage == ownerPage)
+        return;
+
+    if (auto previousOwnerPage = std::exchange(m_nowPlayingOwnerPage, ownerPage)) {
+        if (RefPtr page = pageForNowPlayingOwner(*previousOwnerPage))
+            page->hasActiveNowPlayingSessionChanged(false);
+    }
+
+    if (ownerPage) {
+        if (RefPtr page = pageForNowPlayingOwner(*ownerPage))
+            page->hasActiveNowPlayingSessionChanged(true);
+    }
+}
+
+void GPUProcessProxy::withdrawNowPlayingCandidatesForPage(WebPageProxy& page)
+{
+    Ref protectedPage { page };
+
+    bool wasOwner = false;
+    page.forEachWebContentProcess([&](auto& process, auto pageID) {
+        WebCore::QualifiedPageIdentifier identifier { pageID, process.coreProcessIdentifier() };
+        wasOwner |= m_nowPlayingOwnerPage == identifier;
+        send(Messages::GPUProcess::WithdrawNowPlayingCandidate(identifier), 0);
+    });
+
+    if (!wasOwner)
+        return;
+
+    // Forget the owner as well, so the election result that follows the withdrawal is reported rather than
+    // dropped as unchanged.
+    m_nowPlayingOwnerPage = std::nullopt;
+    protectedPage->hasActiveNowPlayingSessionChanged(false);
+}
+#endif
 
 #if HAVE(VISIBILITY_PROPAGATION_VIEW)
 void GPUProcessProxy::didCreateContextForVisibilityPropagation(WebPageProxyIdentifier webPageProxyID, WebCore::PageIdentifier pageID, LayerHostingContextID contextID)
@@ -820,13 +891,15 @@ void GPUProcessProxy::updatePreferences(WebProcessProxy& webProcess)
     send(Messages::GPUProcess::UpdateGPUProcessPreferences(gpuPreferences), 0);
 }
 
-void GPUProcessProxy::updateScreenPropertiesIfNeeded()
+void GPUProcessProxy::updateScreenPropertiesIfNeeded(WebProcessPool& processPool)
 {
 #if PLATFORM(MAC)
     if (!canSendMessage())
         return;
 
-    setScreenProperties(collectScreenProperties());
+    setScreenProperties(processPool.cachedScreenProperties());
+#else
+    UNUSED_PARAM(processPool);
 #endif
 }
 

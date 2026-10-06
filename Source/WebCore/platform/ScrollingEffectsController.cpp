@@ -282,12 +282,12 @@ void ScrollingEffectsController::setActiveScrollSnapIndexForAxis(ScrollEventAxis
     m_scrollSnapState->setActiveSnapIndexForAxis(axis, index);
 }
 
-float ScrollingEffectsController::adjustedScrollDestination(ScrollEventAxis axis, FloatPoint destinationOffset, float velocity, std::optional<float> originalOffset) const
+float ScrollingEffectsController::adjustedScrollDestination(ScrollEventAxis axis, FloatPoint destinationOffset, float velocity, std::optional<float> originalOffset, ScrollSnapPointSelectionMethod selectionMethod) const
 {
     if (!usesScrollSnap())
         return axis == ScrollEventAxis::Horizontal ? destinationOffset.x() : destinationOffset.y();
 
-    return m_scrollSnapState->adjustedScrollDestination(axis, destinationOffset, velocity, originalOffset, m_client.scrollExtents(), m_client.pageScaleFactor());
+    return m_scrollSnapState->adjustedScrollDestination(axis, destinationOffset, velocity, originalOffset, m_client.scrollExtents(), m_client.pageScaleFactor(), selectionMethod);
 }
 
 #if !PLATFORM(MAC)
@@ -428,6 +428,20 @@ bool ScrollingEffectsController::handleWheelEvent(const PlatformWheelEvent& whee
         if (!retargetAnimatedScrollBy({ deltaX, deltaY }))
             startAnimatedScrollToDestination(scrollOffset, scrollOffset + FloatSize { deltaX, deltaY });
         return true;
+    }
+#endif
+
+#if ENABLE(COORDINATED_TOUCH_EVENTS)
+    if (m_client.scrollAnimationEnabled() && m_inScrollGesture) {
+        // For precise-delta wheel events, which are dispatched by touchpad or synthesized from touch events,
+        // scroll immediately with immediateScrollBy below.
+        // However, it's not enough for async scrolling while the main thread is busy.
+        // We have to start a scroll animation here to start monitoring the display link.
+        auto destination = scrollOffset;
+        destination.move(FloatSize { deltaX, deltaY });
+        float fromX = std::nextafter(destination.x(), scrollOffset.x());
+        float fromY = std::nextafter(destination.y(), scrollOffset.y());
+        startAnimatedScrollToDestination({ fromX, fromY }, destination);
     }
 #endif
 

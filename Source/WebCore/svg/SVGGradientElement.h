@@ -30,6 +30,8 @@
 
 namespace WebCore {
 
+struct GradientAttributes;
+
 enum SVGSpreadMethodType {
     SVGSpreadMethodUnknown = 0,
     SVGSpreadMethodPad,
@@ -82,6 +84,7 @@ public:
     };
 
     GradientColorStops buildStops();
+    void collectCommonGradientAttributes(GradientAttributes&);
 
     using PropertyRegistry = SVGPropertyOwnerRegistry<SVGGradientElement, SVGElement, SVGURIReference>;
 

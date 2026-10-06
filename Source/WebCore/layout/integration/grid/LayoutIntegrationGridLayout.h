@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include "GridTypeAliases.h"
 #include "LayoutState.h"
 #include <wtf/CheckedPtr.h>
 
@@ -53,14 +54,24 @@ public:
 
     void layout();
 
+    // A GFC layout marks the legacy grid as placed and sets the grid area of each item, but
+    // leaves the rest of the legacy grid state (e.g. its grid matrix) untouched. Reverts that
+    // partial state so a subsequent legacy (non-GFC) layout treats the grid as needing a fresh
+    // layout, for example re-placing items to rebuild its tracks.
+    static void invalidateFormattingContextRootRenderer(RenderGrid&);
+
     std::pair<LayoutUnit, LayoutUnit> computeIntrinsicWidths();
 
     friend WTF::TextStream& operator<<(WTF::TextStream&, const GridLayout&);
 
 private:
-    void updateGridItemRenderers();
-    void updateFormattingContextRootRenderer(const Layout::GridLayoutConstraints&, const Layout::UsedTrackSizes&);
+    using GridItemBorderBoxRects = Vector<LayoutRect, 4>;
+    GridItemBorderBoxRects gridItemBorderBoxRects() const;
+
+    void updateGridItemRenderers(const GridItemBorderBoxRects& previousGridItemRects);
+    void updateFormattingContextRootRenderer(const Layout::GridLayoutConstraints&, const Layout::UsedTrackSizes&, const Layout::GridItemRects&);
     void layoutOutOfFlowBoxes(const Layout::UsedTrackSizes&);
+    void updateOverflow(RenderGrid&);
     void populateGridPositionsForOutOfFlowLayout(const Layout::UsedTrackSizes&);
 
     const Layout::ElementBox& gridBox() const { return *m_gridBox; }

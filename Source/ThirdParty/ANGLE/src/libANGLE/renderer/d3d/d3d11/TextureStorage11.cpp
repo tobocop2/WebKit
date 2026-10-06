@@ -8,11 +8,8 @@
 // classes TextureStorage11_2D and TextureStorage11_Cube, which act as the interface to the D3D11
 // texture.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-#    pragma allow_unsafe_buffers
-#endif
-
 #include "libANGLE/renderer/d3d/d3d11/TextureStorage11.h"
+#include "common/unsafe_buffers.h"
 
 #include <tuple>
 
@@ -240,12 +237,6 @@ angle::Result TextureStorage11::getSRVForSampler(const gl::Context *context,
     // which corresponds to GL level 0)
     mipLevels = std::min(mipLevels, mMipLevels - mTopLevel - effectiveBaseLevel);
 
-    if (mRenderer->getRenderer11DeviceCaps().featureLevel <= D3D_FEATURE_LEVEL_9_3)
-    {
-        ASSERT(!swizzleRequired);
-        ASSERT(mipLevels == 1 || mipLevels == mMipLevels);
-    }
-
     if (swizzleRequired)
     {
         verifySwizzleExists(GetEffectiveSwizzle(textureState));
@@ -402,11 +393,6 @@ angle::Result TextureStorage11::getSRVLevels(const gl::Context *context,
     // Make sure there's 'mipLevels' mipmap levels below the base level (offset by the top level,
     // which corresponds to GL level 0)
     mipLevels = std::min(mipLevels, mMipLevels - mTopLevel - baseLevel);
-
-    if (mRenderer->getRenderer11DeviceCaps().featureLevel <= D3D_FEATURE_LEVEL_9_3)
-    {
-        ASSERT(mipLevels == 1 || mipLevels == mMipLevels);
-    }
 
     // TODO(jmadill): Assert we don't need to drop stencil.
 
@@ -694,30 +680,7 @@ angle::Result TextureStorage11::copySubresourceLevel(const gl::Context *context,
 
     // D3D11 can't perform partial CopySubresourceRegion on depth/stencil textures, so pSrcBox
     // should be nullptr.
-    D3D11_BOX srcBox;
     D3D11_BOX *pSrcBox = nullptr;
-    if (mRenderer->getRenderer11DeviceCaps().featureLevel <= D3D_FEATURE_LEVEL_9_3)
-    {
-        GLsizei width  = region.width;
-        GLsizei height = region.height;
-        d3d11::MakeValidSize(false, mFormatInfo.texFormat, &width, &height, nullptr);
-
-        // Keep srcbox as nullptr if we're dealing with tiny mips of compressed textures.
-        if (width == region.width && height == region.height)
-        {
-            // However, D3D10Level9 doesn't always perform CopySubresourceRegion correctly unless
-            // the source box is specified. This is okay, since we don't perform
-            // CopySubresourceRegion on depth/stencil textures on 9_3.
-            ASSERT(mFormatInfo.dsvFormat == DXGI_FORMAT_UNKNOWN);
-            srcBox.left   = region.x;
-            srcBox.right  = region.x + region.width;
-            srcBox.top    = region.y;
-            srcBox.bottom = region.y + region.height;
-            srcBox.front  = region.z;
-            srcBox.back   = region.z + region.depth;
-            pSrcBox       = &srcBox;
-        }
-    }
 
     deviceContext->CopySubresourceRegion(dstTexture.get(), dstSubresource, region.x, region.y,
                                          region.z, srcTexture->get(), srcSubresource, pSrcBox);
@@ -892,13 +855,14 @@ angle::Result TextureStorage11::setData(const gl::Context *context,
             context11,
             context->getScratchBuffer(checkedNeededSize.ValueOrDie<size_t>(), &conversionBuffer));
         loadFunctionInfo.loadFunction(mRenderer->getDisplay()->getImageLoadContext(), width, height,
-                                      depth, pixelData + srcSkipBytes, srcRowPitch, srcDepthPitch,
-                                      conversionBuffer->data(), bufferRowPitch, bufferDepthPitch);
+                                      depth, ANGLE_UNSAFE_TODO(pixelData + srcSkipBytes),
+                                      srcRowPitch, srcDepthPitch, conversionBuffer->data(),
+                                      bufferRowPitch, bufferDepthPitch);
         data = conversionBuffer->data();
     }
     else
     {
-        data             = pixelData + srcSkipBytes;
+        data             = ANGLE_UNSAFE_TODO(pixelData + srcSkipBytes);
         bufferRowPitch   = srcRowPitch;
         bufferDepthPitch = srcDepthPitch;
     }
@@ -1036,7 +1000,7 @@ void TextureStorage11_2D::onLabelUpdate()
 
 angle::Result TextureStorage11_2D::onDestroy(const gl::Context *context)
 {
-    angle::Result result = angle::Result::Continue;
+    angle::ResultAccumulator result = angle::Result::Continue;
     for (unsigned i = 0; i < gl::IMPLEMENTATION_MAX_TEXTURE_LEVELS; i++)
     {
         if (mAssociatedImages[i] != nullptr)
@@ -1045,10 +1009,7 @@ angle::Result TextureStorage11_2D::onDestroy(const gl::Context *context)
 
             // We must let the Images recover their data before we delete it from the
             // TextureStorage.
-            if (IsError(mAssociatedImages[i]->recoverFromAssociatedStorage(context)))
-            {
-                result = angle::Result::Stop;
-            }
+            result = mAssociatedImages[i]->recoverFromAssociatedStorage(context);
         }
     }
     ANGLE_TRY(result);
@@ -1214,15 +1175,6 @@ angle::Result TextureStorage11_2D::getRenderTarget(const gl::Context *context,
     const int level = index.getLevelIndex();
     ASSERT(level >= 0 && level < getLevelCount());
 
-    // In GL ES 2.0, the application can only render to level zero of the texture (Section 4.4.3 of
-    // the GLES 2.0 spec, page 113 of version 2.0.25). Other parts of TextureStorage11_2D could
-    // create RTVs on non-zero levels of the texture (e.g. generateMipmap).
-    // On Feature Level 9_3, this is unlikely to be useful. The renderer can't create SRVs on the
-    // individual levels of the texture, so methods like generateMipmap can't do anything useful
-    // with non-zero-level RTVs. Therefore if level > 0 on 9_3 then there's almost certainly
-    // something wrong.
-    ASSERT(
-        !(mRenderer->getRenderer11DeviceCaps().featureLevel <= D3D_FEATURE_LEVEL_9_3 && level > 0));
     ASSERT(outRT);
     if (mRenderTarget[level])
     {
@@ -1441,9 +1393,8 @@ TextureStorage11_External::TextureStorage11_External(
 {
     ASSERT(stream->getProducerType() == egl::Stream::ProducerType::D3D11Texture);
     auto *producer = static_cast<StreamProducerD3DTexture *>(stream->getImplementation());
-    mTexture.set(producer->getD3DTexture(), mFormatInfo);
+    mTexture.set(angle::ComPtr<ID3D11Texture2D>(producer->getD3DTexture()), mFormatInfo);
     mSubresourceIndex = producer->getArraySlice();
-    mTexture.get()->AddRef();
     mMipLevels = 1;
 
     D3D11_TEXTURE2D_DESC desc;
@@ -1977,7 +1928,7 @@ TextureStorage11_Cube::TextureStorage11_Cube(Renderer11 *renderer,
 
 angle::Result TextureStorage11_Cube::onDestroy(const gl::Context *context)
 {
-    angle::Result result = angle::Result::Continue;
+    angle::ResultAccumulator result = angle::Result::Continue;
     for (unsigned int level = 0; level < gl::IMPLEMENTATION_MAX_TEXTURE_LEVELS; level++)
     {
         for (unsigned int face = 0; face < gl::kCubeFaceCount; face++)
@@ -1988,10 +1939,7 @@ angle::Result TextureStorage11_Cube::onDestroy(const gl::Context *context)
 
                 // We must let the Images recover their data before we delete it from the
                 // TextureStorage.
-                if (IsError(mAssociatedImages[face][level]->recoverFromAssociatedStorage(context)))
-                {
-                    result = angle::Result::Stop;
-                }
+                result = mAssociatedImages[face][level]->recoverFromAssociatedStorage(context);
             }
         }
     }
@@ -2490,7 +2438,7 @@ TextureStorage11_3D::TextureStorage11_3D(Renderer11 *renderer,
 
 angle::Result TextureStorage11_3D::onDestroy(const gl::Context *context)
 {
-    angle::Result result = angle::Result::Continue;
+    angle::ResultAccumulator result = angle::Result::Continue;
     for (unsigned i = 0; i < gl::IMPLEMENTATION_MAX_TEXTURE_LEVELS; i++)
     {
         if (mAssociatedImages[i] != nullptr)
@@ -2499,10 +2447,7 @@ angle::Result TextureStorage11_3D::onDestroy(const gl::Context *context)
 
             // We must let the Images recover their data before we delete it from the
             // TextureStorage.
-            if (IsError(mAssociatedImages[i]->recoverFromAssociatedStorage(context)))
-            {
-                result = angle::Result::Stop;
-            }
+            result = mAssociatedImages[i]->recoverFromAssociatedStorage(context);
         }
     }
 
@@ -2870,7 +2815,7 @@ TextureStorage11_2DArray::TextureStorage11_2DArray(Renderer11 *renderer,
 
 angle::Result TextureStorage11_2DArray::onDestroy(const gl::Context *context)
 {
-    angle::Result result = angle::Result::Continue;
+    angle::ResultAccumulator result = angle::Result::Continue;
     for (auto iter : mAssociatedImages)
     {
         if (iter.second)
@@ -2879,10 +2824,7 @@ angle::Result TextureStorage11_2DArray::onDestroy(const gl::Context *context)
 
             // We must let the Images recover their data before we delete it from the
             // TextureStorage.
-            if (IsError(iter.second->recoverFromAssociatedStorage(context)))
-            {
-                result = angle::Result::Stop;
-            }
+            result = iter.second->recoverFromAssociatedStorage(context);
         }
     }
     mAssociatedImages.clear();
@@ -2898,9 +2840,9 @@ void TextureStorage11_2DArray::associateImage(Image11 *image, const gl::ImageInd
     const GLint layerTarget = index.getLayerIndex();
     const GLint numLayers   = index.getLayerCount();
 
-    ASSERT(0 <= level && level < getLevelCount());
+    ASSERT(0 <= level && level < gl::IMPLEMENTATION_MAX_TEXTURE_LEVELS);
 
-    if (0 <= level && level < getLevelCount())
+    if (0 <= level && level < gl::IMPLEMENTATION_MAX_TEXTURE_LEVELS)
     {
         LevelLayerRangeKey key(level, layerTarget, numLayers);
         mAssociatedImages[key] = image;
@@ -3814,8 +3756,7 @@ angle::Result TextureStorage11_Buffer::initTexture(const gl::Context *context)
         ANGLE_TRY(buffer11->getBuffer(context, rx::BufferUsage::BUFFER_USAGE_TYPED_UAV, &buffer,
                                       &feedback));
         mBuffer.get()->applyImplFeedback(context, feedback);
-        mTexture.set(buffer, mFormatInfo);
-        mTexture.get()->AddRef();
+        mTexture.set(angle::ComPtr<ID3D11Buffer>(buffer), mFormatInfo);
     }
     return angle::Result::Continue;
 }

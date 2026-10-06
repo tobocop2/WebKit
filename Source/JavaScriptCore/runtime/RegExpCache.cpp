@@ -45,7 +45,8 @@ RegExp* RegExpCache::lookup(VM&, const WTF::String& patternString, OptionSet<Yar
     return m_weakCache.get(key);
 }
 
-RegExp* RegExpCache::lookupOrCreate(VM& vm, const String& patternString, OptionSet<Yarr::Flags> flags)
+template<typename Create>
+RegExp* RegExpCache::lookupOrCreate(VM& vm, const String& patternString, OptionSet<Yarr::Flags> flags, const Create& create)
 {
     RegExpKey key(flags, patternString);
     {
@@ -54,16 +55,33 @@ RegExp* RegExpCache::lookupOrCreate(VM& vm, const String& patternString, OptionS
             return regExp;
     }
 
-    RegExp* regExp = RegExp::createWithoutCaching(vm, patternString, flags);
+    RegExp* regExp = create();
 #if ENABLE(REGEXP_TRACING)
     vm.addRegExpToTrace(regExp);
 #endif
+
+    if (!regExp->isValid())
+        return regExp;
 
     {
         Locker locker { m_lock };
         weakAdd(m_weakCache, key, Weak<RegExp>(regExp, this));
         return regExp;
     }
+}
+
+RegExp* RegExp::createFromCache(VM& vm, const String& patternString, OptionSet<Yarr::Flags> flags, unsigned numSubpatterns, String&& atom, Yarr::SpecificPattern specificPattern)
+{
+    return vm.regExpCache()->lookupOrCreate(vm, patternString, flags, [&] {
+        RegExp* regExp = new (NotNull, allocateCell<RegExp>(vm)) RegExp(vm, patternString, flags);
+        regExp->finishCreationFromCache(vm, numSubpatterns, WTF::move(atom), specificPattern);
+        return regExp;
+    });
+}
+
+RegExp* RegExpCache::lookupOrCreate(VM& vm, const String& patternString, OptionSet<Yarr::Flags> flags)
+{
+    return lookupOrCreate(vm, patternString, flags, [&] { return RegExp::createWithoutCaching(vm, patternString, flags); });
 }
 
 RegExp* RegExpCache::ensureEmptyRegExpSlow(VM& vm)
@@ -101,6 +119,19 @@ void RegExpCache::deleteAllCode()
     for (auto& [key, weakHandle] : m_weakCache) {
         RegExp* regExp = weakHandle.get();
         if (!regExp) // Skip zombies.
+            continue;
+        regExp->deleteCode();
+    }
+}
+
+// A RegExp that has matched since the last full collection began keeps its code; the others compile again when they
+// next match.
+void RegExpCache::deleteCodeNotUsedInCurrentFullCollectionCycle(VM& vm)
+{
+    Locker locker { m_lock };
+    for (auto& [key, weakHandle] : m_weakCache) {
+        RegExp* regExp = weakHandle.get();
+        if (!regExp || regExp->wasUsedInCurrentFullCollectionCycle(vm))
             continue;
         regExp->deleteCode();
     }

@@ -49,6 +49,12 @@ class Sampler;
 class State;
 class Texture;
 
+enum class EnsureInitializedLevels
+{
+    BaseOnly,
+    AllEnabledLevels,
+};
+
 constexpr GLuint kInitialMaxLevel = 1000;
 
 bool IsMipmapFiltered(GLenum minFilterMode);
@@ -202,7 +208,27 @@ class TextureState final : private angle::NonCopyable
 
     GLenum getSurfaceCompressionFixedRate() const { return mCompressionFixedRate; }
 
-    const ImageIndex &getEGLImageSourceIndex() const { return mEGLImageSourceIndex; }
+    const egl::ImageSourceAttributes &getEGLImageSourceAttributes() const
+    {
+        return mEGLImageSourceAttributes;
+    }
+
+    OwnerImageIndex toOwnerIndex(const ImageIndex &index) const
+    {
+        return mEGLImageSourceAttributes.toOwnerIndex(index);
+    }
+    OwnerLevel toOwnerLevel(LevelIndex level) const
+    {
+        return mEGLImageSourceAttributes.toOwnerLevel(level);
+    }
+    OwnerLayer toOwnerLayer(LayerIndex layer) const
+    {
+        return mEGLImageSourceAttributes.toOwnerLayer(layer);
+    }
+    OwnerLayer toOwnerDepth(const Offset &offset) const
+    {
+        return mEGLImageSourceAttributes.toOwnerDepth(offset);
+    }
 
   private:
     // Texture needs access to the ImageDesc functions.
@@ -304,10 +330,11 @@ class TextureState final : private angle::NonCopyable
     // GL_EXT_texture_compression_astc_decode_mode_rgb9e5
     GLenum mAstcDecodePrecision;
 
-    // Only valid if this texture is an "EGLImage target" and the associated EGL Image was
-    // originally sourced from an OpenGL texture. Such EGL Images can be a slice of the underlying
-    // resource. The layer and level offsets are used to track the location of the slice.
-    ImageIndex mEGLImageSourceIndex;
+    // |mEGLImageSourceAttributes.type| is only valid if this texture is an "EGLImage target" and
+    // the associated EGL Image was originally sourced from an OpenGL texture.  Such EGL Images can
+    // be a slice of the underlying resource.  The level and layer offset are used to track the
+    // location of the slice.
+    egl::ImageSourceAttributes mEGLImageSourceAttributes;
 };
 
 bool operator==(const TextureState &a, const TextureState &b);
@@ -696,7 +723,7 @@ class Texture final : public RefCountObject<TextureID>,
     GLuint getId() const override;
 
     // Needed for robust resource init.
-    angle::Result ensureInitialized(const Context *context);
+    angle::Result ensureInitialized(const Context *context, EnsureInitializedLevels levels);
     InitState initState(GLenum binding, const ImageIndex &imageIndex) const override;
     InitState initState() const { return mState.mInitState; }
     void setInitState(GLenum binding, const ImageIndex &imageIndex, InitState initState) override;
@@ -713,7 +740,7 @@ class Texture final : public RefCountObject<TextureID>,
         return false;
     }
 
-    bool isEGLImageSource(const ImageIndex &index) const;
+    bool isEGLImageSource(const OwnerImageIndex &index) const;
 
     bool isDepthOrStencil() const
     {

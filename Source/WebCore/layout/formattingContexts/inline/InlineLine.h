@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Apple Inc. All rights reserved.
+ * Copyright (C) 2019-2026 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -62,9 +62,8 @@ public:
 
     void setContentNeedsBidiReordering() { m_hasNonDefaultBidiLevelRun = true; }
 
-    enum class IncludeInsideListMarker : bool { No, Yes };
-    bool hasContent(IncludeInsideListMarker = IncludeInsideListMarker::No) const;
-    bool hasContentOrDecoration(IncludeInsideListMarker = IncludeInsideListMarker::No) const;
+    bool hasContent() const;
+    bool hasContentOrDecoration() const;
     bool hasRubyContent() const { return m_hasRubyContent; }
 
     InlineLayoutUnit contentLogicalWidth() const { return m_contentLogicalWidth; }
@@ -99,8 +98,7 @@ public:
             SoftLineBreak,
             WordBreakOpportunity,
             AtomicInlineBox,
-            ListMarkerInside,
-            ListMarkerOutside,
+            ListMarker,
             InlineBoxStart,
             InlineBoxEnd,
             LineSpanningInlineBoxStart,
@@ -112,9 +110,8 @@ public:
         bool isNonBreakingSpace() const { return m_type == Type::NonBreakingSpace; }
         bool isWordSeparator() const { return m_type == Type::WordSeparator; }
         bool isAtomicInlineBox() const { return m_type == Type::AtomicInlineBox; }
-        bool isListMarker() const { return isListMarkerInside() || isListMarkerOutside(); }
-        bool isListMarkerInside() const { return m_type == Type::ListMarkerInside; }
-        bool isListMarkerOutside() const { return m_type == Type::ListMarkerOutside; }
+        bool isListMarker() const { return m_type == Type::ListMarker; }
+        bool isListMarkerOrItsContent() const;
         bool isLineBreak() const { return isHardLineBreak() || isSoftLineBreak(); }
         bool isSoftLineBreak() const  { return m_type == Type::SoftLineBreak; }
         bool isHardLineBreak() const { return m_type == Type::HardLineBreak; }
@@ -210,19 +207,23 @@ public:
         InlineLayoutUnit NODELETE trailingLetterSpacing() const;
         InlineLayoutUnit NODELETE removeTrailingLetterSpacing();
 
+        // Members are ordered by descending alignment to minimize padding.
+        // 8-byte aligned:
         TrailingWhitespace m_trailingWhitespace { };
-        Type m_type { Type::Text };
-        Line::ShapingBoundary m_shapingBoundary { Line::ShapingBoundary::NotApplicable };
-        InlineLayoutUnit m_logicalLeft { 0 };
         Markable<size_t> m_lastNonWhitespaceContentStart { };
-        InlineLayoutUnit m_logicalWidth { 0 };
-        UBiDiLevel m_bidiLevel { UBIDI_DEFAULT_LTR };
-        InlineLayoutUnit m_textSpacingAdjustment { 0 };
-        GlyphOverflow m_glyphOverflow;
         const Box* m_layoutBox { nullptr };
         const Style::ComputedStyle& m_style;
-        InlineDisplay::Box::Expansion m_expansion;
         Text m_textContent;
+        // 4-byte aligned:
+        InlineLayoutUnit m_logicalLeft { 0 };
+        InlineLayoutUnit m_logicalWidth { 0 };
+        InlineLayoutUnit m_textSpacingAdjustment { 0 };
+        InlineDisplay::Box::Expansion m_expansion;
+        // 1-byte:
+        Type m_type { Type::Text };
+        Line::ShapingBoundary m_shapingBoundary { Line::ShapingBoundary::NotApplicable };
+        UBiDiLevel m_bidiLevel { UBIDI_DEFAULT_LTR };
+        GlyphOverflow m_glyphOverflow;
     };
     using RunList = Vector<Run, 1>;
     const RunList& runs() const LIFETIME_BOUND { return m_runs; }
@@ -335,12 +336,10 @@ private:
     Vector<InlineLayoutUnit> m_inlineBoxLogicalLeftStack;
 };
 
-inline bool Line::hasContent(IncludeInsideListMarker includeInsideListMarker) const
+inline bool Line::hasContent() const
 {
     if (m_runs.isEmpty())
         return false;
-    if (includeInsideListMarker == IncludeInsideListMarker::Yes && m_runs.first().isListMarkerInside())
-        return true;
     for (auto& run : m_runs | std::views::reverse) {
         if (run.isContentful() && !run.isListMarker())
             return true;

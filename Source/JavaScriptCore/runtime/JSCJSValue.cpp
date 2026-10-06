@@ -42,8 +42,6 @@ bool JSValue::isHeapBigIntSlow() const
     return isHeapBigInt();
 }
 
-constinit const char radixDigits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
-
 double JSValue::toIntegerPreserveNaN(JSGlobalObject* globalObject) const
 {
     if (isInt32())
@@ -185,17 +183,26 @@ JSValue JSValue::toThisSloppySlowCase(JSGlobalObject* globalObject) const
     return toObject(globalObject);
 }
 
-JSObject* JSValue::synthesizePrototype(JSGlobalObject* globalObject) const
+static NEVER_INLINE JSObject* throwNotAnObjectErrorForSynthesizePrototype(JSGlobalObject* globalObject, JSValue value)
 {
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
+    ASSERT(value.isUndefinedOrNull());
+    throwException(globalObject, scope, createNotAnObjectError(globalObject, value));
+    return nullptr;
+}
 
+JSObject* JSValue::synthesizePrototype(JSGlobalObject* globalObject) const
+{
     if (isCell()) {
         if (isString())
             return globalObject->stringPrototype();
         if (isHeapBigInt())
             return globalObject->bigIntPrototype();
-        ASSERT(isSymbol());
+        // A cell that is not a primitive does not get here. In particular not one of the sentinel cells that op_iterator_open leaves in
+        // frame registers: those are not values, and one that got out must not pass for a Symbol. (What this comparison costs a Symbol,
+        // keeping the throw out of line saves every caller.)
+        RELEASE_ASSERT(isSymbol());
         return globalObject->symbolPrototype();
     }
 
@@ -208,9 +215,7 @@ JSObject* JSValue::synthesizePrototype(JSGlobalObject* globalObject) const
         return globalObject->bigIntPrototype();
 #endif
 
-    ASSERT(isUndefinedOrNull());
-    throwException(globalObject, scope, createNotAnObjectError(globalObject, *this));
-    return nullptr;
+    return throwNotAnObjectErrorForSynthesizePrototype(globalObject, *this);
 }
 
 // https://tc39.es/ecma262/#sec-ordinaryset
@@ -274,18 +279,7 @@ void JSValue::dumpInContextAssumingStructure(
     else if (isInt32())
         out.printf("Int32: %d", asInt32());
     else if (isDouble()) {
-#if USE(JSVALUE64)
         out.printf("Double: %lld, %lf", (long long)reinterpretDoubleToInt64(asDouble()), asDouble());
-#else
-        WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
-        union {
-            double asDouble;
-            uint32_t asTwoInt32s[2];
-        } u;
-        u.asDouble = asDouble();
-        out.printf("Double: %08x:%08x, %lf", u.asTwoInt32s[1], u.asTwoInt32s[0], asDouble());
-        WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
-#endif
     } else if (isCell()) {
         if (structure->classInfoForCells()->isSubClassOf(JSString::info())) {
             JSString* string = asString(asCell());
@@ -325,9 +319,7 @@ void JSValue::dumpInContextAssumingStructure(
             out.print("Cell: ", RawPointer(asCell()));
             out.print(" (", inContext(*structure, context), ")");
         }
-#if USE(JSVALUE64)
         out.print(", StructureID: ", asCell()->structureID().bits());
-#endif
     } else if (isTrue())
         out.print("True");
     else if (isFalse())

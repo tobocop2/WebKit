@@ -136,7 +136,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
         int32_t m_int32;
         size_t m_size;
         OptionRange m_optionRange;
-        const char* m_optionString;
+        const char8_t* m_optionString;
         GCLogging::Level m_gcLogLevel;
         OSLogType m_osLogType;
     };
@@ -265,13 +265,13 @@ std::optional<OptionsStorage::OptionRange> parse(const char* string)
 template<>
 std::optional<OptionsStorage::OptionString> parse(const char* string)
 {
-    const char* value = nullptr;
+    const char8_t* value = nullptr;
     if (!strlen(string))
         return value;
 
     // FIXME <https://webkit.org/b/169057>: This could leak if this option is set more than once.
     // Given that Options are typically used for testing, this isn't considered to be a problem.
-    value = WTF::fastStrDup(string);
+    value = byteCast<char8_t>(WTF::fastStrDup(string));
     return value;
 }
 
@@ -422,7 +422,7 @@ bool Options::overrideAliasedOptionWithHeuristic(const char* name)
         return false;
 
     auto aliasedOption = makeString(unsafeSpan(&name[4]), '=', unsafeSpan(stringValue));
-    if (Options::setOption(aliasedOption.utf8().data()))
+    if (Options::setOption(aliasedOption.utf8().legacyCStringPointer()))
         return true;
 
     fprintf(stderr, "WARNING: failed to parse %s=%s\n", name, stringValue);
@@ -439,7 +439,10 @@ unsigned Options::computeNumberOfWorkerThreads(int maxNumberOfWorkerThreads, int
 
     // Be paranoid, it is the OS we're dealing with, after all.
     ASSERT(cpusToUse >= 1);
-    return std::max(cpusToUse, minimum);
+    cpusToUse = std::max(cpusToUse, minimum);
+    if constexpr (!isDarwin())
+        return std::min(cpusToUse, 32);
+    return cpusToUse;
 }
 
 int32_t Options::computePriorityDeltaOfWorkerThreads(int32_t twoCorePriorityDelta, int32_t multiCorePriorityDelta)
@@ -560,6 +563,15 @@ static void scaleJITPolicy()
 static void disableAllSignalHandlerBasedOptions();
 #endif
 
+#if OS(DARWIN) && CPU(ARM64)
+static unsigned numberOfSuperAndPerformanceCores()
+{
+    if (int32_t coresOverride = Options::numberOfSuperAndPerformanceCoresOverride(); coresOverride > 0)
+        return coresOverride;
+    return hwNumberOfCores(CoreCategory::Super) + hwNumberOfCores(CoreCategory::Performance);
+}
+#endif
+
 static void overrideDefaults()
 {
 #if OS(DARWIN)
@@ -582,7 +594,31 @@ static void overrideDefaults()
     }
 
 #if OS(DARWIN) && CPU(ARM64)
-    Options::numberOfGCMarkers() = std::min<unsigned>(4, kernTCSMAwareNumberOfProcessorCores());
+    {
+        // Example topologies.
+        //           Super  Performance  Efficiency   GC
+        // M1            0            4           4    6
+        // M1 Pro        0            6           2    6
+        // M1 Max        0            8           2    7
+        // M1 Ultra      0           16           4    7
+        // M4            0          3-4         4-6  6-7
+        // M4 Pro        0         8-10           4    7
+        // M4 Max        0        10-12           4    7
+        // M5            0          3-4           6    7
+        // M5 Pro      5-6        10-12           0    7
+        // M5 Max        6           12           0    7
+        // A18           0            2           4    4
+        unsigned performanceCores = numberOfSuperAndPerformanceCores();
+        unsigned efficiencyCores = hwNumberOfCores(CoreCategory::Efficiency);
+        unsigned gcMarkers = 0;
+        if (performanceCores < 3)
+            gcMarkers = std::min<unsigned>(4, kernTCSMAwareNumberOfProcessorCores());
+        else if ((performanceCores + efficiencyCores) < 9)
+            gcMarkers = std::min<unsigned>(6, kernTCSMAwareNumberOfProcessorCores());
+        else
+            gcMarkers = std::min<unsigned>(7, kernTCSMAwareNumberOfProcessorCores());
+        Options::numberOfGCMarkers() = gcMarkers;
+    }
 
     Options::minNumberOfWorklistThreads() = 1;
     Options::maxNumberOfWorklistThreads() = std::min<unsigned>(4, kernTCSMAwareNumberOfProcessorCores());
@@ -596,13 +632,16 @@ static void overrideDefaults()
     Options::worklistFTLLoadWeight() = 20;
 #endif
 
-#if OS(LINUX) && CPU(ARM)
-    Options::maximumFunctionForCallInlineCandidateBytecodeCostForDFG() = 77;
-    Options::maximumOptimizationCandidateBytecodeCost() = 42403;
-    Options::maximumFunctionForClosureCallInlineCandidateBytecodeCostForDFG() = 68;
-    Options::maximumInliningCallerBytecodeCost() = 9912;
-    Options::maximumInliningDepth() = 8;
-    Options::maximumInliningRecursion() = 3;
+#if PLATFORM(MAC) && CPU(ARM64)
+    // JIT compilation can contribute to thermal load on Apple silicon Macs with few fast cores.
+    constexpr unsigned maxPerformanceCoresForThresholdScaling = 2;
+    if (numberOfSuperAndPerformanceCores() <= maxPerformanceCoresForThresholdScaling) {
+        Options::thresholdForOptimizeAfterWarmUp() *= Options::dfgThresholdScaleForFewPerformanceCores();
+        Options::thresholdForOptimizeAfterLongWarmUp() *= Options::dfgThresholdScaleForFewPerformanceCores();
+        Options::thresholdForOptimizeSoon() *= Options::dfgThresholdScaleForFewPerformanceCores();
+        Options::thresholdForFTLOptimizeAfterWarmUp() *= Options::ftlThresholdScaleForFewPerformanceCores();
+        Options::thresholdForFTLOptimizeSoon() *= Options::ftlThresholdScaleForFewPerformanceCores();
+    }
 #endif
 
 #if USE(MEMORY_FOOTPRINT_API)
@@ -802,9 +841,7 @@ void Options::notifyOptionsChanged()
     Options::forceUnlinkedDFG() = false;
     Options::useWasmSIMD() = false;
     Options::useWasmIPInt() = false;
-#if !CPU(ARM_THUMB2)
     Options::useBBQJIT() = false;
-#endif
 #endif
 
 #if !CPU(ARM64)
@@ -825,12 +862,6 @@ void Options::notifyOptionsChanged()
 
     if (!Options::useWasmIPInt())
         Options::thresholdForBBQOptimizeAfterWarmUp() = 0; // Trigger immediate BBQ tier up.
-
-#if CPU(ARM_THUMB2)
-    // WasmIPInt is not supported on ARM32, so disable wasm if BBQJIT is disabled.
-    if (Options::useWasm() && !Options::useBBQJIT())
-        Options::useWasm() = false;
-#endif
 
 #if ENABLE(WEBASSEMBLY)
 #if CPU(ARM64)
@@ -1059,40 +1090,43 @@ void Options::initializeWithOptionsCustomization(const ScopedLambda<void()>& opt
 
             // Allow environment vars to override options if applicable.
             // The env var should be the name of the option prefixed with
-            // "JSC_".
+            // "JSC_". An embedder with its own configuration surface can opt
+            // out with Config::disableEnvironmentOptions().
+            if (!g_jscConfig.environmentOptionsDisabled) {
 #if PLATFORM(COCOA) || OS(LINUX)
-            bool hasBadOptions = false;
+                bool hasBadOptions = false;
 #if PLATFORM(COCOA)
-            char** envp = *_NSGetEnviron();
+                char** envp = *_NSGetEnviron();
 #else
-            char** envp = environ;
+                char** envp = environ;
 #endif
 
-            for (; *envp; envp++) {
-                const char* env = *envp;
-                if (!strncmp("JSC_", env, 4)) {
-                    if (!Options::setOption(&env[4])) {
-                        dataLog("ERROR: invalid option: ", *envp, "\n");
-                        hasBadOptions = true;
+                for (; *envp; envp++) {
+                    const char* env = *envp;
+                    if (!strncmp("JSC_", env, 4)) {
+                        if (!Options::setOption(&env[4])) {
+                            dataLog("ERROR: invalid option: ", *envp, "\n");
+                            hasBadOptions = true;
+                        }
                     }
                 }
-            }
-            if (hasBadOptions && Options::validateOptions())
-                CRASH();
+                if (hasBadOptions && Options::validateOptions())
+                    CRASH();
 #endif // PLATFORM(COCOA) || OS(LINUX)
 
 #if !PLATFORM(COCOA)
 #define OVERRIDE_OPTION_WITH_HEURISTICS(type_, name_, defaultValue_, availability_, description_) \
-            overrideOptionWithHeuristic(name_(), name_##ID, "JSC_" #name_, Availability::availability_);
-            FOR_EACH_JSC_OPTION(OVERRIDE_OPTION_WITH_HEURISTICS)
+                overrideOptionWithHeuristic(name_(), name_##ID, "JSC_" #name_, Availability::availability_);
+                FOR_EACH_JSC_OPTION(OVERRIDE_OPTION_WITH_HEURISTICS)
 #undef OVERRIDE_OPTION_WITH_HEURISTICS
 
 #define OVERRIDE_ALIASED_OPTION_WITH_HEURISTICS(aliasedName_, unaliasedName_, equivalence_) \
-            overrideAliasedOptionWithHeuristic("JSC_" #aliasedName_);
-            FOR_EACH_JSC_ALIASED_OPTION(OVERRIDE_ALIASED_OPTION_WITH_HEURISTICS)
+                overrideAliasedOptionWithHeuristic("JSC_" #aliasedName_);
+                FOR_EACH_JSC_ALIASED_OPTION(OVERRIDE_ALIASED_OPTION_WITH_HEURISTICS)
 #undef OVERRIDE_ALIASED_OPTION_WITH_HEURISTICS
 
 #endif // !PLATFORM(COCOA)
+            }
 
 #if 0
                 ; // Deconfuse editors that do auto indentation
@@ -1299,7 +1333,7 @@ bool Options::setAliasedOption(const char* arg, bool verify)
                 return false;                                           \
             unaliasedOption = makeString(unaliasedOption, '=', invertedValueStr); \
         }                                                               \
-        return setOptionWithoutAlias(unaliasedOption.utf8().data(), verify);    \
+        return setOptionWithoutAlias(unaliasedOption.utf8().legacyCStringPointer(), verify);    \
     }
 
     FOR_EACH_JSC_ALIASED_OPTION(FOR_EACH_OPTION)
@@ -1347,7 +1381,7 @@ void Options::dumpAllOptions(DumpLevel level, ASCIILiteral title)
 {
     StringBuilder builder;
     dumpAllOptions(builder, level, title, { }, "   "_s, "\n"_s, DumpDefaults);
-    dataLog(builder.toString().utf8().data());
+    dataLog(builder.toString());
 }
 
 void Options::dumpOption(StringBuilder& builder, DumpLevel level, Options::ID id,
@@ -1471,7 +1505,7 @@ void Option::dump(StringBuilder& builder) const
         builder.append(unsafeSpan(m_optionRange.rangeString()));
         break;
     case Options::Type::OptionString:
-        builder.append('"', m_optionString ? unsafeSpan(m_optionString) : ""_span, '"');
+        builder.append('"', unsafeSpan(m_optionString), '"');
         break;
     case Options::Type::GCLogLevel:
         builder.append(m_gcLogLevel);
@@ -1500,7 +1534,7 @@ bool Option::operator==(const Option& other) const
         return m_optionRange.rangeString() == other.m_optionRange.rangeString();
     case Options::Type::OptionString:
         return (m_optionString == other.m_optionString)
-            || (m_optionString && other.m_optionString && !strcmp(m_optionString, other.m_optionString));
+            || (m_optionString && other.m_optionString && equalSpans(unsafeSpan(m_optionString), unsafeSpan(other.m_optionString)));
     case Options::Type::GCLogLevel:
         return m_gcLogLevel == other.m_gcLogLevel;
     case Options::Type::OSLogType:

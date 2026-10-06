@@ -173,12 +173,18 @@ void ShadowRoot::childrenChanged(const ChildChange& childChange)
     case ChildChange::Type::ElementRemoved:
         protect(m_host)->invalidateStyleForSubtree();
         break;
+    case ChildChange::Type::ElementMovedFrom:
+    case ChildChange::Type::ElementMovedInto:
     case ChildChange::Type::TextInserted:
     case ChildChange::Type::TextRemoved:
     case ChildChange::Type::TextChanged:
+    case ChildChange::Type::TextMovedFrom:
+    case ChildChange::Type::TextMovedInto:
     case ChildChange::Type::AllChildrenRemoved:
     case ChildChange::Type::NonContentsChildRemoved:
     case ChildChange::Type::NonContentsChildInserted:
+    case ChildChange::Type::NonContentsChildMovedFrom:
+    case ChildChange::Type::NonContentsChildMovedInto:
     case ChildChange::Type::AllChildrenReplaced:
         break;
     }
@@ -234,7 +240,7 @@ ExceptionOr<void> ShadowRoot::replaceChildrenWithMarkup(const String& markup, Op
         return { };
     }
 
-    auto fragment = createFragmentForInnerOuterHTML(*protect(host()), markup, policy, protect(customElementRegistry()));
+    auto fragment = createFragmentForInnerOuterHTML(*protect(host()), markup, policy, protect(customElementRegistry()), usesNullCustomElementRegistry() ? Element::CustomElementRegistryKind::Null : Element::CustomElementRegistryKind::Window);
     if (fragment.hasException())
         return fragment.releaseException();
     bool usedFastPath = fragment.returnValue()->hasWasParsedWithFastPath();

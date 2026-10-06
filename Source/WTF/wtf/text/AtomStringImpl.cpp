@@ -307,6 +307,24 @@ Ref<AtomStringImpl> AtomStringImpl::addLiteral(std::span<const Latin1Character> 
     return addToStringTable<Latin1Buffer, BufferFromStaticDataTranslator<Latin1Character>>(buffer);
 }
 
+#if USE(BUN_JSC_ADDITIONS)
+Ref<AtomStringImpl> AtomStringImpl::addWithoutCopying(HashTranslatorCharBuffer<Latin1Character>& buffer)
+{
+    ASSERT(isValidPrecomputedHash(buffer.hash));
+    if (buffer.characters.empty())
+        return *uncheckedDowncast<AtomStringImpl>(StringImpl::empty());
+    return addToStringTable<Latin1Buffer, BufferFromStaticDataTranslator<Latin1Character>>(buffer);
+}
+
+Ref<AtomStringImpl> AtomStringImpl::addWithoutCopying(HashTranslatorCharBuffer<char16_t>& buffer)
+{
+    ASSERT(isValidPrecomputedHash(buffer.hash));
+    if (buffer.characters.empty())
+        return *uncheckedDowncast<AtomStringImpl>(StringImpl::empty());
+    return addToStringTable<UTF16Buffer, BufferFromStaticDataTranslator<char16_t>>(buffer);
+}
+#endif
+
 static Ref<AtomStringImpl> addSymbol(AtomStringTableLocker& locker, StringTableImpl& atomStringTable, StringImpl& base)
 {
     ASSERT(base.length());
@@ -444,6 +462,13 @@ Ref<AtomStringImpl> AtomStringImpl::addSlowCase(AtomStringTable& stringTable, St
     }
 
     return *uncheckedDowncast<AtomStringImpl>(addResult.iterator->get());
+}
+
+void AtomStringImpl::reserveCapacityForCurrentThread(unsigned additionalCount)
+{
+    AtomStringTableLocker locker;
+    auto& table = stringTable();
+    table.reserveCapacity(table.size() + additionalCount);
 }
 
 // When removing a string from the table, we know it's already the one in the table, so no need for a string equality check.

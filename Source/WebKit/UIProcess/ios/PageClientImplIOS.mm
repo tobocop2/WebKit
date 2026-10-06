@@ -74,6 +74,7 @@
 #import "WebPreferences.h"
 #import "WebProcessProxy.h"
 #import "_WKDownloadInternal.h"
+#import <ImageIO/ImageIO.h>
 #import <WebCore/AXObjectCache.h>
 #import <WebCore/Color.h>
 #import <WebCore/Cursor.h>
@@ -90,6 +91,7 @@
 #import <WebCore/ShareData.h>
 #import <WebCore/SharedBuffer.h>
 #import <WebCore/TextIndicator.h>
+#import <WebCore/UTIRegistry.h>
 #import <WebCore/ValidationBubble.h>
 #import <wtf/BlockPtr.h>
 #import <wtf/cocoa/Entitlements.h>
@@ -238,7 +240,7 @@ bool PageClientImpl::isVisuallyIdle()
     return !isActiveViewVisible();
 }
 
-WebCore::DestinationColorSpace PageClientImpl::colorSpace()
+WebCore::ColorSpace PageClientImpl::colorSpace()
 {
     if (!m_colorSpace)
         m_colorSpace = screenColorSpace(nullptr);
@@ -418,6 +420,11 @@ WebCore::FloatRect PageClientImpl::documentRect() const
     return [contentView() bounds];
 }
 
+WebCore::InteractiveWidgetValue PageClientImpl::viewportMetaTagInteractiveWidget() const
+{
+    return [webView() _viewportMetaTagInteractiveWidget];
+}
+
 void PageClientImpl::setCursor(const Cursor& cursor)
 {
     // The Web process may have asked to change the cursor when the view was in an active window, but
@@ -469,14 +476,21 @@ bool PageClientImpl::interpretKeyEvent(const NativeWebKeyboardEvent& event, KeyE
     return [contentView() _interpretKeyEvent:protect(event.nativeEvent()).get() withContext:WTF::move(context)];
 }
 
-void PageClientImpl::positionInformationDidChange(const InteractionInformationAtPosition& info)
+void PageClientImpl::positionInformationDidChange(const InteractionInformationAtPosition& info, std::optional<WebCore::FrameIdentifier> frameID)
 {
-    [contentView() _positionInformationDidChange:info];
+    [contentView() _positionInformationDidChange:info fromFrame:frameID];
 }
 
-void PageClientImpl::saveImageToLibrary(Ref<SharedBuffer>&& imageBuffer)
+void PageClientImpl::saveImageToLibrary(const Ref<SharedBuffer>& imageBuffer)
 {
-    RetainPtr<NSData> imageData = imageBuffer->createNSData();
+    RetainPtr<NSData> imageData = toNSData(imageBuffer->span());
+    RetainPtr source = adoptCF(CGImageSourceCreateWithData((__bridge CFDataRef)imageData.get(), nullptr));
+    if (!source)
+        return;
+    RetainPtr type = CGImageSourceGetType(source.get());
+    if (!type || !WebCore::isSupportedImageType(type.get()))
+        return;
+
     UIImageDataWriteToSavedPhotosAlbum(imageData.get(), nil, NULL, NULL);
 }
 
@@ -812,6 +826,11 @@ void PageClientImpl::elementDidBlur()
     [contentView() _elementDidBlur];
 }
 
+bool PageClientImpl::hasFocusedElement() const
+{
+    return [contentView() _hasFocusedElement];
+}
+
 void PageClientImpl::focusedElementDidChangeInputMode(WebCore::InputMode mode)
 {
     [contentView() _didUpdateInputMode:mode];
@@ -858,7 +877,7 @@ void PageClientImpl::showContactPicker(WebCore::ContactsRequestData&& requestDat
 }
 
 #if ENABLE(WEB_AUTHN)
-void PageClientImpl::showDigitalCredentialsChooser(const WebCore::DigitalCredentialsRequestData& requestData, WTF::CompletionHandler<void(Expected<WebCore::DigitalCredentialsResponseData, WebCore::ExceptionData>&&)>&& completionHandler)
+void PageClientImpl::showDigitalCredentialsChooser(const WebCore::DigitalCredentialsRequestData& requestData, WTF::CompletionHandler<void(std::expected<WebCore::DigitalCredentialsResponseData, WebCore::ExceptionData>&&)>&& completionHandler)
 {
     [contentView() _showDigitalCredentialsChooser:requestData completionHandler:WTF::move(completionHandler)];
 }
@@ -1458,7 +1477,7 @@ void PageClientImpl::removeAnyPDFPageNumberIndicator()
 
 #endif
 
-void PageClientImpl::showCaptionDisplaySettings(WebCore::HTMLMediaElementIdentifier identifier, const WebCore::ResolvedCaptionDisplaySettingsOptions& options, CompletionHandler<void(Expected<void, WebCore::ExceptionData>&&)>&& completionHandler)
+void PageClientImpl::showCaptionDisplaySettings(WebCore::HTMLMediaElementIdentifier identifier, const WebCore::ResolvedCaptionDisplaySettingsOptions& options, CompletionHandler<void(std::expected<void, WebCore::ExceptionData>&&)>&& completionHandler)
 {
 #if USE(UICONTEXTMENU)
     [contentView() showCaptionDisplaySettingsMenu:identifier withOptions:options completionHandler:WTF::move(completionHandler)];

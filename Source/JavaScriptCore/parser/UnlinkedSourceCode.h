@@ -36,7 +36,7 @@ namespace JSC {
     class UnlinkedSourceCode {
         template<typename SourceType>
         friend class CachedUnlinkedSourceCodeShape;
-        friend class CachedSourceCodeWithoutProvider;
+        friend class CachedFunctionExecutableRareData;
 
     public:
         UnlinkedSourceCode()
@@ -92,7 +92,7 @@ namespace JSC {
             return m_provider->getRange(m_startOffset, m_endOffset);
         }
         
-        CString toUTF8() const;
+        UTF8CString toUTF8() const;
         
         bool isNull() const { return !m_provider; }
         int startOffset() const { return m_startOffset; }

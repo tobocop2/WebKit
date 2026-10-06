@@ -43,6 +43,7 @@
 #include <wtf/RunLoop.h>
 #include <wtf/Scope.h>
 #include <wtf/TZoneMallocInlines.h>
+#include <wtf/text/MakeString.h>
 
 #if PLATFORM(COCOA)
 #include "CoreIPCSecureCoding.h"
@@ -67,6 +68,28 @@
 #include "WebPageProxyMessages.h"
 
 namespace WebKit {
+
+// This class wraps a ProcessThrottlerActivity - which is not thread safe - to guarantee its destruction
+// is run on the main thread no matter which thread the wrapper is destroyed on.
+class MainThreadActivityReleaser {
+public:
+    explicit MainThreadActivityReleaser(Ref<ProcessThrottler::Activity>&& activity)
+        : m_activity(WTF::move(activity)) { }
+    MainThreadActivityReleaser(MainThreadActivityReleaser&&) = default;
+    MainThreadActivityReleaser& operator=(MainThreadActivityReleaser&&) = default;
+    MainThreadActivityReleaser(const MainThreadActivityReleaser&) = delete;
+    MainThreadActivityReleaser& operator=(const MainThreadActivityReleaser&) = delete;
+
+    ~MainThreadActivityReleaser()
+    {
+        if (!m_activity || isMainRunLoop())
+            return;
+        RunLoop::mainSingleton().dispatch([activity = WTF::move(m_activity)] { });
+    }
+
+private:
+    RefPtr<ProcessThrottler::Activity> m_activity;
+};
 
 static HashMap<IPC::Connection::UniqueID, WeakPtr<AuxiliaryProcessProxy>>& NODELETE connectionToProcessMap()
 {
@@ -192,7 +215,7 @@ void AuxiliaryProcessProxy::connect()
     m_processLauncher = ProcessLauncher::create(this, WTF::move(launchOptions));
 }
 
-void AuxiliaryProcessProxy::terminate()
+void AuxiliaryProcessProxy::terminate(std::optional<IPC::MessageName> invalidMessageName)
 {
     RELEASE_LOG(Process, "AuxiliaryProcessProxy::terminate: PID=%d", processID());
 
@@ -201,14 +224,18 @@ void AuxiliaryProcessProxy::terminate()
 
 #if PLATFORM(COCOA) && !USE(EXTENSIONKIT_PROCESS_TERMINATION)
     if (RefPtr connection = m_connection) {
-        if (connection->kill())
+        if (connection->kill(invalidMessageName))
             return;
     }
 #endif
 
     // FIXME: We should really merge process launching into IPC connection creation and get rid of the process launcher.
-    if (RefPtr processLauncher = m_processLauncher)
-        processLauncher->terminateProcess();
+    if (RefPtr processLauncher = m_processLauncher) {
+        String terminationReason;
+        if (invalidMessageName)
+            terminationReason = makeString("Received invalid IPC message: "_s, IPC::description(*invalidMessageName));
+        processLauncher->terminateProcess(terminationReason);
+    }
 }
 
 String AuxiliaryProcessProxy::stateString() const
@@ -286,11 +313,11 @@ bool AuxiliaryProcessProxy::sendMessageImpl(UniqueRef<IPC::Encoder>&& encoder, O
                 };
             },
             [&](IPC::Connection::AsyncReplyHandlerWithDispatcher& handler) {
-                // The handler runs on the dispatcher, so the activity must be released on the main thread separately.
+                // Wrap the activity in a MainThreadActivityReleaser so the activity destruction can be scheduled
+                // on the main thread whether or not the completion handler is actually called.
                 auto inner = WTF::move(handler.completionHandler);
-                handler.completionHandler = { [activity = WTF::move(activity), inner = WTF::move(inner)](IPC::Connection* connection, std::unique_ptr<IPC::Decoder>&& decoder) mutable {
+                handler.completionHandler = { [activityReleaser = MainThreadActivityReleaser { WTF::move(activity) }, inner = WTF::move(inner)](IPC::Connection* connection, std::unique_ptr<IPC::Decoder>&& decoder) mutable {
                     inner(connection, WTF::move(decoder));
-                    RunLoop::mainSingleton().dispatch([activity = WTF::move(activity)] { });
                 }, CompletionHandlerCallThread::AnyThread };
             });
     }
@@ -439,7 +466,7 @@ void AuxiliaryProcessProxy::didFinishLaunching(ProcessLauncher* launcher, IPC::C
 #if USE(RUNNINGBOARD)
     protect(throttler())->didConnectToProcess(*this);
 #if PLATFORM(MAC)
-    m_boostedJetsamAssertion = ProcessAssertion::create(*this, "Jetsam Boost"_s, ProcessAssertionType::BoostedJetsam);
+    updateJetsamBoostAssertion();
 #endif
 #if USE(EXTENSIONKIT)
     ASSERT(launcher);
@@ -486,6 +513,9 @@ void AuxiliaryProcessProxy::shutDownProcess()
 {
     auto scopeExit = WTF::makeScopeExit([protectedThis = Ref { *this }] {
         protect(protectedThis->throttler())->didDisconnectFromProcess();
+#if USE(RUNNINGBOARD) && PLATFORM(MAC)
+        protectedThis->m_boostedJetsamAssertion = nullptr;
+#endif
     });
 
     switch (state()) {
@@ -677,6 +707,28 @@ void AuxiliaryProcessProxy::setRunningBoardThrottlingEnabled()
 bool AuxiliaryProcessProxy::runningBoardThrottlingEnabled()
 {
     return !m_lifetimeActivity;
+}
+
+void AuxiliaryProcessProxy::setJetsamBoostEnabled(bool enabled)
+{
+    if (m_isJetsamBoostEnabled == enabled)
+        return;
+    m_isJetsamBoostEnabled = enabled;
+
+    updateJetsamBoostAssertion();
+    protect(throttler())->setShouldBackgroundActivitiesUseIdleJetsamBand(!enabled);
+}
+
+void AuxiliaryProcessProxy::updateJetsamBoostAssertion()
+{
+    bool shouldHoldAssertion = m_isJetsamBoostEnabled && processID();
+    if (shouldHoldAssertion == !!m_boostedJetsamAssertion)
+        return;
+
+    if (shouldHoldAssertion)
+        m_boostedJetsamAssertion = ProcessAssertion::create(*this, "Jetsam Boost"_s, ProcessAssertionType::BoostedJetsam);
+    else
+        m_boostedJetsamAssertion = nullptr;
 }
 #endif
 

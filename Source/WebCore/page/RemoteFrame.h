@@ -79,7 +79,7 @@ public:
 
     String renderTreeAsText(size_t baseIndent, OptionSet<RenderAsTextFlag>);
     void bindRemoteAccessibilityFrames(int processIdentifier, AccessibilityRemoteToken, CompletionHandler<void(AccessibilityRemoteToken, int)>&&);
-    void updateRemoteFrameAccessibilityOffset(IntPoint);
+    void updateRemoteFrameOffsetInMainFrame(IntPoint);
 #if ENABLE(ACCESSIBILITY_LOCAL_FRAME)
     void updateRemoteFrameAccessibilityInheritedState(const InheritedFrameState&);
 #endif
@@ -102,6 +102,9 @@ public:
     void setAutoplayPolicy(AutoplayPolicy autoplayPolicy) { m_autoplayPolicy = autoplayPolicy; }
     AutoplayPolicy NODELETE autoplayPolicy() const final;
 
+    void setColorSchemePreference(ColorSchemePreference colorSchemePreference) { m_colorSchemePreference = colorSchemePreference; }
+    ColorSchemePreference NODELETE colorSchemePreference() const final;
+
     void updateScrollingMode() final;
     void reportMixedContentViolation(bool blocked, const URL& target) const final;
     void addResourceTimingFromChild(ResourceTiming&&);
@@ -123,7 +126,7 @@ private:
     SecurityOrigin* NODELETE frameDocumentSecurityOrigin() const final;
     std::optional<DocumentSecurityPolicy> NODELETE frameDocumentSecurityPolicy() const final;
     String NODELETE frameURLProtocol() const final;
-    float usedZoomForChild(const Frame&) const final;
+    float frameScaleFactorForChild(const Frame&) const final;
 
     FrameView* NODELETE virtualView() const final;
     void disconnectView() final;
@@ -142,6 +145,7 @@ private:
     OptionSet<AdvancedPrivacyProtections> m_advancedPrivacyProtections;
     bool m_allowPrivacyProxy { true };
     AutoplayPolicy m_autoplayPolicy;
+    ColorSchemePreference m_colorSchemePreference;
     bool m_preventsParentFromBeingComplete { true };
 };
 

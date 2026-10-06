@@ -281,7 +281,7 @@ public:
     }
 
     OptionSet<Extension>& enabledExtensions() LIFETIME_BOUND { return m_enabledExtensions; }
-    OptionSet<LanguageFeature> requiredFeatures() { return m_requiredFeatures; }
+    OptionSet<LanguageFeature>& requiredFeatures() LIFETIME_BOUND { return m_requiredFeatures; }
     bool containsOverrideID(uint32_t idValue) const
     {
         return m_pipelineOverrideIds.contains(idValue);
@@ -291,6 +291,8 @@ public:
         m_pipelineOverrideIds.add(idValue);
     }
     bool hasFeature(const String& featureName) const { return m_configuration.supportedFeatures.contains(featureName); }
+
+    using OverrideValidator = Function<std::optional<Error>(const HashMap<String, ConstantValue>&)>;
 
     template<typename Validator>
     void addOverrideValidation(Validator&& validator)
@@ -349,7 +351,7 @@ private:
     std::optional<CallGraph> m_callGraph;
     Vector<std::function<void()>> m_replacements;
     HashSet<uint32_t, DefaultHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>> m_pipelineOverrideIds;
-    Vector<Function<std::optional<Error>(const HashMap<String, ConstantValue>&)>> m_overrideValidations;
+    Vector<OverrideValidator> m_overrideValidations;
     HashMap<String, OverloadedDeclaration> m_overloadedOperations;
     Vector<AST::Variable*> m_overrides;
 };

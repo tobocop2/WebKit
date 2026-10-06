@@ -107,8 +107,11 @@ void GStreamerVideoEncoder::create(const String& codecName, const VideoEncoder::
     });
 }
 
-Expected<Ref<GStreamerVideoEncoder>, String> GStreamerVideoEncoder::create(const String& codecName, const VideoEncoder::Config& config, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
+std::expected<Ref<GStreamerVideoEncoder>, String> GStreamerVideoEncoder::create(const String& codecName, const VideoEncoder::Config& config, DescriptionCallback&& descriptionCallback, OutputCallback&& outputCallback)
 {
+    if (!ensureGStreamerInitialized()) [[unlikely]]
+        return makeUnexpected("GStreamer initialization failed"_s);
+
     static std::once_flag debugRegisteredFlag;
     std::call_once(debugRegisteredFlag, [] {
         GST_DEBUG_CATEGORY_INIT(webkit_video_encoder_debug, "webkitvideoencoder", 0, "WebKit WebCodecs Video Encoder");
@@ -150,6 +153,14 @@ Ref<VideoEncoder::EncodePromise> GStreamerVideoEncoder::encode(RawFrame&& frame,
         encoder->harness()->processOutputSamples();
         return EncodePromise::createAndResolve();
     });
+}
+
+bool GStreamerVideoEncoder::encodeSync(RawFrame&& frame, bool shouldGenerateKeyFrame)
+{
+    auto result = m_internalEncoder->encode(WTF::move(frame), shouldGenerateKeyFrame);
+    if (result)
+        m_internalEncoder->harness()->processOutputSamples();
+    return result;
 }
 
 Ref<GenericPromise> GStreamerVideoEncoder::flush()
@@ -326,8 +337,8 @@ bool GStreamerInternalVideoEncoder::encode(VideoEncoder::RawFrame&& rawFrame, bo
     auto orientation = makeString(gstVideoFrame.isMirrored() ? "flip-"_s : ""_s, "rotate-"_s, gstVideoFrame.rotation());
     if (orientation != m_orientation) {
         auto orientationCString = orientation.utf8();
-        GST_DEBUG_OBJECT(m_harness->element(), "New orientation: %s", orientationCString.data());
-        GRefPtr tags = adoptGRef(gst_tag_list_new(GST_TAG_IMAGE_ORIENTATION, orientationCString.data(), nullptr));
+        GST_DEBUG_OBJECT(m_harness->element(), "New orientation: %s", orientationCString.legacyCStringPointer());
+        GRefPtr tags = adoptGRef(gst_tag_list_new(GST_TAG_IMAGE_ORIENTATION, orientationCString.legacyCStringPointer(), nullptr));
         GRefPtr event = adoptGRef(gst_event_new_tag(tags.leakRef()));
         m_harness->storeStickyEvent(event);
         m_orientation = WTF::move(orientation);

@@ -91,7 +91,7 @@
 #include <wtf/unicode/CharacterNames.h>
 
 #if ENABLE(PDFJS)
-#include "PDFDocument.h"
+#include "PDFJSDocument.h"
 #endif
 
 #if ENABLE(SERVICE_CONTROLS)
@@ -214,14 +214,14 @@ static void prepareContextForQRCode(ContextMenuContext& context)
     if (!frame)
         return;
 
-    RefPtr nodeSnapshotImageBuffer = snapshotNode(*frame, *element, { { }, PixelFormat::BGRA8, DestinationColorSpace::SRGB() });
+    RefPtr nodeSnapshotImageBuffer = snapshotNode(*frame, *element, { { }, PixelFormat::BGRA8, ColorSpace::SRGB() });
     RefPtr nodeSnapshotImage = BitmapImage::create(ImageBuffer::sinkIntoNativeImage(WTF::move(nodeSnapshotImageBuffer)));
     context.setPotentialQRCodeNodeSnapshotImage(nodeSnapshotImage.get());
 
     // FIXME: Node snapshotting does not take transforms into account, making it unreliable for QR code detection.
     // As a fallback, also take a viewport-level snapshot. A node snapshot is still required to capture partially
     // obscured elements. This workaround can be removed once rdar://87204215 is fixed.
-    auto viewportSnapshotImageBuffer = snapshotFrameRect(*frame, elementRect, { { }, PixelFormat::BGRA8, DestinationColorSpace::SRGB() });
+    auto viewportSnapshotImageBuffer = snapshotFrameRect(*frame, elementRect, { { }, PixelFormat::BGRA8, ColorSpace::SRGB() });
     RefPtr viewportSnapshotImage = BitmapImage::create(ImageBuffer::sinkIntoNativeImage(WTF::move(viewportSnapshotImageBuffer)));
     context.setPotentialQRCodeViewportSnapshotImage(viewportSnapshotImage.get());
 }
@@ -508,7 +508,7 @@ void ContextMenuController::contextMenuItemSelected(ContextMenuAction action, co
 
             RefPtr document = frame->document();
             ASSERT(document);
-            Ref command = ReplaceSelectionCommand::create(*document, createFragmentFromMarkup(*document, title, emptyString()), replaceOptions);
+            Ref command = ReplaceSelectionCommand::create(*document, createFragmentFromMarkup(*document, title, emptyString()), replaceOptions, EditAction::InsertReplacement);
             command->apply();
             protect(frame->selection())->revealSelection({ SelectionRevealMode::Reveal, ScrollAlignment::alignToEdgeIfNeeded });
         }
@@ -1064,7 +1064,7 @@ void ContextMenuController::populate()
     ContextMenuItem ShareMenuItem(ContextMenuItemType::Action, ContextMenuItemTagShareMenu, emptyString());
 #endif
 
-#if ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
+#if ENABLE(IMAGE_ANALYSIS)
     ContextMenuItem copySubjectItem { ContextMenuItemType::Action, ContextMenuItemTagCopySubject, contextMenuItemTagCopySubject() };
 #endif
 
@@ -1160,7 +1160,7 @@ void ContextMenuController::populate()
                 appendItem(CopyImageItem, m_contextMenu.get());
 
                 if (image && !image->isAnimated()) {
-#if ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
+#if ENABLE(IMAGE_ANALYSIS)
                     if (m_client->supportsCopySubject())
                         appendItem(copySubjectItem, m_contextMenu.get());
 #endif
@@ -1223,7 +1223,7 @@ void ContextMenuController::populate()
             
             RefPtr page = frame->page();
             RefPtr ownerElement = frame->ownerElement();
-            bool isPDFDocument = ownerElement && ownerElement->document().isPDFDocument();
+            bool isPDFJSDocument = ownerElement && ownerElement->document().isPDFJSDocument();
             bool isMainFrame = frame->isMainFrame();
 
             if (m_context.hitTestResult().isSelected()) {
@@ -1289,7 +1289,7 @@ void ContextMenuController::populate()
 #endif
                 }
 
-                if (page && !isMainFrame && !isPDFDocument) 
+                if (page && !isMainFrame && !isPDFJSDocument)
                     appendItem(OpenFrameItem, m_contextMenu.get());
                 if (!ShareMenuItem.isNull()) {
                     appendItem(*separatorItem(), m_contextMenu.get());
@@ -1297,7 +1297,7 @@ void ContextMenuController::populate()
                 }
             }
 #if ENABLE(PDFJS)
-            if (isPDFDocument) {
+            if (isPDFJSDocument) {
                 if (m_contextMenu && !m_contextMenu->items().isEmpty())
                     appendItem(*separatorItem(), m_contextMenu.get());
                 appendItem(PDFAutoSizeItem, m_contextMenu.get());
@@ -1521,7 +1521,7 @@ void ContextMenuController::addDebuggingItems()
     ASSERT(page->inspectorController().enabled());
 
 #if ENABLE(PDFJS)
-    if (RefPtr ownerElement = frame->ownerElement(); ownerElement && ownerElement->document().isPDFDocument())
+    if (RefPtr ownerElement = frame->ownerElement(); ownerElement && ownerElement->document().isPDFJSDocument())
         return;
 #endif
 
@@ -1946,7 +1946,7 @@ void ContextMenuController::showImageControlsMenu(Event& event)
 
 void ContextMenuController::performPDFJSAction(LocalFrame& frame, const String& action)
 {
-    if (RefPtr document = dynamicDowncast<PDFDocument>(frame.ownerElement()->document()))
+    if (RefPtr document = dynamicDowncast<PDFJSDocument>(frame.ownerElement()->document()))
         document->postMessageToIframe(action, nullptr);
 }
 

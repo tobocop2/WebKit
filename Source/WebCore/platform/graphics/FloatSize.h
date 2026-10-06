@@ -130,9 +130,20 @@ public:
         return !length ? *this : scaled(1.0f / length);
     }
 
+    FloatSize directionScaledBy(float length) const
+    {
+        return normalized().scaled(length);
+    }
+
     constexpr FloatSize perpendicular() const
     {
         return { -m_height, m_width };
+    }
+
+    // The z component of the 3D cross product of the two sizes taken as vectors in the z = 0 plane.
+    constexpr float cross(const FloatSize& a) const
+    {
+        return m_width * a.height() - m_height * a.width();
     }
 
     constexpr float diagonalLengthSquared() const

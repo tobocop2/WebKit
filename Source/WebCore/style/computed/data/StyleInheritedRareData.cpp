@@ -40,6 +40,7 @@ InheritedRareData::InheritedRareData()
     , textStrokeColor(ComputedStyle::initialTextStrokeColor())
     , textFillColor(ComputedStyle::initialTextFillColor())
     , textEmphasisColor(ComputedStyle::initialTextEmphasisColor())
+    , colorForHighlight(Color::currentColor())
     , visitedLinkTextStrokeColor(ComputedStyle::initialTextStrokeColor())
     , visitedLinkTextFillColor(ComputedStyle::initialTextFillColor())
     , visitedLinkTextEmphasisColor(ComputedStyle::initialTextEmphasisColor())
@@ -60,6 +61,8 @@ InheritedRareData::InheritedRareData()
 #endif
     , listStyleType(ComputedStyle::initialListStyleType())
     , blockEllipsis(ComputedStyle::initialBlockEllipsis())
+    , borderHorizontalSpacing(ComputedStyle::initialBorderHorizontalSpacing())
+    , borderVerticalSpacing(ComputedStyle::initialBorderVerticalSpacing())
     , textIndent(ComputedStyle::initialTextIndent())
     , listStyleImage(ComputedStyle::initialListStyleImage())
     , dynamicRangeLimit(ComputedStyle::initialDynamicRangeLimit())
@@ -73,14 +76,13 @@ InheritedRareData::InheritedRareData()
     , lineGrid(ComputedStyle::initialLineGrid())
     , tabSize(ComputedStyle::initialTabSize())
     , strokeMiterLimit(ComputedStyle::initialStrokeMiterLimit())
-#if ENABLE(TEXT_AUTOSIZING)
     , textSizeAdjust(ComputedStyle::initialTextSizeAdjust())
-#endif
     , mathDepth(ComputedStyle::initialMathDepth())
     , textBoxEdge(ComputedStyle::initialTextBoxEdge())
     , lineFitEdge(ComputedStyle::initialLineFitEdge())
     , widows(ComputedStyle::initialWidows())
     , orphans(ComputedStyle::initialOrphans())
+    , internalHyphenateLimitCharsWord(ComputedStyle::initialInternalHyphenateLimitCharsWord())
     , hyphenateLimitBefore(ComputedStyle::initialHyphenateLimitBefore())
     , hyphenateLimitAfter(ComputedStyle::initialHyphenateLimitAfter())
     , hyphenateLimitLines(ComputedStyle::initialHyphenateLimitLines())
@@ -91,7 +93,8 @@ InheritedRareData::InheritedRareData()
     , overflowWrap(static_cast<unsigned>(ComputedStyle::initialOverflowWrap()))
     , nbspMode(static_cast<unsigned>(NBSPMode::Normal))
     , lineBreak(static_cast<unsigned>(LineBreak::Auto))
-    , userSelect(static_cast<unsigned>(ComputedStyle::initialUserSelect()))
+    , webkitUserSelect(static_cast<unsigned>(ComputedStyle::initialWebkitUserSelect()))
+    , usedUserSelect(static_cast<unsigned>(UserSelect::Text))
     , speakAs(ComputedStyle::initialSpeakAs().toRaw())
     , hyphens(static_cast<unsigned>(Hyphens::Manual))
     , textCombine(static_cast<unsigned>(ComputedStyle::initialTextCombine()))
@@ -114,6 +117,7 @@ InheritedRareData::InheritedRareData()
     , rubyAlign(static_cast<unsigned>(ComputedStyle::initialRubyAlign()))
     , rubyOverhang(static_cast<unsigned>(ComputedStyle::initialRubyOverhang()))
     , textZoom(static_cast<unsigned>(ComputedStyle::initialTextZoom()))
+    , interpolateSize(static_cast<unsigned>(ComputedStyle::initialInterpolateSize()))
 #if ENABLE(WEBKIT_TOUCH_CALLOUT_CSS_PROPERTY)
     , touchCallout(static_cast<unsigned>(ComputedStyle::initialTouchCallout()))
 #endif
@@ -125,13 +129,16 @@ InheritedRareData::InheritedRareData()
     , hasExplicitlySetStrokeColor(false)
     , effectiveInert(false)
     , effectivelyTransparent(false)
+    , effectiveWrapInsideAvoid(false)
     , isInSubtreeWithBlendMode(false)
     , isForceHidden(false)
     , usedContentVisibility(static_cast<unsigned>(ContentVisibility::Visible))
     , autoRevealsWhenFound(false)
     , insideDefaultButton(false)
     , insideSubmitButton(false)
-    , evaluationTimeZoomEnabled(true)
+#if ENABLE(SMART_IMAGE_RESIZER)
+    , isAffectedBySmartImageResizer(false)
+#endif
 #if HAVE(CORE_MATERIAL)
     , usedAppleVisualEffectForSubtree(static_cast<unsigned>(AppleVisualEffect::None))
 #endif
@@ -146,6 +153,7 @@ inline InheritedRareData::InheritedRareData(const InheritedRareData& o)
     , textStrokeColor(o.textStrokeColor)
     , textFillColor(o.textFillColor)
     , textEmphasisColor(o.textEmphasisColor)
+    , colorForHighlight(o.colorForHighlight)
     , visitedLinkTextStrokeColor(o.visitedLinkTextStrokeColor)
     , visitedLinkTextFillColor(o.visitedLinkTextFillColor)
     , visitedLinkTextEmphasisColor(o.visitedLinkTextEmphasisColor)
@@ -166,6 +174,8 @@ inline InheritedRareData::InheritedRareData(const InheritedRareData& o)
 #endif
     , listStyleType(o.listStyleType)
     , blockEllipsis(o.blockEllipsis)
+    , borderHorizontalSpacing(o.borderHorizontalSpacing)
+    , borderVerticalSpacing(o.borderVerticalSpacing)
     , textIndent(o.textIndent)
     , listStyleImage(o.listStyleImage)
     , dynamicRangeLimit(o.dynamicRangeLimit)
@@ -179,14 +189,13 @@ inline InheritedRareData::InheritedRareData(const InheritedRareData& o)
     , lineGrid(o.lineGrid)
     , tabSize(o.tabSize)
     , strokeMiterLimit(o.strokeMiterLimit)
-#if ENABLE(TEXT_AUTOSIZING)
     , textSizeAdjust(o.textSizeAdjust)
-#endif
     , mathDepth(o.mathDepth)
     , textBoxEdge(o.textBoxEdge)
     , lineFitEdge(o.lineFitEdge)
     , widows(o.widows)
     , orphans(o.orphans)
+    , internalHyphenateLimitCharsWord(o.internalHyphenateLimitCharsWord)
     , hyphenateLimitBefore(o.hyphenateLimitBefore)
     , hyphenateLimitAfter(o.hyphenateLimitAfter)
     , hyphenateLimitLines(o.hyphenateLimitLines)
@@ -197,7 +206,8 @@ inline InheritedRareData::InheritedRareData(const InheritedRareData& o)
     , overflowWrap(o.overflowWrap)
     , nbspMode(o.nbspMode)
     , lineBreak(o.lineBreak)
-    , userSelect(o.userSelect)
+    , webkitUserSelect(o.webkitUserSelect)
+    , usedUserSelect(o.usedUserSelect)
     , speakAs(o.speakAs)
     , hyphens(o.hyphens)
     , textCombine(o.textCombine)
@@ -220,6 +230,7 @@ inline InheritedRareData::InheritedRareData(const InheritedRareData& o)
     , rubyAlign(o.rubyAlign)
     , rubyOverhang(o.rubyOverhang)
     , textZoom(o.textZoom)
+    , interpolateSize(o.interpolateSize)
 #if ENABLE(WEBKIT_TOUCH_CALLOUT_CSS_PROPERTY)
     , touchCallout(o.touchCallout)
 #endif
@@ -231,13 +242,16 @@ inline InheritedRareData::InheritedRareData(const InheritedRareData& o)
     , hasExplicitlySetStrokeColor(o.hasExplicitlySetStrokeColor)
     , effectiveInert(o.effectiveInert)
     , effectivelyTransparent(o.effectivelyTransparent)
+    , effectiveWrapInsideAvoid(o.effectiveWrapInsideAvoid)
     , isInSubtreeWithBlendMode(o.isInSubtreeWithBlendMode)
     , isForceHidden(o.isForceHidden)
     , usedContentVisibility(o.usedContentVisibility)
     , autoRevealsWhenFound(o.autoRevealsWhenFound)
     , insideDefaultButton(o.insideDefaultButton)
     , insideSubmitButton(o.insideSubmitButton)
-    , evaluationTimeZoomEnabled(o.evaluationTimeZoomEnabled)
+#if ENABLE(SMART_IMAGE_RESIZER)
+    , isAffectedBySmartImageResizer(o.isAffectedBySmartImageResizer)
+#endif
 #if HAVE(CORE_MATERIAL)
     , usedAppleVisualEffectForSubtree(o.usedAppleVisualEffectForSubtree)
 #endif
@@ -260,6 +274,7 @@ bool InheritedRareData::operator==(const InheritedRareData& o) const
         && textStrokeColor == o.textStrokeColor
         && textFillColor == o.textFillColor
         && textEmphasisColor == o.textEmphasisColor
+        && colorForHighlight == o.colorForHighlight
         && visitedLinkTextStrokeColor == o.visitedLinkTextStrokeColor
         && visitedLinkTextFillColor == o.visitedLinkTextFillColor
         && visitedLinkTextEmphasisColor == o.visitedLinkTextEmphasisColor
@@ -290,15 +305,15 @@ bool InheritedRareData::operator==(const InheritedRareData& o) const
 #if ENABLE(WEBKIT_OVERFLOW_SCROLLING_CSS_PROPERTY)
         && overflowScrolling == o.overflowScrolling
 #endif
-#if ENABLE(TEXT_AUTOSIZING)
         && textSizeAdjust == o.textSizeAdjust
-#endif
-        && userSelect == o.userSelect
+        && webkitUserSelect == o.webkitUserSelect
+        && usedUserSelect == o.usedUserSelect
         && speakAs == o.speakAs
         && hyphens == o.hyphens
         && hyphenateLimitBefore == o.hyphenateLimitBefore
         && hyphenateLimitAfter == o.hyphenateLimitAfter
         && hyphenateLimitLines == o.hyphenateLimitLines
+        && internalHyphenateLimitCharsWord == o.internalHyphenateLimitCharsWord
 #if ENABLE(DARK_MODE_CSS)
         && colorScheme == o.colorScheme
 #endif
@@ -323,6 +338,7 @@ bool InheritedRareData::operator==(const InheritedRareData& o) const
         && rubyAlign == o.rubyAlign
         && rubyOverhang == o.rubyOverhang
         && textZoom == o.textZoom
+        && interpolateSize == o.interpolateSize
         && lineSnap == o.lineSnap
         && lineAlign == o.lineAlign
         && hangingPunctuation == o.hangingPunctuation
@@ -340,9 +356,13 @@ bool InheritedRareData::operator==(const InheritedRareData& o) const
         && eventListenerRegionTypes == o.eventListenerRegionTypes
         && effectiveInert == o.effectiveInert
         && effectivelyTransparent == o.effectivelyTransparent
+        && effectiveWrapInsideAvoid == o.effectiveWrapInsideAvoid
         && usedContentVisibility == o.usedContentVisibility
         && insideDefaultButton == o.insideDefaultButton
         && insideSubmitButton == o.insideSubmitButton
+#if ENABLE(SMART_IMAGE_RESIZER)
+        && isAffectedBySmartImageResizer == o.isAffectedBySmartImageResizer
+#endif
 #if HAVE(CORE_MATERIAL)
         && usedAppleVisualEffectForSubtree == o.usedAppleVisualEffectForSubtree
 #endif
@@ -353,7 +373,8 @@ bool InheritedRareData::operator==(const InheritedRareData& o) const
         && listStyleImage == o.listStyleImage
         && listStyleType == o.listStyleType
         && blockEllipsis == o.blockEllipsis
-        && evaluationTimeZoomEnabled == o.evaluationTimeZoomEnabled
+        && borderHorizontalSpacing == o.borderHorizontalSpacing
+        && borderVerticalSpacing == o.borderVerticalSpacing
         && mathDepth == o.mathDepth;
 }
 
@@ -364,7 +385,6 @@ void InheritedRareData::dumpDifferences(TextStream& ts, const InheritedRareData&
 
     LOG_IF_DIFFERENT(usedZoom);
     LOG_IF_DIFFERENT(deviceScaleFactor);
-
     LOG_IF_DIFFERENT(listStyleImage);
 
     LOG_IF_DIFFERENT(textStrokeWidth);
@@ -372,6 +392,7 @@ void InheritedRareData::dumpDifferences(TextStream& ts, const InheritedRareData&
     LOG_IF_DIFFERENT(textStrokeColor);
     LOG_IF_DIFFERENT(textFillColor);
     LOG_IF_DIFFERENT(textEmphasisColor);
+    LOG_IF_DIFFERENT(colorForHighlight);
 
     LOG_IF_DIFFERENT(visitedLinkTextStrokeColor);
     LOG_IF_DIFFERENT(visitedLinkTextFillColor);
@@ -409,7 +430,8 @@ void InheritedRareData::dumpDifferences(TextStream& ts, const InheritedRareData&
     LOG_IF_DIFFERENT_WITH_CAST(OverflowWrap, overflowWrap);
     LOG_IF_DIFFERENT_WITH_CAST(NBSPMode, nbspMode);
     LOG_IF_DIFFERENT_WITH_CAST(LineBreak, lineBreak);
-    LOG_IF_DIFFERENT_WITH_CAST(UserSelect, userSelect);
+    LOG_IF_DIFFERENT_WITH_CAST(UserSelect, webkitUserSelect);
+    LOG_IF_DIFFERENT_WITH_CAST(UserSelect, usedUserSelect);
 
     LOG_IF_DIFFERENT_WITH_FROM_RAW(SpeakAs, speakAs);
 
@@ -438,6 +460,7 @@ void InheritedRareData::dumpDifferences(TextStream& ts, const InheritedRareData&
     LOG_IF_DIFFERENT_WITH_CAST(RubyOverhang, rubyOverhang);
 
     LOG_IF_DIFFERENT_WITH_CAST(TextZoom, textZoom);
+    LOG_IF_DIFFERENT_WITH_CAST(InterpolateSize, interpolateSize);
 
 #if ENABLE(WEBKIT_TOUCH_CALLOUT_CSS_PROPERTY)
     LOG_IF_DIFFERENT_WITH_CAST(WebkitTouchCallout, touchCallout);
@@ -457,6 +480,7 @@ void InheritedRareData::dumpDifferences(TextStream& ts, const InheritedRareData&
 
     LOG_IF_DIFFERENT_WITH_CAST(bool, effectiveInert);
     LOG_IF_DIFFERENT_WITH_CAST(bool, effectivelyTransparent);
+    LOG_IF_DIFFERENT_WITH_CAST(bool, effectiveWrapInsideAvoid);
 
     LOG_IF_DIFFERENT_WITH_CAST(bool, isInSubtreeWithBlendMode);
     LOG_IF_DIFFERENT_WITH_CAST(bool, isForceHidden);
@@ -466,6 +490,9 @@ void InheritedRareData::dumpDifferences(TextStream& ts, const InheritedRareData&
 
     LOG_IF_DIFFERENT_WITH_CAST(bool, insideDefaultButton);
     LOG_IF_DIFFERENT_WITH_CAST(bool, insideSubmitButton);
+#if ENABLE(SMART_IMAGE_RESIZER)
+    LOG_IF_DIFFERENT_WITH_CAST(bool, isAffectedBySmartImageResizer);
+#endif
 
 #if HAVE(CORE_MATERIAL)
     LOG_IF_DIFFERENT_WITH_CAST(AppleVisualEffect, usedAppleVisualEffectForSubtree);
@@ -479,6 +506,7 @@ void InheritedRareData::dumpDifferences(TextStream& ts, const InheritedRareData&
     LOG_IF_DIFFERENT(visitedLinkStrokeColor);
 
     LOG_IF_DIFFERENT(hyphenateCharacter);
+    LOG_IF_DIFFERENT(internalHyphenateLimitCharsWord);
     LOG_IF_DIFFERENT(hyphenateLimitBefore);
     LOG_IF_DIFFERENT(hyphenateLimitAfter);
     LOG_IF_DIFFERENT(hyphenateLimitLines);
@@ -494,9 +522,8 @@ void InheritedRareData::dumpDifferences(TextStream& ts, const InheritedRareData&
     LOG_IF_DIFFERENT(lineGrid);
     LOG_IF_DIFFERENT(tabSize);
 
-#if ENABLE(TEXT_AUTOSIZING)
     LOG_IF_DIFFERENT(textSizeAdjust);
-#endif
+
 #if ENABLE(CSS_TAP_HIGHLIGHT_COLOR)
     LOG_IF_DIFFERENT(tapHighlightColor);
 #endif
@@ -504,7 +531,8 @@ void InheritedRareData::dumpDifferences(TextStream& ts, const InheritedRareData&
     LOG_IF_DIFFERENT(listStyleType);
     LOG_IF_DIFFERENT(blockEllipsis);
 
-    LOG_IF_DIFFERENT(evaluationTimeZoomEnabled);
+    LOG_IF_DIFFERENT(borderHorizontalSpacing);
+    LOG_IF_DIFFERENT(borderVerticalSpacing);
 
     LOG_IF_DIFFERENT(mathDepth);
 }

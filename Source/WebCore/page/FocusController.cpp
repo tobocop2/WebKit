@@ -541,7 +541,7 @@ void FocusController::setFocused(bool focused)
     protect(m_page)->setActivityState(focused ? m_activityState | ActivityState::IsFocused : m_activityState - ActivityState::IsFocused);
 }
 
-void FocusController::setFocusedInternal(bool focused)
+void FocusController::setFocusedInternal()
 {
     if (!isFocused()) {
         if (RefPtr focusedOrMainFrame = this->focusedOrMainFrame())
@@ -552,10 +552,8 @@ void FocusController::setFocusedInternal(bool focused)
         setFocusedFrame(protect(m_page->mainFrame()).ptr());
 
     RefPtr focusedFrame = localFocusedFrame();
-    if (focusedFrame && focusedFrame->view()) {
-        protect(focusedFrame->selection())->setFocused(focused);
-        dispatchEventsOnWindowAndFocusedElement(protect(focusedFrame->document()).get(), focused);
-    }
+    if (focusedFrame && focusedFrame->view())
+        protect(focusedFrame->selection())->setFocused(isFocused());
 }
 
 FocusableElementSearchResult FocusController::findFocusableElementStartingWithLocalFrame(FocusDirection direction, const FocusEventData& focusEventData, LocalFrame& frame, ShouldFocusElement shouldFocusElement)
@@ -566,7 +564,10 @@ FocusableElementSearchResult FocusController::findFocusableElementStartingWithLo
 
     // We are advancing focus in this frame's process in response to a keypress in a different frame's process.
     // We therefore assume we have an active user gesture, which is necessary for element-finding and focus-advancing to work.
-    UserGestureIndicator gestureIndicator(IsProcessingUserGesture::Yes, document.get());
+    // Avoid doing this for ShouldFocusElement::No, since that is just a query.
+    std::optional<UserGestureIndicator> gestureIndicator;
+    if (shouldFocusElement == ShouldFocusElement::Yes)
+        gestureIndicator.emplace(IsProcessingUserGesture::Yes, document.get());
 
     return findFocusableElementInDocumentOrderStartingWithFrame(frame, document->documentElement(), nullptr, direction, focusEventData, InitialFocus::No, ContinuingRemoteSearch::Yes, shouldFocusElement);
 }
@@ -1237,16 +1238,24 @@ bool FocusController::setFocusedElement(Element* element, Frame* newFocusedFrame
 
 void FocusController::setActivityState(OptionSet<ActivityState> activityState)
 {
+    static constexpr OptionSet activeAndFocused { ActivityState::IsFocused, ActivityState::WindowIsActive };
+    bool wasActiveAndFocused = m_activityState.containsAll(activeAndFocused);
     auto changed = m_activityState ^ activityState;
     m_activityState = activityState;
+    bool isActiveAndFocused = m_activityState.containsAll(activeAndFocused);
+    bool shouldDispatchEvent = wasActiveAndFocused != isActiveAndFocused;
 
     if (changed & ActivityState::IsFocused)
-        setFocusedInternal(activityState.contains(ActivityState::IsFocused));
+        setFocusedInternal();
     if (changed & ActivityState::WindowIsActive) {
-        setActiveInternal(activityState.contains(ActivityState::WindowIsActive));
+        setActiveInternal();
         if (changed & ActivityState::IsVisible)
             setIsVisibleAndActiveInternal(activityState.contains(ActivityState::WindowIsActive));
     }
+
+    RefPtr focusedFrame = localFocusedFrame();
+    if (focusedFrame && shouldDispatchEvent)
+        dispatchEventsOnWindowAndFocusedElement(protect(focusedFrame->document()), isActiveAndFocused);
 }
 
 void FocusController::setActive(bool active)
@@ -1254,12 +1263,12 @@ void FocusController::setActive(bool active)
     protect(m_page)->setActivityState(active ? m_activityState | ActivityState::WindowIsActive : m_activityState - ActivityState::WindowIsActive);
 }
 
-void FocusController::setActiveInternal(bool active)
+void FocusController::setActiveInternal()
 {
-    RefPtr localMainFrame = m_page->localMainFrame();
-    if (!localMainFrame)
+    RefPtr localMainOrRootFrame = m_page->localMainOrRootFrame();
+    if (!localMainOrRootFrame)
         return;
-    if (RefPtr view = localMainFrame->view()) {
+    if (RefPtr view = localMainOrRootFrame->view()) {
         if (!view->platformWidget()) {
             view->updateLayoutAndStyleIfNeededRecursive();
             view->updateControlTints();
@@ -1268,10 +1277,6 @@ void FocusController::setActiveInternal(bool active)
 
     if (RefPtr focusedOrMainFrame = this->focusedOrMainFrame())
         focusedOrMainFrame->selection().pageActivationChanged();
-
-    RefPtr focusedFrame = localFocusedFrame();
-    if (focusedFrame && isFocused())
-        dispatchEventsOnWindowAndFocusedElement(protect(focusedFrame->document()).get(), active);
 }
 
 static void contentAreaDidShowOrHide(ScrollableArea* scrollableArea, bool didShow)

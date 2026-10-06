@@ -157,7 +157,7 @@ void VTTCueBox::applyCSSPropertiesWithRegion()
 
     // the 'left' property must be set to left
     WTF::visit(WTF::makeVisitor([this, protectedThis = Ref { *this }] (double left) {
-        setInlineStyleProperty(CSSPropertyLeft, left, CSSUnitType::CSS_PERCENTAGE);
+        setInlineStyleProperty(CSSPropertyLeft, left, CSSUnitType::Percentage);
     }, [this, protectedThis = Ref { *this }] (auto) {
         setInlineStyleProperty(CSSPropertyLeft, CSSValueAuto);
     }), cue->left());
@@ -207,14 +207,14 @@ void VTTCueBox::applyCSSProperties()
 
     // the 'top' property must be set to top
     WTF::visit(WTF::makeVisitor([this, protectedThis = Ref { *this }] (double top) {
-        setInlineStyleProperty(CSSPropertyTop, top, CSSUnitType::CSS_CQH);
+        setInlineStyleProperty(CSSPropertyTop, top, CSSUnitType::Cqh);
     }, [this, protectedThis = Ref { *this }] (auto) {
         setInlineStyleProperty(CSSPropertyTop, CSSValueAuto);
     }), cue->top());
 
     // the 'left' property must be set to left
     WTF::visit(WTF::makeVisitor([this, protectedThis = Ref { *this }] (double left) {
-        setInlineStyleProperty(CSSPropertyLeft, left, CSSUnitType::CSS_CQW);
+        setInlineStyleProperty(CSSPropertyLeft, left, CSSUnitType::Cqw);
     }, [this, protectedThis = Ref { *this }] (auto) {
         setInlineStyleProperty(CSSPropertyLeft, CSSValueAuto);
     }), cue->left());
@@ -227,14 +227,14 @@ void VTTCueBox::applyCSSProperties()
 
     // the 'width' property must be set to width
     WTF::visit(WTF::makeVisitor([this, protectedThis = Ref { *this }] (double width) {
-        setInlineStyleProperty(CSSPropertyWidth, width, CSSUnitType::CSS_CQW);
+        setInlineStyleProperty(CSSPropertyWidth, width, CSSUnitType::Cqw);
     }, [this, protectedThis = Ref { *this }] (auto) {
         setInlineStyleProperty(CSSPropertyWidth, CSSValueAuto);
     }), cue->width());
 
     // the 'height' property must be set to height
     WTF::visit(WTF::makeVisitor([this, protectedThis = Ref { *this }] (double height) {
-        setInlineStyleProperty(CSSPropertyHeight, height, CSSUnitType::CSS_CQH);
+        setInlineStyleProperty(CSSPropertyHeight, height, CSSUnitType::Cqh);
     }, [this, protectedThis = Ref { *this }] (auto) {
         setInlineStyleProperty(CSSPropertyHeight, CSSValueAuto);
     }), cue->height());
@@ -249,7 +249,7 @@ void VTTCueBox::applyCSSProperties()
     // unless if it is the child of a region, then it is to be relatively positioned.
     setInlineStyleProperty(CSSPropertyPosition, CSSValueAbsolute);
 
-    if (!cue->snapToLines()) {
+    if (cue->preventLineWrapping()) {
         setInlineStyleProperty(CSSPropertyWhiteSpaceCollapse, CSSValuePreserve);
         setInlineStyleProperty(CSSPropertyTextWrapMode, CSSValueNowrap);
     }
@@ -680,23 +680,21 @@ void VTTCue::determineTextDirection()
         if (!current || isCueParagraphSeparator(current))
             return;
 
-        if (char16_t current = paragraph[i]) {
-            UCharDirection charDirection = u_charDirection(current);
-            if (charDirection == U_LEFT_TO_RIGHT) {
-                m_displayDirection = CSSValueLtr;
-                return;
-            }
-            if (charDirection == U_RIGHT_TO_LEFT || charDirection == U_RIGHT_TO_LEFT_ARABIC) {
-                m_displayDirection = CSSValueRtl;
-                return;
-            }
+        UCharDirection charDirection = u_charDirection(current);
+        if (charDirection == U_LEFT_TO_RIGHT) {
+            m_displayDirection = CSSValueLtr;
+            return;
+        }
+        if (charDirection == U_RIGHT_TO_LEFT || charDirection == U_RIGHT_TO_LEFT_ARABIC) {
+            m_displayDirection = CSSValueRtl;
+            return;
         }
     }
 }
 
 double VTTCue::calculateComputedTextPosition() const
 {
-    // http://dev.w3.org/html5/webvtt/#dfn-cue-computed-position
+    // https://www.w3.org/TR/webvtt1/#cue-computed-position
     
     // 1. If the position is numeric, then return the value of the position and
     // abort these steps. (Otherwise, the position is the special value auto.)
@@ -704,18 +702,18 @@ double VTTCue::calculateComputedTextPosition() const
         return *m_textPosition;
     
     switch (m_cueAlignment) {
-    case AlignSetting::Start:
     case AlignSetting::Left:
-        // 2. If the cue text alignment is start or left, return 0 and abort these
+        // 2. If the cue text alignment is left, return 0 and abort these
         // steps.
         return 0;
-    case AlignSetting::End:
     case AlignSetting::Right:
-        // 3. If the cue text alignment is end or right, return 100 and abort these
+        // 3. If the cue text alignment is right, return 100 and abort these
         // steps.
         return 100;
     case AlignSetting::Center:
-        // 4. If the cue text alignment is center, return 50 and abort these steps.
+    case AlignSetting::Start:
+    case AlignSetting::End:
+        // 4. Otherwise, return 50 and abort these steps.
         return 50;
     }
 
@@ -772,24 +770,34 @@ double VTTCue::calculateMaximumSize() const
     auto computedPosition = calculateComputedTextPosition();
     auto positionAlignment = calculateComputedPositionAlignment();
 
-    if (positionAlignment == PositionAlignSetting::LineLeft) {
+    switch (positionAlignment) {
+    case PositionAlignSetting::LineLeft:
         // If the computed position alignment is line-left
         // Let maximum size be the computed position subtracted from 100.
         maxSize = 100.0 - computedPosition;
-    } else if (positionAlignment == PositionAlignSetting::LineRight) {
+        break;
+    case PositionAlignSetting::LineRight:
         // If the computed position alignment is line-right
         // Let maximum size be the computed position.
         maxSize = computedPosition;
-    } else if (positionAlignment == PositionAlignSetting::Center && computedPosition <= 50) {
-        // If the computed position alignment is center, and the computed position is less than or equal to 50
-        // Let maximum size be the computed position multiplied by two.
-        maxSize = 2 * computedPosition;
-        // If the computed position alignment is center, and the computed position is greater than 50
-    } else if (positionAlignment == PositionAlignSetting::Center && computedPosition > 50) {
-        // Let maximum size be the result of subtracting computed position from 100 and then multiplying the result by two.
-        maxSize = 2 * (100.0 - computedPosition);
-    } else
+        break;
+    case PositionAlignSetting::Center:
+        if (computedPosition <= 50) {
+            // If the computed position alignment is center, and the computed position is less than or equal to 50
+            // Let maximum size be the computed position multiplied by two.
+            maxSize = 2 * computedPosition;
+        } else {
+            // If the computed position alignment is center, and the computed position is greater than 50
+            // Let maximum size be the result of subtracting computed position from 100 and then multiplying the result by two.
+            maxSize = 2 * (100.0 - computedPosition);
+        }
+        break;
+    case PositionAlignSetting::Auto:
+        // calculateComputedPositionAlignment() resolves auto to one of the
+        // cases above, so this is never reached.
         ASSERT_NOT_REACHED();
+        break;
+    }
 
     return maxSize;
 }

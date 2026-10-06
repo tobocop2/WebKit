@@ -74,6 +74,10 @@ class MatchResultCache;
 class Resolver;
 class RuleSet;
 
+// Whether a dependency on an attribute reaches past a shadow boundary, via a shadow-piercing
+// rule like ::part() or a document author rule matching a UA shadow pseudo-element.
+enum class AttributeAffectsShadowTree : bool { No, Yes };
+
 class Scope : public CanMakeWeakPtr<Scope>, public CanMakeCheckedPtr<Scope>, public Identified<ScopeIdentifier> {
     WTF_MAKE_TZONE_ALLOCATED(Scope);
     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(Scope);
@@ -145,13 +149,16 @@ public:
     static Scope* forOrdinal(Element&, ScopeOrdinal);
     static const Scope* forOrdinal(const Element&, ScopeOrdinal);
 
-    // The provided function is called for all the relevant scopes until it finds a name match from a scope and returns a truthy value.
-    template<typename F> static auto resolveTreeScopedReference(const Element&, const ScopedName&, const F&&);
-
     const CustomPropertyRegistry& customPropertyRegistry() const LIFETIME_BOUND { return m_customPropertyRegistry.get(); }
     CustomPropertyRegistry& customPropertyRegistry() LIFETIME_BOUND { return m_customPropertyRegistry.get(); }
     const CSSCounterStyleRegistry& counterStyleRegistry() const LIFETIME_BOUND { return m_counterStyleRegistry.get(); }
     CSSCounterStyleRegistry& counterStyleRegistry() LIFETIME_BOUND { return m_counterStyleRegistry.get(); }
+
+    // Names of the attributes that attr() has been seen reading from elements in this scope. These
+    // are discovered by building style, so they are not derivable from the style sheets and have to
+    // survive both style sheet changes and the resolver being dropped.
+    void registerSubstitutionAttribute(const AtomString&, AttributeAffectsShadowTree) const;
+    std::optional<AttributeAffectsShadowTree> substitutionAttribute(const AtomString& lowercaseLocalName) const { return m_substitutionAttributes.getOptional(lowercaseLocalName); }
 
 protected:
     explicit Scope(Document&);
@@ -232,6 +239,8 @@ private:
 
     const UniqueRef<CustomPropertyRegistry> m_customPropertyRegistry;
     const UniqueRef<CSSCounterStyleRegistry> m_counterStyleRegistry;
+
+    mutable HashMap<AtomString, AttributeAffectsShadowTree> m_substitutionAttributes;
 };
 
 RefPtr<HTMLSlotElement> assignedSlotForScopeOrdinal(const Element&, ScopeOrdinal);
@@ -245,24 +254,28 @@ inline void Scope::flushPendingUpdate()
         flushPendingSelfUpdate();
 }
 
-template<typename F>
-auto Scope::resolveTreeScopedReference(const Element& element, const ScopedName& reference, const F&& function)
+// Resolves a tree-scoped reference per https://drafts.csswg.org/css-scoping-1/#shadow-names.
+// The provided function is called, for each relevant scope, with the scope and the reference's name
+// paired with that scope's ordinal (as a ScopedName), until it returns a truthy value.
+template<std::invocable<const Scope&, ScopedName> F>
+auto resolveTreeScopedReference(const Element& element, const ScopedName& reference, const F&& function)
 {
-    using ReturnType = std::invoke_result_t<F, Scope, AtomString>;
+    using ReturnType = std::invoke_result_t<F, Scope, ScopedName>;
 
-    // https://drafts.csswg.org/css-scoping-1/#shadow-names
     // "Whenever a tree-scoped reference is dereferenced to find the CSS construct it is referencing,
     // first search only the tree-scoped names associated with the same root as the tree-scoped reference must be searched."
     CheckedPtr firstScope = Scope::forOrdinal(element, reference.scopeOrdinal);
     if (!firstScope)
         return ReturnType { };
 
-    if (auto result = function(*firstScope, reference.name))
+    auto scopeOrdinal = reference.scopeOrdinal;
+    if (auto result = function(*firstScope, ScopedName { reference.name, scopeOrdinal }))
         return result;
 
     // "If no relevant tree-scoped name is found, and the root is a shadow root, then repeat this search in the root’s host’s node tree."
     for (CheckedPtr hostScope = firstScope->hostScope(); hostScope; hostScope = hostScope->hostScope()) {
-        if (auto result = function(*hostScope, reference.name))
+        --scopeOrdinal;
+        if (auto result = function(*hostScope, ScopedName { reference.name, scopeOrdinal }))
             return result;
     }
     return ReturnType { };

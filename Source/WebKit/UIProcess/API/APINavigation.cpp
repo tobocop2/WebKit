@@ -27,10 +27,8 @@
 #include "APINavigation.h"
 
 #include "BrowsingWarning.h"
-#include "FrameProcess.h"
 #include "WebBackForwardListFrameItem.h"
 #include "WebBackForwardListItem.h"
-#include <WebCore/RegistrableDomain.h>
 #include <WebCore/ResourceRequest.h>
 #include <WebCore/ResourceResponse.h>
 #include <wtf/DebugUtilities.h>
@@ -123,13 +121,6 @@ void Navigation::appendRedirectionURL(const WTF::URL& url)
         m_redirectChain.append(url);
 }
 
-bool Navigation::currentRequestIsCrossSiteRedirect() const
-{
-    return currentRequestIsRedirect()
-        && m_lastNavigationAction
-        && RegistrableDomain(m_lastNavigationAction->redirectResponse.url()) != RegistrableDomain(m_currentRequest.url());
-}
-
 WebKit::WebBackForwardListItem* Navigation::targetItem() const
 {
     return m_targetFrameItem ? m_targetFrameItem->backForwardListItem() : nullptr;
@@ -207,12 +198,6 @@ size_t Navigation::redirectChainIndex(const WTF::URL& url)
     if (index == WTF::notFound)
         index = m_redirectChain.size();
     return index;
-}
-
-void Navigation::setPendingSharedProcess(FrameProcess& sharedProcess)
-{
-    // Extend the life of a shared process until the end of the current navigation.
-    m_pendingSharedProcess = sharedProcess;
 }
 
 #if !LOG_DISABLED

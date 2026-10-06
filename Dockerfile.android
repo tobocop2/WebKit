@@ -1,7 +1,8 @@
 ARG MARCH_FLAG="-march=armv8-a+crc -mtune=cortex-a78"
 ARG WEBKIT_RELEASE_TYPE=Release
 ARG LTO_FLAG=""
-ARG LLVM_VERSION="21"
+ARG LLVM_VERSION="23"
+ARG LLVM_DEBS_SHA256="993eba8b8ca23ea4d6074643d52ff9397b411e6ac5af6b7b2ca09dca2b351011"
 ARG NDK_VERSION="r27c"
 ARG NDK_SHA256="59c2f6dc96743b5daf5d1626684640b20a6bd2b1d85b13156b90333741bad5cc"
 ARG ANDROID_API="28"
@@ -9,14 +10,12 @@ ARG ANDROID_ARCH="aarch64"
 ARG DEFAULT_CFLAGS="-mno-omit-leaf-frame-pointer -g -fno-omit-frame-pointer -ffunction-sections -fdata-sections -faddrsig -fno-unwind-tables -fno-asynchronous-unwind-tables -DU_STATIC_IMPLEMENTATION=1 "
 ARG USE_MIMALLOC="OFF"
 ARG USE_EXTERNAL_MIMALLOC="OFF"
-ARG ICU_VERSION="75_1"
-ARG ICU_RELEASE_TAG="release-75-1"
-ARG ICU_SHA256="cb968df3e4d2e87e8b11c49a5d01c787bd13b9545280fc6642f826527618caef"
 
 FROM ubuntu:24.04 AS base
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG LLVM_VERSION
+ARG LLVM_DEBS_SHA256
 ARG NDK_VERSION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,8 +27,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Host clang (same version Bun uses) — we cross-compile via --target/--sysroot,
 # not via the NDK's bundled clang. apt.llvm.org installs version-suffixed names
-# only (ld.lld-21, not ld.lld), so add unversioned links for -fuse-ld=lld.
-RUN wget -qO- https://apt.llvm.org/llvm.sh | bash -s -- ${LLVM_VERSION} && \
+# only (ld.lld-23, not ld.lld), so add unversioned links for -fuse-ld=lld.
+# The debs are mirrored from apt.llvm.org to a GitHub release (see
+# scripts/mirror-llvm-debs.sh) so the build doesn't depend on apt.llvm.org.
+ADD --checksum=sha256:${LLVM_DEBS_SHA256} \
+    https://github.com/oven-sh/WebKit/releases/download/llvm-${LLVM_VERSION}-debs/llvm-${LLVM_VERSION}-noble-amd64.tar.gz /tmp/llvm.tar.gz
+RUN mkdir -p /tmp/llvm && tar xzf /tmp/llvm.tar.gz -C /tmp/llvm && \
+    apt-get update && apt-get install -y /tmp/llvm/*.deb && \
+    rm -rf /tmp/llvm /tmp/llvm.tar.gz /var/lib/apt/lists/* && \
     for t in clang clang++ ld.lld lld llvm-ar llvm-ranlib; do \
       ln -sf /usr/bin/${t}-${LLVM_VERSION} /usr/local/bin/${t}; \
     done
@@ -73,24 +78,13 @@ RUN set -eux; \
 
 RUN mkdir -p /output/lib /output/include /output/include/JavaScriptCore /output/include/wtf /output/include/bmalloc /output/include/unicode
 
-# ───────────────────────────────────────────────────────────────────────────
-# ICU — cross-compiled. ICU's autoconf build runs generated tools (gennorm2,
-# etc.) at build time, so a host build is required first; the target build
-# points at it via --with-cross-build.
-# ───────────────────────────────────────────────────────────────────────────
-FROM base AS build_icu
-
-ARG MARCH_FLAG
-ARG LTO_FLAG
-ARG DEFAULT_CFLAGS
-ARG ANDROID_API
-ARG ANDROID_ARCH
-
+# ICU's sources and, for this container, its tools. ICU runs them while it builds (pkgdata, genrb, ...), so a cross
+# build needs a host build first. Neither depends on the lane, so they are part of the toolchain: no lane downloads
+# or rebuilds them.
+# Which ICU: icu/source.json, by way of lanes.mjs.
 ARG ICU_VERSION
-ARG ICU_RELEASE_TAG
 ARG ICU_SHA256
-ADD --checksum=sha256:${ICU_SHA256} https://github.com/unicode-org/icu/releases/download/${ICU_RELEASE_TAG}/icu4c-${ICU_VERSION}-src.tgz /icu.tgz
-
+ADD --checksum=sha256:${ICU_SHA256} https://github.com/unicode-org/icu/releases/download/release-${ICU_VERSION}/icu4c-${ICU_VERSION}-sources.tgz /icu.tgz
 # Host build (tools only — no LTO, fast).
 RUN mkdir -p /icu-host && cd /icu-host \
     && tar -xf /icu.tgz --strip-components=1 \
@@ -99,9 +93,23 @@ RUN mkdir -p /icu-host && cd /icu-host \
        ./configure --disable-shared --enable-static --disable-samples --disable-tests \
     && make -j$(nproc)
 
+# ───────────────────────────────────────────────────────────────────────────
+# ICU — cross-compiled. ICU's autoconf build runs generated tools (gennorm2,
+# etc.) at build time, so a host build is required first; the target build
+# points at it via --with-cross-build.
+# ───────────────────────────────────────────────────────────────────────────
+FROM base AS build_icu
+
+ARG ICU_VERSION
+ARG MARCH_FLAG
+ARG LTO_FLAG
+ARG DEFAULT_CFLAGS
+ARG ANDROID_API
+ARG ANDROID_ARCH
+
 # Target build.
 #
-# Before configure, filter data/in/icudt75l.dat (using the host icupkg) to drop
+# Before configure, filter data/in/icudt<major>l.dat (using the host icupkg) to drop
 # converters/translit/stringprep/confusables/unames. Bun has zero
 # ucnv_/utrans_/usprep_/uspoof_ consumers (TextCodecICU is removed in
 # src/bun.js/bindings/TextEncodingRegistry.cpp). Cuts libicudata.a by ~7.4 MB.
@@ -117,9 +125,9 @@ RUN --mount=type=tmpfs,target=/icu \
     export CXXFLAGS="${CROSS_FLAGS} ${DEFAULT_CFLAGS} ${MARCH_FLAG} -Os -std=c++20 -fno-exceptions ${LTO_FLAG} -fno-c++-static-destructors" && \
     export LDFLAGS="${CROSS_FLAGS} --rtlib=compiler-rt -fuse-ld=lld" && \
     cd /icu && tar -xf /icu.tgz --strip-components=1 && rm /icu.tgz && cd source && \
-    /icu-host/source/bin/icupkg -l data/in/icudt75l.dat | grep -E '\.(cnv|spp|cfu)$|^cnvalias\.icu$|^translit/|^rbnf/|^unames\.icu$' | grep -vE '^rbnf/(root|res_index|ja|zh|zh_Hant)\.res$' > data/in/rm.lst && \
-    /icu-host/source/bin/icupkg --auto_toc_prefix -r data/in/rm.lst data/in/icudt75l.dat data/in/icudt75l_filtered.dat && \
-    mv -f data/in/icudt75l_filtered.dat data/in/icudt75l.dat && \
+    /icu-host/source/bin/icupkg -l data/in/icudt${ICU_VERSION%%.*}l.dat | grep -E '\.(cnv|spp|cfu)$|^cnvalias\.icu$|^translit/|^rbnf/|^unames\.icu$' | grep -vE '^rbnf/(root|res_index|ja|zh|zh_Hant)\.res$' > data/in/rm.lst && \
+    /icu-host/source/bin/icupkg --auto_toc_prefix -r data/in/rm.lst data/in/icudt${ICU_VERSION%%.*}l.dat data/in/icudt${ICU_VERSION%%.*}l_filtered.dat && \
+    mv -f data/in/icudt${ICU_VERSION%%.*}l_filtered.dat data/in/icudt${ICU_VERSION%%.*}l.dat && \
     { ./configure --host=${ANDROID_ARCH}-linux-android \
         --with-cross-build=/icu-host/source \
         --enable-static --disable-shared --with-data-packaging=static \
@@ -160,8 +168,9 @@ ENV WEBKIT_OUT_DIR=/webkitbuild
 RUN --mount=type=tmpfs,target=/webkitbuild \
     export TARGET_TRIPLE="${ANDROID_ARCH}-unknown-linux-android${ANDROID_API}" && \
     export CROSS="--target=${TARGET_TRIPLE} --sysroot=${NDK_SYSROOT}" && \
-    export CFLAGS="${CROSS} ${DEFAULT_CFLAGS} ${MARCH_FLAG} ${LTO_FLAG} -isystem /icu/include -ffile-prefix-map=/webkit/Source=vendor/WebKit/Source -ffile-prefix-map=/webkitbuild/=." && \
-    export CXXFLAGS="${CROSS} -isystem ${NDK_SYSROOT}/usr/include/c++/v1 ${DEFAULT_CFLAGS} ${MARCH_FLAG} ${LTO_FLAG} -isystem /icu/include -fno-c++-static-destructors -ffile-prefix-map=/webkit/Source=vendor/WebKit/Source -ffile-prefix-map=/webkitbuild/=." && \
+    export G=$(if [ -n "${LTO_FLAG:-}" ]; then echo "-g1"; fi) && \
+    export CFLAGS="${CROSS} ${DEFAULT_CFLAGS} $G ${MARCH_FLAG} ${LTO_FLAG} -isystem /icu/include -ffile-prefix-map=/webkit/Source=vendor/WebKit/Source -ffile-prefix-map=/webkitbuild/=." && \
+    export CXXFLAGS="${CROSS} -isystem ${NDK_SYSROOT}/usr/include/c++/v1 ${DEFAULT_CFLAGS} $G ${MARCH_FLAG} ${LTO_FLAG} -isystem /icu/include -fno-c++-static-destructors -ffile-prefix-map=/webkit/Source=vendor/WebKit/Source -ffile-prefix-map=/webkitbuild/=." && \
     cd /webkitbuild && \
     cmake \
     -DCMAKE_SYSTEM_NAME=Linux \
@@ -196,9 +205,11 @@ RUN --mount=type=tmpfs,target=/webkitbuild \
     -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH \
     -G Ninja \
     /webkit && \
-    cmake --build /webkitbuild --config ${WEBKIT_RELEASE_TYPE} --target jsc && \
+    cmake --build /webkitbuild --config ${WEBKIT_RELEASE_TYPE} --target jsc --target testFFI && \
+    python3 /webkit/Tools/Scripts/check-classinfo-uniqueness.py $WEBKIT_OUT_DIR/bin/jsc && \
     cp -r $WEBKIT_OUT_DIR/lib/*.a /output/lib && \
     cp $WEBKIT_OUT_DIR/*.h /output/include && \
+    cp -r $WEBKIT_OUT_DIR/bin /output/bin && \
     cp $WEBKIT_OUT_DIR/*.json /output && \
     find $WEBKIT_OUT_DIR/JavaScriptCore/DerivedSources/ -name "*.h" -exec sh -c 'cp "$1" "/output/include/JavaScriptCore/$(basename "$1")"' sh {} \; && \
     find $WEBKIT_OUT_DIR/JavaScriptCore/DerivedSources/ -name "*.json" -exec sh -c 'cp "$1" "/output/$(basename "$1")"' sh {} \; && \

@@ -323,7 +323,6 @@
 #include <JavaScriptCore/DFGDoesGCCheck.h>
 #include <JavaScriptCore/DOMAnnotation.h>
 #include <JavaScriptCore/DOMAttributeGetterSetter.h>
-#include <JavaScriptCore/DateInstanceCache.h>
 #include <JavaScriptCore/DeferGC.h>
 #include <JavaScriptCore/DefinePropertyAttributes.h>
 #include <JavaScriptCore/DeleteAllCodeEffort.h>
@@ -342,6 +341,7 @@
 #include <JavaScriptCore/FreeList.h>
 #include <JavaScriptCore/FunctionHasExecutedCache.h>
 #include <JavaScriptCore/GCAssertions.h>
+#include <JavaScriptCore/GCCompletionCallback.h>
 #include <JavaScriptCore/GCConductor.h>
 #include <JavaScriptCore/GCIncomingRefCountedSet.h>
 #include <JavaScriptCore/GCOwnedDataScope.h>
@@ -350,13 +350,10 @@
 #include <JavaScriptCore/GenericOffset.h>
 #include <JavaScriptCore/GetVM.h>
 #include <JavaScriptCore/Handle.h>
-#include <JavaScriptCore/HandleBlock.h>
-#include <JavaScriptCore/HandleSet.h>
 #include <JavaScriptCore/HandleTypes.h>
 #include <JavaScriptCore/Heap.h>
 #include <JavaScriptCore/HeapCell.h>
 #include <JavaScriptCore/HeapCellType.h>
-#include <JavaScriptCore/HeapFinalizerCallback.h>
 #include <JavaScriptCore/HeapObserver.h>
 #include <JavaScriptCore/Identifier.h>
 #include <JavaScriptCore/ImplementationVisibility.h>
@@ -433,6 +430,8 @@
 #include <JavaScriptCore/StringReplaceCache.h>
 #include <JavaScriptCore/StringSplitCache.h>
 #include <JavaScriptCore/Strong.h>
+#include <JavaScriptCore/StrongBlock.h>
+#include <JavaScriptCore/StrongSet.h>
 #include <JavaScriptCore/Structure.h>
 #include <JavaScriptCore/StructureID.h>
 #include <JavaScriptCore/StructureRareData.h>
@@ -492,7 +491,6 @@
 #include <wtf/FastTLS.h>
 #include <wtf/FlatteningVariantAdaptor.h>
 #include <wtf/GenericHashKey.h>
-#include <wtf/GregorianDateTime.h>
 #include <wtf/Indenter.h>
 #include <wtf/InlineMap.h>
 #include <wtf/LazyRef.h>
@@ -504,6 +502,7 @@
 #include <wtf/PackedRefPtr.h>
 #include <wtf/PageAllocation.h>
 #include <wtf/ParallelHelperPool.h>
+#include <wtf/PlainGregorianDateTime.h>
 #include <wtf/PointerComparison.h>
 #include <wtf/ProcessID.h>
 #include <wtf/RawValueTraits.h>
@@ -610,6 +609,7 @@
 #include "CharacterData.h"
 #include "ClipboardAccessPolicy.h"
 #include "ColorInterpolationMethod.h"
+#include "ColorSpace.h"
 #include "CommonAtomStrings.h"
 #include "CompositeOperation.h"
 #include "ComputedStyleDependencies.h"
@@ -628,7 +628,6 @@
 #include "DataDetectorType.h"
 #endif
 #include "DecodingOptions.h"
-#include "DestinationColorSpace.h"
 #include "Document.h"
 #include "DocumentClasses.h"
 #include "DocumentEnums.h"

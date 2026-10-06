@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2009 Alex Milowski (alex@milowski.com). All rights reserved.
- * Copyright (C) 2010-2025 Apple Inc. All rights reserved.
+ * Copyright (C) 2010-2026 Apple Inc. All rights reserved.
  * Copyright (C) 2010 François Sausset (sausset@gmail.com). All rights reserved.
  * Copyright (C) 2016 Igalia S.L.
  *
@@ -41,6 +41,7 @@
 #include "HTMLNames.h"
 #include "HTMLParserIdioms.h"
 #include "HTMLTableCellElement.h"
+#include "KeyboardEvent.h"
 #include "LocalFrame.h"
 #include "MathMLNames.h"
 #include "MouseEvent.h"
@@ -81,7 +82,7 @@ unsigned MathMLElement::rowSpan() const
     if (!hasTagName(mtdTag))
         return 1u;
     auto& rowSpanValue = attributeWithoutSynchronization(MathMLNames::rowspanAttr);
-    return std::max(1u, std::min(limitToOnlyHTMLNonNegative(rowSpanValue, 1u), HTMLTableCellElement::maxRowspan));
+    return clampHTMLNonNegativeIntegerToRange(rowSpanValue, HTMLTableCellElement::minRowspan, HTMLTableCellElement::maxRowspan, HTMLTableCellElement::defaultRowspan);
 }
 
 void MathMLElement::attributeChanged(const QualifiedName& name, const AtomString& oldValue, const AtomString& newValue, AttributeModificationReason attributeModificationReason)
@@ -96,10 +97,10 @@ void MathMLElement::attributeChanged(const QualifiedName& name, const AtomString
             downcast<RenderTableCell>(*renderer()).colSpanOrRowSpanChanged();
         break;
     case AttributeNames::tabindexAttr:
-        if (newValue.isEmpty())
-            setTabIndexExplicitly(std::nullopt);
-        else if (auto optionalTabIndex = parseHTMLInteger(newValue))
+        if (auto optionalTabIndex = parseHTMLInteger(newValue))
             setTabIndexExplicitly(optionalTabIndex.value());
+        else
+            setTabIndexExplicitly(std::nullopt);
         break;
     default:
         if (auto& eventName = HTMLElement::eventNameForEventHandlerAttribute(name); !eventName.isNull()) {
@@ -298,7 +299,7 @@ bool MathMLElement::willRespondToMouseClickEventsWithEditability(Editability edi
 void MathMLElement::defaultEventHandler(Event& event)
 {
     if (isLink()) {
-        if (focused() && isEnterKeyKeydownEvent(event)) {
+        if (focused() && KeyboardEvent::isEnterKeyKeydownEvent(event)) {
             event.setDefaultHandled();
             dispatchSimulatedClick(&event);
             return;

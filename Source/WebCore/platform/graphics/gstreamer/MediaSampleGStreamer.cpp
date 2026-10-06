@@ -49,7 +49,11 @@ MediaSampleGStreamer::MediaSampleGStreamer(GRefPtr<GstSample>&& sample, const Fl
 {
     ensureMediaSampleDebugCategoryInitialized();
     ASSERT(sample);
-    m_sample = WTF::move(sample);
+
+    GRefPtr writableSample = adoptGRef(gst_sample_make_writable(sample.leakRef()));
+    gst_sample_set_segment(writableSample.get(), nullptr);
+    m_sample = WTF::move(writableSample);
+
     const GstClockTime minimumDuration = 1000; // 1 us
     auto* buffer = gst_sample_get_buffer(m_sample.get());
     RELEASE_ASSERT(buffer);
@@ -93,6 +97,15 @@ MediaSampleGStreamer::MediaSampleGStreamer(const FloatSize& presentationSize, Tr
     ensureMediaSampleDebugCategoryInitialized();
 }
 
+void MediaSampleGStreamer::extendToTheBeginning()
+{
+    // Only to be used with the first sample, as a hack for lack of support for edit lists in old GStreamer versions.
+    // See AppendPipeline::appsinkNewSample()
+    ASSERT(m_dts == MediaTime::zeroTime());
+    m_duration += m_pts;
+    m_pts = MediaTime::zeroTime();
+}
+
 Ref<MediaSampleGStreamer> MediaSampleGStreamer::createFakeSample(GstCaps*, const MediaTime& pts, const MediaTime& dts, const MediaTime& duration, const FloatSize& presentationSize, TrackID trackId)
 {
     MediaSampleGStreamer* gstreamerMediaSample = new MediaSampleGStreamer(presentationSize, trackId);
@@ -101,16 +114,6 @@ Ref<MediaSampleGStreamer> MediaSampleGStreamer::createFakeSample(GstCaps*, const
     gstreamerMediaSample->m_duration = duration;
     gstreamerMediaSample->m_flags = MediaSample::IsNonDisplaying;
     return adoptRef(*gstreamerMediaSample);
-}
-
-void MediaSampleGStreamer::extendToTheBeginning()
-{
-    GST_TRACE("Extending to beginning");
-    // Only to be used with the first sample, as a hack for lack of support for edit lists.
-    // See AppendPipeline::appsinkNewSample()
-    ASSERT(m_dts == MediaTime::zeroTime());
-    m_duration += m_pts;
-    m_pts = MediaTime::zeroTime();
 }
 
 void MediaSampleGStreamer::updateSampleTimestamps([[maybe_unused]] const String& debugMessage)

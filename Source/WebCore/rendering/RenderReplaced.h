@@ -32,12 +32,28 @@ public:
     virtual ~RenderReplaced();
 
     virtual bool shouldRespectZeroIntrinsicWidth() const;
+    virtual bool shouldRespectZeroIntrinsicHeight() const;
 
     void computeReplacedOutOfFlowPositionedLogicalHeight(LogicalExtentComputedValues&) const;
     void computeReplacedOutOfFlowPositionedLogicalWidth(LogicalExtentComputedValues&) const;
 
     LayoutRect replacedContentRect(const LayoutSize& intrinsicSize) const;
     LayoutRect replacedContentRect() const { return replacedContentRect(intrinsicSize()); }
+
+    std::optional<FloatRect> resolvedObjectViewBox(const FloatSize& physicalIntrinsicSize) const;
+
+    // Out-of-line so callers outside style/rendering/layout code don't need to pull in
+    // the (compile-time-expensive) computed style getter headers just to check this.
+    WEBCORE_EXPORT bool hasObjectViewBoxSet() const;
+
+    // Returns the full content rect scaled so the view-box sub-region maps onto destRect,
+    // or destRect itself when object-view-box is not set.
+    LayoutRect computePaintRectForObjectViewBox(const LayoutRect& destRect) const { return computePaintRectForObjectViewBox(destRect, intrinsicSize()); }
+    LayoutRect computePaintRectForObjectViewBox(const LayoutRect& destRect, const LayoutSize& intrinsicSize) const;
+
+    // False only when object-view-box has a negative inset, making the view box a superset
+    // of the natural size; in that case the painted content doesn't fully cover destRect.
+    bool objectViewBoxIsContainedWithinNaturalSize() const;
 
     bool setNeedsLayoutIfNeededAfterIntrinsicSizeChange();
 
@@ -85,7 +101,7 @@ protected:
     virtual bool hasRelativeIntrinsicLogicalWidth() const { return false; }
 
     void paint(PaintInfo&, const LayoutPoint&) override;
-    bool NODELETE shouldPaint(PaintInfo&, const LayoutPoint&);
+    bool shouldPaint(PaintInfo&, const LayoutPoint&);
     LayoutRect NODELETE localSelectionRect(bool checkWhetherSelected = true) const; // This is in local coordinates, but it's a physical rect (so the top left corner is physical top left).
 
     void willBeDestroyed() override;

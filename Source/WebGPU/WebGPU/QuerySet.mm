@@ -50,20 +50,16 @@ Ref<QuerySet> Device::createQuerySet(const WGPUQuerySetDescriptor& descriptor)
         return QuerySet::createInvalid(*this);
     }
 
-    const char* label = descriptor.label;
+    auto label = descriptor.label;
     auto type = descriptor.type;
 
     switch (type) {
     case WGPUQueryType_Timestamp: {
-#if !PLATFORM(WATCHOS)
         auto querySetWithOffset = QuerySet::counterSampleBufferWithOffsetForDevice(count, *this);
         if (!querySetWithOffset.buffer)
             return QuerySet::createInvalid(*this);
 
         return QuerySet::create(WTF::move(querySetWithOffset), count, type, *this);
-#else
-        return QuerySet::createInvalid(*this);
-#endif
     } case WGPUQueryType_Occlusion: {
         auto buffer = safeCreateBuffer(sizeof(uint64_t) * count, MTLStorageModePrivate);
         buffer.label = fromAPI(label).createNSString().get();
@@ -231,7 +227,7 @@ void QuerySet::createContainersIfNeeded()
 
 #pragma mark WGPU Stubs
 
-void NODELETE wgpuQuerySetReference(WGPUQuerySet querySet)
+void NODELETE wgpuQuerySetAddRef(WGPUQuerySet querySet)
 {
     WebGPU::fromAPI(querySet).ref();
 }
@@ -246,7 +242,7 @@ void wgpuQuerySetDestroy(WGPUQuerySet querySet)
     protect(WebGPU::fromAPI(querySet))->destroy();
 }
 
-void wgpuQuerySetSetLabel(WGPUQuerySet querySet, const char* label)
+void wgpuQuerySetSetLabel(WGPUQuerySet querySet, WGPUStringView label)
 {
     protect(WebGPU::fromAPI(querySet))->setLabel(WebGPU::fromAPI(label));
 }

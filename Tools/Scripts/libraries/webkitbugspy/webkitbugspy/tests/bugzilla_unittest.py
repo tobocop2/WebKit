@@ -20,6 +20,7 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import copy
 import json
 import logging
 import re
@@ -30,6 +31,34 @@ from webkitcorepy import OutputCapture
 from webkitcorepy import mocks as wkmocks
 
 from webkitbugspy import Tracker, User, bugzilla, mocks, radar
+
+
+ATTACHMENT_ISSUES = [
+    dict(
+        id=1,
+        title='Issue with attachments',
+        timestamp=1639536160,
+        modified=1710884407,
+        opened=True,
+        creator=mocks.USERS['Felix Filer'],
+        assignee=mocks.USERS['Tim Contributor'],
+        description='An example issue with attachments',
+        attachments=[
+            dict(fileName='fix.patch', data=b'FIX PATCH BYTES', content_type='text/plain', is_patch=True),
+            dict(fileName='notes.txt', data=b'not a patch', content_type='text/plain'),
+            dict(fileName='old.patch', data=b'OBSOLETE', content_type='text/plain', is_patch=True, is_obsolete=True),
+        ],
+    ), dict(
+        id=2,
+        title='Issue without attachments',
+        timestamp=1639540010,
+        modified=1710884407,
+        opened=True,
+        creator=mocks.USERS['Felix Filer'],
+        assignee=mocks.USERS['Tim Contributor'],
+        description='An example issue without attachments',
+    ),
+]
 
 
 class TestBugzilla(unittest.TestCase):
@@ -150,6 +179,23 @@ class TestBugzilla(unittest.TestCase):
                 User.Encoder().default(comments[0].user),
                 dict(name='Felix Filer', username='ffiler@example.com', emails=['ffiler@example.com']),
             )
+
+    def test_attachments(self):
+        with mocks.Bugzilla(self.URL.split('://')[1], issues=ATTACHMENT_ISSUES):
+            attachments = bugzilla.Tracker(self.URL).issue(1).attachments
+            self.assertEqual([attachment.name for attachment in attachments], ['fix.patch', 'notes.txt'])
+            self.assertEqual(attachments[0].content_type, 'text/plain')
+
+    def test_patches(self):
+        with mocks.Bugzilla(self.URL.split('://')[1], issues=ATTACHMENT_ISSUES):
+            patches = bugzilla.Tracker(self.URL).issue(1).patches
+            self.assertEqual([patch.name for patch in patches], ['fix.patch'])
+            self.assertEqual(patches[0].contents(), b'FIX PATCH BYTES')
+
+    def test_no_attachments(self):
+        with mocks.Bugzilla(self.URL.split('://')[1], issues=ATTACHMENT_ISSUES):
+            self.assertEqual(bugzilla.Tracker(self.URL).issue(2).attachments, [])
+            self.assertEqual(bugzilla.Tracker(self.URL).issue(2).patches, [])
 
     def test_watchers(self):
         with mocks.Bugzilla(self.URL.split('://')[1], issues=mocks.ISSUES):
@@ -447,6 +493,101 @@ What component in 'WebKit' should the bug be associated with?:
                     project='WebKit', component='Tables', version='Other', keywords=['InvalidKeyword']
                 )
             self.assertEqual(f"'InvalidKeyword' is not a valid keyword for 'WebKit'", str(e.exception))
+
+    def test_create_surfaces_server_error(self):
+        with mocks.Bugzilla(self.URL.split('://')[1], environment=wkmocks.Environment(
+                BUGS_EXAMPLE_COM_USERNAME='tcontributor@example.com',
+                BUGS_EXAMPLE_COM_PASSWORD='password',
+        ), projects=mocks.PROJECTS, issues=mocks.ISSUES), patch.object(bugzilla.Tracker, 'MAX_SUMMARY_LENGTH', 1000):
+            with OutputCapture() as captured:
+                created = bugzilla.Tracker(self.URL).create(
+                    'A' * 300, 'Creating new bug',
+                    project='WebKit', component='Tables', version='Other',
+                )
+            self.assertIsNone(created)
+            self.assertEqual(
+                captured.stderr.getvalue(),
+                'Failed to create bug: The text you entered in the Summary field is too long (300 characters, above the maximum length allowed of 255 characters).\n',
+            )
+
+    def test_create_truncates_summary(self):
+        with mocks.Bugzilla(self.URL.split('://')[1], environment=wkmocks.Environment(
+                BUGS_EXAMPLE_COM_USERNAME='tcontributor@example.com',
+                BUGS_EXAMPLE_COM_PASSWORD='password',
+        ), projects=mocks.PROJECTS, issues=mocks.ISSUES):
+            long_title = 'A' * 300
+            created = bugzilla.Tracker(self.URL).create(
+                long_title, 'Creating new bug',
+                project='WebKit', component='Tables', version='Other',
+            )
+            self.assertIsNotNone(created)
+            self.assertEqual(len(created.title), 255)
+            self.assertEqual(created.title, 'A' * 252 + '...')
+            self.assertEqual(created.description, 'Creating new bug')
+
+    def test_create_falls_back_to_default_version(self):
+        projects = copy.deepcopy(mocks.PROJECTS)
+        projects['WebKit']['versions'].insert(0, '528+ (Nightly build)')
+        projects['WebKit']['inactive_versions'] = ['528+ (Nightly build)']
+        projects['WebKit']['versions'].append('WebKit Nightly Build')
+
+        with mocks.Bugzilla(self.URL.split('://')[1], environment=wkmocks.Environment(
+                BUGS_EXAMPLE_COM_USERNAME='tcontributor@example.com',
+                BUGS_EXAMPLE_COM_PASSWORD='password',
+        ), projects=projects, issues=mocks.ISSUES):
+            with OutputCapture() as captured:
+                created = bugzilla.Tracker(self.URL).create(
+                    'New bug', 'Creating new bug',
+                    project='WebKit', component='Tables', version='528+ (Nightly build)',
+                )
+            self.assertIsNotNone(created)
+            self.assertEqual(created.version, 'WebKit Nightly Build')
+            self.assertEqual(
+                captured.stderr.getvalue(),
+                "'528+ (Nightly build)' is not an active version for 'WebKit', using 'WebKit Nightly Build' instead\n",
+            )
+
+    def test_create_falls_back_to_last_version(self):
+        projects = copy.deepcopy(mocks.PROJECTS)
+        projects['WebKit']['versions'].insert(0, '528+ (Nightly build)')
+        projects['WebKit']['inactive_versions'] = ['528+ (Nightly build)']
+
+        with mocks.Bugzilla(self.URL.split('://')[1], environment=wkmocks.Environment(
+                BUGS_EXAMPLE_COM_USERNAME='tcontributor@example.com',
+                BUGS_EXAMPLE_COM_PASSWORD='password',
+        ), projects=projects, issues=mocks.ISSUES):
+            with OutputCapture():
+                created = bugzilla.Tracker(self.URL).create(
+                    'New bug', 'Creating new bug',
+                    project='WebKit', component='Tables', version='528+ (Nightly build)',
+                )
+            self.assertIsNotNone(created)
+            self.assertEqual(created.version, 'WebKit Local Build')
+
+    def test_create_no_version_is_silent(self):
+        with mocks.Bugzilla(self.URL.split('://')[1], environment=wkmocks.Environment(
+                BUGS_EXAMPLE_COM_USERNAME='tcontributor@example.com',
+                BUGS_EXAMPLE_COM_PASSWORD='password',
+        ), projects=mocks.PROJECTS, issues=mocks.ISSUES):
+            with OutputCapture() as captured:
+                created = bugzilla.Tracker(self.URL).create(
+                    'New bug', 'Creating new bug',
+                    project='WebKit', component='Tables',
+                )
+            self.assertIsNotNone(created)
+            self.assertEqual(created.version, 'WebKit Local Build')
+            self.assertEqual(captured.stderr.getvalue(), '')
+
+    def test_projects_excludes_inactive_versions(self):
+        projects = copy.deepcopy(mocks.PROJECTS)
+        projects['WebKit']['versions'].insert(0, '528+ (Nightly build)')
+        projects['WebKit']['inactive_versions'] = ['528+ (Nightly build)']
+
+        with mocks.Bugzilla(self.URL.split('://')[1], projects=projects):
+            self.assertEqual(
+                bugzilla.Tracker(self.URL).projects['WebKit']['versions'],
+                ['Other', 'Safari 15', 'Safari Technology Preview', 'WebKit Local Build'],
+            )
 
     def test_set_component(self):
         with mocks.Bugzilla(self.URL.split('://')[1], environment=wkmocks.Environment(
@@ -993,6 +1134,13 @@ What component in 'WebKit' should the bug be associated with?:
             issue.relate(depends_on=tracker.issue(2))
             self.assertEqual(issue.related['depends_on'], [tracker.issue(2)])
             self.assertEqual(issue.related['blocks'], [])
+
+            # The edge runs both ways
+            self.assertEqual(tracker.issue(2).related['blocks'], [issue])
+
+            issue.unrelate(depends_on=tracker.issue(2))
+            self.assertEqual(issue.related['depends_on'], [])
+            self.assertEqual(tracker.issue(2).related['blocks'], [])
 
     def test_relate(self):
         with mocks.Bugzilla(self.URL.split('://')[1], environment=wkmocks.Environment(

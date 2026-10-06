@@ -50,6 +50,10 @@
 #include "StylePrimitiveNumericTypes+Evaluation.h"
 #include "TextBoxPainter.h"
 
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+#include <WebKitAdditions/BackgroundPainterAdditions.cpp>
+#endif
+
 namespace WebCore {
 
 BackgroundImageGeometry::BackgroundImageGeometry(const LayoutRect& destinationRect, const LayoutSize& tileSizeWithoutPixelSnapping, const LayoutSize& tileSize, const LayoutSize& phase, const LayoutSize& spaceSize, bool fixedAttachment)
@@ -92,6 +96,10 @@ void BackgroundPainter::paintBackground(const LayoutRect& paintRect, BleedAvoida
     auto compositeOp = document().compositeOperatorForBackgroundColor(backgroundColor, m_renderer);
 
     paintFillLayers(backgroundColor, m_renderer.style().backgroundLayers(), m_renderer.style().usedZoomForLength(), paintRect, bleedAvoidance, compositeOp);
+
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+    AXCustomColorModeController::paintSurfaceHairlineIfNecessary(m_paintInfo.context(), document(), m_renderer, paintRect);
+#endif
 }
 
 void BackgroundPainter::paintRootBoxFillLayers() const
@@ -117,8 +125,11 @@ bool BackgroundPainter::paintsOwnBackground(const RenderBoxModelObject& renderer
         return true;
     if (renderer.shouldApplyAnyContainment())
         return true;
-    // The <body> only paints its background if the root element has defined a background independent of the body,
-    // or if the <body>'s parent is not the document element's renderer (e.g. inside SVG foreignObject).
+
+    // Per CSS Backgrounds spec, the background of <body> is used as the root background,
+    // hence it'll be painted by the root background painter. <body> only paints its background
+    // if the root element has defined a background independent of the body, or if the <body>'s
+    // parent is not the document element's renderer (e.g. inside SVG foreignObject).
     auto documentElementRenderer = renderer.document().documentElement()->renderer();
     return !documentElementRenderer || documentElementRenderer->shouldApplyAnyContainment() || documentElementRenderer->hasBackground() || documentElementRenderer != renderer.parent();
 }
@@ -190,7 +201,11 @@ static void applyBoxShadowForBackground(GraphicsContext& context, const Style::C
                 shadow.location.y().resolveZoom(zoomFactor),
             },
             shadow.blur.resolveZoom(zoomFactor),
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+            AXCustomColorModeController::shadowColor(colorResolver, style, shadow),
+#else
             colorResolver.colorResolvingCurrentColorApplyingColorFilter(shadow.color),
+#endif
             shadow.isWebkitBoxShadow ? ShadowRadiusMode::Legacy : ShadowRadiusMode::Default
         });
         break;
@@ -649,6 +664,12 @@ template<typename Layer> BackgroundImageGeometry BackgroundPainter::calculateFil
         if (renderer.isDocumentElementRenderer()) {
             positioningAreaSize = downcast<RenderBox>(renderer).borderBoxSize() - LayoutSize(left + right, top + bottom);
             positioningAreaSize = LayoutSize(snapSizeToDevicePixel(positioningAreaSize, LayoutPoint(), deviceScaleFactor));
+            if (renderer.writingMode().isBlockFlipped()) {
+                LayoutRect flippedRootBorderBox = downcast<RenderBox>(renderer).borderBoxRectInContainer();
+                view.flipForWritingMode(flippedRootBorderBox);
+                left += flippedRootBorderBox.x() - borderBoxRect.x();
+                top += flippedRootBorderBox.y() - borderBoxRect.y();
+            }
             if (protect(view)->frameView().hasExtendedBackgroundRectForPainting()) {
                 LayoutRect extendedBackgroundRect = protect(view)->frameView().extendedBackgroundRectForPainting();
                 left += (renderer.marginLeft() - extendedBackgroundRect.x());
@@ -794,7 +815,7 @@ template<typename Layer> BackgroundImageGeometry BackgroundPainter::calculateFil
     return BackgroundImageGeometry(destinationRect, tileSizeWithoutPixelSnapping, tileSize, phase, spaceSize, fixedAttachment);
 }
 
-template<typename Layer> LayoutSize BackgroundPainter::calculateFillTileSize(const RenderBoxModelObject& renderer, const Layer& fillLayer, Style::ZoomFactor, const LayoutSize& positioningAreaSize)
+template<typename Layer> LayoutSize BackgroundPainter::calculateFillTileSize(const RenderBoxModelObject& renderer, const Layer& fillLayer, Style::ZoomFactor zoom, const LayoutSize& positioningAreaSize)
 {
     RefPtr image = fillLayer.image().tryStyleImage();
     auto devicePixelSize = LayoutUnit { 1.0 / protect(renderer)->document().deviceScaleFactor() };
@@ -807,9 +828,32 @@ template<typename Layer> LayoutSize BackgroundPainter::calculateFillTileSize(con
         imageIntrinsicSize = positioningAreaSize;
 
     auto handleKeyword = [&](auto keyword) -> LayoutSize {
+        if (image && !image->imageHasNaturalAspectRatio())
+            return positioningAreaSize;
+
         // Scale computation needs higher precision than what LayoutUnit can offer.
         FloatSize localImageIntrinsicSize = imageIntrinsicSize;
         FloatSize localPositioningAreaSize = positioningAreaSize;
+
+        if (image && localImageIntrinsicSize.isEmpty()) {
+            float intrinsicWidth = 0;
+            float intrinsicHeight = 0;
+            FloatSize intrinsicRatio;
+            image->computeIntrinsicDimensions(&renderer, intrinsicWidth, intrinsicHeight, intrinsicRatio);
+            if (!intrinsicRatio.isEmpty()) {
+                float heightAtFullWidth = localPositioningAreaSize.width() * intrinsicRatio.height() / intrinsicRatio.width();
+                bool fitToWidth = keyword.value == CSSValueContain
+                    ? heightAtFullWidth <= localPositioningAreaSize.height()
+                    : heightAtFullWidth >= localPositioningAreaSize.height();
+                auto concreteSize = fitToWidth
+                    ? FloatSize(localPositioningAreaSize.width(), heightAtFullWidth)
+                    : FloatSize(localPositioningAreaSize.height() * intrinsicRatio.width() / intrinsicRatio.height(), localPositioningAreaSize.height());
+                LayoutSize tileSize(concreteSize);
+                if (tileSize.isEmpty())
+                    return { };
+                return tileSize.expandedTo({ devicePixelSize, devicePixelSize });
+            }
+        }
 
         float horizontalScaleFactor = localImageIntrinsicSize.width() ? (localPositioningAreaSize.width() / localImageIntrinsicSize.width()) : 1;
         float verticalScaleFactor = localImageIntrinsicSize.height() ? (localPositioningAreaSize.height() / localImageIntrinsicSize.height()) : 1;
@@ -834,20 +878,24 @@ template<typename Layer> LayoutSize BackgroundPainter::calculateFillTileSize(con
             auto& layerWidth = size.width();
             auto& layerHeight = size.height();
 
-            if (auto fixed = layerWidth.tryFixed())
-                tileSize.setWidth(Style::evaluate<LayoutUnit>(*fixed, Style::ZoomNeeded { }));
-            else if (layerWidth.isPercentOrCalculated()) {
-                auto resolvedWidth = Style::evaluate<LayoutUnit>(layerWidth, positioningAreaSize.width(), Style::ZoomNeeded { });
+            if (auto fixed = layerWidth.tryFixed()) {
+                auto resolvedWidth = Style::evaluate<LayoutUnit>(*fixed, zoom);
                 // Non-zero resolved value should always produce some content.
-                tileSize.setWidth(!resolvedWidth ? resolvedWidth : std::max(devicePixelSize, resolvedWidth));
+                tileSize.setWidth(!resolvedWidth ? 0_lu : std::max(devicePixelSize, resolvedWidth));
+            } else if (layerWidth.isPercentOrCalculated()) {
+                auto resolvedWidth = Style::evaluate<LayoutUnit>(layerWidth, positioningAreaSize.width(), zoom);
+                // Non-zero resolved value should always produce some content.
+                tileSize.setWidth(!resolvedWidth ? 0_lu : std::max(devicePixelSize, resolvedWidth));
             }
 
-            if (auto fixed = layerHeight.tryFixed())
-                tileSize.setHeight(Style::evaluate<LayoutUnit>(*fixed, Style::ZoomNeeded { }));
-            else if (layerHeight.isPercentOrCalculated()) {
-                auto resolvedHeight = Style::evaluate<LayoutUnit>(layerHeight, positioningAreaSize.height(), Style::ZoomNeeded { });
+            if (auto fixed = layerHeight.tryFixed()) {
+                auto resolvedHeight = Style::evaluate<LayoutUnit>(*fixed, zoom);
                 // Non-zero resolved value should always produce some content.
-                tileSize.setHeight(!resolvedHeight ? resolvedHeight : std::max(devicePixelSize, resolvedHeight));
+                tileSize.setHeight(!resolvedHeight ? 0_lu : std::max(devicePixelSize, resolvedHeight));
+            } else if (layerHeight.isPercentOrCalculated()) {
+                auto resolvedHeight = Style::evaluate<LayoutUnit>(layerHeight, positioningAreaSize.height(), zoom);
+                // Non-zero resolved value should always produce some content.
+                tileSize.setHeight(!resolvedHeight ? 0_lu : std::max(devicePixelSize, resolvedHeight));
             }
 
             // If one of the values is auto we have to use the appropriate
@@ -856,9 +904,13 @@ template<typename Layer> LayoutSize BackgroundPainter::calculateFillTileSize(con
             if (layerWidth.isAuto() && !layerHeight.isAuto()) {
                 if (hasNaturalAspectRatio && imageIntrinsicSize.height())
                     tileSize.setWidth(imageIntrinsicSize.width() * tileSize.height() / imageIntrinsicSize.height());
+                else
+                    tileSize.setWidth(imageIntrinsicSize.width());
             } else if (!layerWidth.isAuto() && layerHeight.isAuto()) {
                 if (hasNaturalAspectRatio && imageIntrinsicSize.width())
                     tileSize.setHeight(imageIntrinsicSize.height() * tileSize.width() / imageIntrinsicSize.width());
+                else
+                    tileSize.setHeight(imageIntrinsicSize.height());
             } else if (layerWidth.isAuto() && layerHeight.isAuto()) {
                 // If both width and height are auto, use the image's intrinsic size.
                 tileSize = imageIntrinsicSize;
@@ -897,7 +949,11 @@ void BackgroundPainter::paintBoxShadow(const LayoutRect& paintRect, const Style:
             continue;
 
         Style::ColorResolver colorResolver { style };
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+        auto shadowColor = AXCustomColorModeController::shadowColor(colorResolver, style, shadow);
+#else
         auto shadowColor = colorResolver.colorResolvingCurrentColorApplyingColorFilter(shadow.color);
+#endif
 
         auto shouldInflateBorderRect = [&]() {
             if (!hasOpaqueBackground)
@@ -981,7 +1037,7 @@ void BackgroundPainter::paintBoxShadow(const LayoutRect& paintRect, const Style:
                 influenceRadii.expand(2 * shadowPaintingExtent + shadowSpread);
                 influenceShape.setRadii(influenceRadii);
 
-                if (influenceShape.outerShapeContains(m_paintInfo.rect))
+                if (!shadowShape.hasNonRoundCornerShape() && influenceShape.outerShapeContains(m_paintInfo.rect))
                     context.fillRect(shadowShape.snappedOuterRect(deviceScaleFactor), Color::black);
                 else
                     shadowShape.fillOuterShape(context, Color::black, deviceScaleFactor);
@@ -1003,9 +1059,9 @@ void BackgroundPainter::paintBoxShadow(const LayoutRect& paintRect, const Style:
             if (!closedEdges.bottom())
                 outerRectExpandedToObscureOpenEdges.setHeight(outerRectExpandedToObscureOpenEdges.height() - std::min<LayoutUnit>(shadowOffset.height(), 0) + shadowInfluence);
 
-            auto shapeForInnerHole = BorderShape(outerRectExpandedToObscureOpenEdges, borderWidthsWithSpread, borderShape.radii());
+            auto shapeForInnerHole = BorderShape(outerRectExpandedToObscureOpenEdges, borderWidthsWithSpread, borderShape.radii(), borderShape.cornerCurvatures());
             if (shapeForInnerHole.snappedInnerRect(deviceScaleFactor).isEmpty()) {
-                shapeForInnerHole.fillOuterShape(context, shadowColor, deviceScaleFactor);
+                borderShape.fillInnerShape(context, shadowColor, deviceScaleFactor);
                 continue;
             }
 

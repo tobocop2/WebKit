@@ -381,7 +381,7 @@ static AtomString effectiveViewTransitionName(RenderLayerModelObject& renderer, 
             if (isCrossDocument)
                 return nullAtom();
 
-            return makeAtomString("-ua-auto-"_s, String::number(element->nodeIdentifier().toRawValue()));
+            return makeAtomString("-ua-auto-"_s, String::number(element->nodeIdentifier().toUInt64()));
         },
         [&](const CSS::Keyword::MatchElement&) {
             SUPPRESS_UNCHECKED_LOCAL auto scope = computeScope();
@@ -389,7 +389,7 @@ static AtomString effectiveViewTransitionName(RenderLayerModelObject& renderer, 
                 return nullAtom();
 
             Ref element = *renderer.element();
-            return makeAtomString("-ua-auto-"_s, String::number(element->nodeIdentifier().toRawValue()));
+            return makeAtomString("-ua-auto-"_s, String::number(element->nodeIdentifier().toUInt64()));
         },
         [&](const Style::CustomIdent& customIdent) {
             SUPPRESS_UNCHECKED_LOCAL auto scope = computeScope();
@@ -444,7 +444,7 @@ LayoutRect ViewTransition::captureOverflowRect(RenderLayerModelObject& renderer)
 static LayoutPoint layerToLayoutOffset(const RenderLayerModelObject& renderer)
 {
     if (const auto* renderInline = dynamicDowncast<RenderInline>(renderer)) {
-        auto boundingBox = renderInline->linesBoundingBox();
+        auto boundingBox = renderInline->borderBoxRectInContainer();
         return LayoutPoint { boundingBox.x(), boundingBox.y() };
     }
     return { };
@@ -472,9 +472,14 @@ static RefPtr<ImageBuffer> snapshotElementVisualOverflowClippedToViewport(LocalF
     RefPtr frameView = frame.document()->view();
     if (!frameView)
         return nullptr;
-    auto hostWindow = frameView->root() ? protect(frameView->root())->hostWindow() : nullptr;
 
-    auto buffer = ImageBuffer::create(paintRect.size(), RenderingMode::Accelerated, RenderingPurpose::Snapshot, scaleFactor, screenColorSpace(frameView), PixelFormat::BGRA8, hostWindow);
+    auto hostWindow = frameView->root() ? protect(frameView->root())->hostWindow() : nullptr;
+    auto colorSpace = screenColorSpace(frameView);
+#if PLATFORM(IOS_FAMILY)
+    colorSpace = ColorSpace::SRGB(); // FIXME: We should use the screen colorspace on iOS too, but that has blending issues: webkit.org/b/318764.
+#endif
+
+    auto buffer = ImageBuffer::create(paintRect.size(), RenderingMode::Accelerated, RenderingPurpose::Snapshot, scaleFactor, colorSpace, PixelFormat::BGRA8, hostWindow);
     if (!buffer)
         return nullptr;
 
@@ -735,8 +740,10 @@ void ViewTransition::setupDynamicStyleSheet(const AtomString& name, const Captur
     Ref keyframes = StyleRuleKeyframes::create(AtomString(makeString("-ua-view-transition-group-anim-"_s, name)));
     keyframes->wrapperAppendKeyframe(WTF::move(keyframe));
 
-    // We can add this to the normal namespace, since we recreate the resolver when the view-transition ends.
-    resolver->addKeyframeStyle(WTF::move(keyframes));
+    // Register through the document scope so the keyframes are re-established if the resolver
+    // is recreated (e.g. by a stylesheet mutation) during the transition. The keyframes are
+    // discarded when the transition ends and the view transition styles are cleared.
+    document()->styleScope().addViewTransitionKeyframes(WTF::move(keyframes));
 }
 
 // https://drafts.csswg.org/css-view-transitions/#setup-transition-pseudo-elements
@@ -973,6 +980,11 @@ void ViewTransition::copyElementBaseProperties(RenderLayerModelObject& renderer,
         transform.translate(output.size.width() / 2, output.size.height() / 2);
         transform.translateRight(-output.size.width() / 2, -output.size.height() / 2);
 
+        // Factor out the zoom from the nearest common ancestor of the captured element and the view transition
+        // pseudo tree (the document element), so that it doesn't get applied a second time when rendering the
+        // snapshots.
+        transform.unzoom(documentElementRenderer->style().usedZoom());
+
         Ref transformListValue = CSSTransformListValue::create(Style::createCSSValue(CSSValuePool::singleton(), documentElementRenderer->style(), transform));
         protect(output.properties)->setProperty(CSSPropertyTransform, WTF::move(transformListValue));
     }
@@ -980,9 +992,9 @@ void ViewTransition::copyElementBaseProperties(RenderLayerModelObject& renderer,
     // Factor out the zoom from the nearest common ancestor of the captured element and the view transition
     // pseudo tree (the document element), so that it doesn't get applied a second time when rendering the
     // snapshots.
-    LayoutSize cssSize = Style::adjustLayoutSizeForAbsoluteZoom(output.size, documentElementRenderer->style());
-    protect(output.properties)->setProperty(CSSPropertyWidth, CSSPrimitiveValue::create(cssSize.width(), CSSUnitType::CSS_PX));
-    protect(output.properties)->setProperty(CSSPropertyHeight, CSSPrimitiveValue::create(cssSize.height(), CSSUnitType::CSS_PX));
+    auto cssSize = Style::unapplyingZoom<LayoutSize>(output.size, documentElementRenderer->style());
+    protect(output.properties)->setProperty(CSSPropertyWidth, CSSPrimitiveValue::create(cssSize.width(), CSSUnitType::Px));
+    protect(output.properties)->setProperty(CSSPropertyHeight, CSSPrimitiveValue::create(cssSize.height(), CSSUnitType::Px));
 }
 
 // https://drafts.csswg.org/css-view-transitions-1/#update-pseudo-element-styles

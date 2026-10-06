@@ -386,7 +386,6 @@ NEVER_INLINE float FontCascade::widthForSimpleTextSlow(StringView text, TextDire
 #else
     GlyphBuffer glyphBuffer;
     Ref font = primaryFont();
-    ASSERT(!font->syntheticBoldOffset()); // This function should only be called when RenderText::computeCanUseSimplifiedTextMeasuring() returns true, and that function requires no synthetic bold.
 
     auto addGlyphsFromText = [&](GlyphBuffer& glyphBuffer, const Font& font, auto characters) {
         for (size_t i = 0; i < characters.size(); ++i) {
@@ -400,7 +399,7 @@ NEVER_INLINE float FontCascade::widthForSimpleTextSlow(StringView text, TextDire
     else
         addGlyphsFromText(glyphBuffer, font, text.span16());
 
-    auto initialAdvance = font->applyTransforms(glyphBuffer, 0, 0, enableKerning(), requiresShaping(), fontDescription().computedLocale(), text, textDirection);
+    auto initialAdvance = font->applyTransforms(glyphBuffer, 0, 0, enableKerning(), requiresShaping(), fontDescription().usedLocale(), text, textDirection);
     auto result = 0.f;
     for (size_t i = 0; i < glyphBuffer.size(); ++i)
         result += WebCore::width(glyphBuffer.advanceAt(i));
@@ -446,7 +445,7 @@ float FontCascade::zeroWidth() const
     // This represents the advance measure of the glyph 0 (zero, the Unicode character U+0030)
     // in the element's font. In cases where it is impossible or impractical to determine the measure of the 0 glyph,
     // it must be assumed to be 0.5em
-    auto defaultZeroWidthValue = fontDescription().computedSize() / 2;
+    auto defaultZeroWidthValue = fontDescription().usedSize() / 2;
     if (!metricsOfPrimaryFont().zeroWidth())
         return defaultZeroWidthValue;
 
@@ -1403,6 +1402,17 @@ static GlyphUnderlineType computeUnderlineType(const TextRun& textRun, const Gly
     case UBLOCK_HANGUL_SYLLABLES:
     case UBLOCK_HANGUL_JAMO_EXTENDED_A:
     case UBLOCK_HANGUL_JAMO_EXTENDED_B:
+    case UBLOCK_ARABIC:
+    case UBLOCK_ARABIC_SUPPLEMENT:
+    case UBLOCK_ARABIC_EXTENDED_A:
+    case UBLOCK_ARABIC_EXTENDED_B:
+#if U_ICU_VERSION_MAJOR_NUM >= 72
+    // Arabic Extended-C is Unicode 15.0, which ICU only knows about since 72; older ICU
+    // returns UBLOCK_NO_BLOCK for those code points, so the case is dead there anyway.
+    case UBLOCK_ARABIC_EXTENDED_C:
+#endif
+    case UBLOCK_ARABIC_PRESENTATION_FORMS_A:
+    case UBLOCK_ARABIC_PRESENTATION_FORMS_B:
         return GlyphUnderlineType::DrawOverGlyph;
     default:
         return GlyphUnderlineType::SkipDescenders;
@@ -1560,19 +1570,19 @@ inline bool NODELETE shouldDrawIfLoading(const Font& font, FontCascade::CustomFo
 void FontCascade::drawGlyphBuffer(GraphicsContext& context, const GlyphBuffer& glyphBuffer, FloatPoint& point, CustomFontNotReadyAction customFontNotReadyAction) const
 {
     ASSERT(glyphBuffer.isFlattened());
-    RefPtr fontData = glyphBuffer.fontAt(0);
+    Ref fontData = glyphBuffer.fontAt(0);
     FloatPoint startPoint = point;
     float nextX = startPoint.x() + WebCore::width(glyphBuffer.advanceAt(0));
     float nextY = startPoint.y() + height(glyphBuffer.advanceAt(0));
     unsigned lastFrom = 0;
     unsigned nextGlyph = 1;
     while (nextGlyph < glyphBuffer.size()) {
-        RefPtr nextFontData = glyphBuffer.fontAt(nextGlyph);
+        Ref nextFontData = glyphBuffer.fontAt(nextGlyph);
 
         if (nextFontData != fontData) {
-            if (shouldDrawIfLoading(*fontData, customFontNotReadyAction)) {
+            if (shouldDrawIfLoading(fontData.get(), customFontNotReadyAction)) {
                 size_t glyphCount = nextGlyph - lastFrom;
-                context.drawGlyphs(*fontData, glyphBuffer.glyphs(lastFrom, glyphCount), glyphBuffer.advances(lastFrom, glyphCount), startPoint, m_fontDescription.usedFontSmoothing());
+                context.drawGlyphs(fontData.get(), glyphBuffer.glyphs(lastFrom, glyphCount), glyphBuffer.advances(lastFrom, glyphCount), startPoint, m_fontDescription.usedFontSmoothing());
             }
             lastFrom = nextGlyph;
             fontData = WTF::move(nextFontData);
@@ -1584,9 +1594,9 @@ void FontCascade::drawGlyphBuffer(GraphicsContext& context, const GlyphBuffer& g
         nextGlyph++;
     }
 
-    if (shouldDrawIfLoading(*fontData, customFontNotReadyAction)) {
+    if (shouldDrawIfLoading(fontData.get(), customFontNotReadyAction)) {
         size_t glyphCount = nextGlyph - lastFrom;
-        context.drawGlyphs(*fontData, glyphBuffer.glyphs(lastFrom, glyphCount), glyphBuffer.advances(lastFrom, glyphCount), startPoint, m_fontDescription.usedFontSmoothing());
+        context.drawGlyphs(fontData.get(), glyphBuffer.glyphs(lastFrom, glyphCount), glyphBuffer.advances(lastFrom, glyphCount), startPoint, m_fontDescription.usedFontSmoothing());
     }
     point.setX(nextX);
 }

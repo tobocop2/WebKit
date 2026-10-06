@@ -68,10 +68,12 @@
 #include "FrameSelection.h"
 #include "GeometryUtilities.h"
 #include "HTMLAreaElement.h"
+#include "HTMLBRElement.h"
 #include "HTMLBodyElement.h"
 #include "HTMLDataListElement.h"
 #include "HTMLDetailsElement.h"
 #include "HTMLFormControlElement.h"
+#include "HTMLHeadingElement.h"
 #include "HTMLInputElement.h"
 #include "HTMLModelElement.h"
 #include "HTMLNames.h"
@@ -96,6 +98,7 @@
 #include "PositionInlines.h"
 #include "ProgressTracker.h"
 #include "Range.h"
+#include "RemoteFrame.h"
 #include "RenderElementInlines.h"
 #include "RenderImage.h"
 #include "RenderImageResource.h"
@@ -103,7 +106,7 @@
 #include "RenderLayer.h"
 #include "RenderLayerInlines.h"
 #include "RenderListItem.h"
-#include "RenderListMarker.h"
+#include "RenderListOutsideMarker.h"
 #include "RenderObjectInlines.h"
 #include "RenderText.h"
 #include "RenderTextControl.h"
@@ -116,6 +119,7 @@
 #include "SharedBuffer.h"
 #include "TextCheckerClient.h"
 #include "TextCheckingHelper.h"
+#include "TextControlInnerElements.h"
 #include "TextIterator.h"
 #include "UserGestureIndicator.h"
 #include "VisibleUnits.h"
@@ -433,11 +437,12 @@ Vector<AXTextMarkerRange> AccessibilityObject::misspellingRanges() const
     if (!node)
         return { };
 
-    RefPtr frame = node->document().frame();
+    RefPtr frame = protect(node->document())->frame();
     if (!frame)
         return { };
 
-    auto* textChecker = protect(frame->editor())->textChecker();
+    Ref editor = frame->editor();
+    auto* textChecker = editor->textChecker();
     if (!textChecker)
         return { };
 
@@ -455,7 +460,7 @@ Vector<AXTextMarkerRange> AccessibilityObject::misspellingRanges() const
         Vector<TextCheckingResult> misspellings;
         checkTextOfParagraph(*textChecker, stringValue(), TextCheckingType::Spelling, misspellings, frame->selection().selection());
         for (auto& misspelling : misspellings) {
-            if (auto range = protect(frame->editor())->rangeForTextCheckingResult(misspelling))
+            if (auto range = editor->rangeForTextCheckingResult(misspelling))
                 ranges.append(range);
         }
     } else {
@@ -476,7 +481,7 @@ std::optional<SimpleRange> AccessibilityObject::misspellingRange(const SimpleRan
     if (!node)
         return std::nullopt;
 
-    RefPtr frame = node->document().frame();
+    RefPtr frame = protect(node->document())->frame();
     if (!frame)
         return std::nullopt;
 
@@ -516,7 +521,7 @@ AXTextMarkerRange AccessibilityObject::textInputMarkedTextMarkerRange() const
     if (!node)
         return { };
 
-    RefPtr frame = node->document().frame();
+    RefPtr frame = protect(node->document())->frame();
     if (!frame)
         return { };
 
@@ -591,20 +596,52 @@ FloatRect AccessibilityObject::convertFrameToSpace(const FloatRect& frameRect, A
 
         auto geometry = rootScrollView->frameGeometry();
 
-        auto scaledRect = geometry.screenTransform.mapRect(FloatRect(snappedFrameRect));
+        // The top-level page scroll view's own frame is in view/device space (the viewport). Every other
+        // object's frame is content-space. screenTransform is the content->screen page-zoom scale, so
+        // applying it to the already-device-space viewport double-scales it (viewport * pageZoom),
+        // shrinking the frame that Voice Control, Switch Control, etc. clips its set of visible elements
+        // against. Skip the transform for the top page scroll view's own frame only.
+        //
+        // Guard on "no ancestor scroll view" -- NOT isRoot(), which is also true for local iframe roots under
+        // ACCESSIBILITY_LOCAL_FRAME -- so iframe scroll views (content-space elementRect) are still scaled.
+        // No-op at page zoom 1.0 (screenTransform is identity).
+        const bool isTopPageScrollViewOwnFrame = this == rootScrollView.get() && !parentAccessibilityScrollView;
+        auto scaledRect = isTopPageScrollViewOwnFrame
+            ? FloatRect(snappedFrameRect)
+            : geometry.screenTransform.mapRect(FloatRect(snappedFrameRect));
 
         auto screenPosition = geometry.screenPosition;
-        // screenPosition tracks the document origin, which moves with scroll.
-        // The viewport is fixed on screen, so subtract the scroll and content
-        // inset offsets that contentsToView baked into screenPosition.
-        if (this == rootScrollView.get()) {
-            if (RefPtr scrollView = rootScrollView->scrollView()) {
-                auto viewOriginScrollPosition = geometry.screenTransform.mapPoint(FloatPoint(scrollView->documentScrollPositionRelativeToViewOrigin()));
-                screenPosition.move(-roundToInt(viewOriginScrollPosition.x()), -roundToInt(viewOriginScrollPosition.y()));
-            }
-        }
+
+        IntPoint currentScrollOffset;
+        if (RefPtr scrollView = rootScrollView->scrollView())
+            currentScrollOffset = scrollView->documentScrollPositionRelativeToViewOrigin();
+        auto currentScroll = geometry.screenTransform.mapPoint(FloatPoint(currentScrollOffset));
+
+        // This was the scroll at the time |geometry.screenPosition| was taken. The scroll
+        // may have changed since then, and we may not have gotten the corresponding AXFrameGeometry
+        // update yet. We can avoid serving stale geometry in this scenario by taking |cachedScroll|
+        // and undo'ing it from the screen position, and then applying the current-scroll offset (which we
+        // can do in this context, being on the main-thread). This prevents ATs from temporarily reading
+        // a stale value.
+        auto cachedScroll = geometry.screenTransform.mapPoint(FloatPoint(rootScrollView->frameViewOriginScrollPosition()));
 
         // macOS uses bottom-left origin, non-macOS assumes top-left origin.
+        // FIXME: It would be cleaner to store screenPosition as one canonical value
+        // and apply the Mac transformations only as a final step.
+#if PLATFORM(MAC)
+        // accessibility/mac/webkit-scrollarea-position.html demands that we don't
+        // apply the current scroll for the root.
+        const bool applyCurrentScroll = this != rootScrollView.get();
+        constexpr int yScale = -1;
+#else
+        const bool applyCurrentScroll = true;
+        constexpr int yScale = 1;
+#endif
+        FloatPoint scrollDelta = cachedScroll;
+        if (applyCurrentScroll)
+            scrollDelta.move(-currentScroll.x(), -currentScroll.y());
+        screenPosition.move(roundToInt(scrollDelta.x()), yScale * roundToInt(scrollDelta.y()));
+
         FloatPoint position = {
             screenPosition.x() + scaledRect.x(),
 #if PLATFORM(MAC)
@@ -883,6 +920,14 @@ std::optional<SimpleRange> AccessibilityObject::selectionRange() const
     return { { { document.get(), 0 }, { document.get(), 0 } } };
 }
 
+#if ENABLE(WRITING_TOOLS)
+bool AccessibilityObject::writingToolsAvailable() const
+{
+    RefPtr page = this->page();
+    return page && page->chrome().client().writingToolsAvailable();
+}
+#endif // ENABLE(WRITING_TOOLS)
+
 std::optional<SimpleRange> AccessibilityObject::simpleRange() const
 {
     RefPtr node = this->node();
@@ -900,6 +945,38 @@ std::optional<SimpleRange> AccessibilityObject::simpleRange() const
             return range;
     }
     return AXObjectCache::rangeForNodeContents(*node);
+}
+
+HTMLTextFormControlElement* AccessibilityObject::nativeTextControl() const
+{
+    if (auto* textArea = dynamicDowncast<HTMLTextAreaElement>(node()))
+        return textArea;
+
+    auto* input = dynamicDowncast<HTMLInputElement>(node());
+    return input && (input->isText() || input->isNumberField()) ? input : nullptr;
+}
+
+AXTextMarkerRange AccessibilityObject::textMarkerRange() const
+{
+    // A native text control's value lives in its shadow inner text element, so the host has no
+    // children whose contents to take: simpleRange covers the control as a single replaced object,
+    // which stringifies to an object replacement character rather than the value.
+    if (RefPtr textControl = nativeTextControl()) {
+        if (RefPtr innerText = textControl->innerTextElement()) {
+            auto range = AXObjectCache::rangeForNodeContents(*innerText);
+            // A value ending in a line break renders an empty final line, which
+            // HTMLTextFormControlElement::setInnerTextValue gives a line box by appending a
+            // placeholder <br>. That <br>'s newline is collapsed out by rendering and is not a
+            // character of the value, so leave it out.
+            if (is<HTMLBRElement>(innerText->lastChild()) && range.end.offset)
+                --range.end.offset;
+            // A control with no value has no text to point at, so leave it pointing at itself,
+            // which is the only marker its callers can place in the document.
+            if (range.start != range.end)
+                return AXTextMarkerRange { std::optional { range } };
+        }
+    }
+    return simpleRange();
 }
 
 Vector<BoundaryPoint> AccessibilityObject::previousLineStartBoundaryPoints(const VisiblePosition& startingPosition, const SimpleRange& targetRange, unsigned positionsToRetrieve) const
@@ -1307,10 +1384,11 @@ Vector<String> AccessibilityObject::performTextOperation(const AccessibilityText
             // Insert text instead of replacing when the selection length is zero, because replacements
             // aren't performed correctly in certain edge cases like at the the boundary between nodes
             // separated by spaces <p> foo <i>bar</i>[insert here] baz </p>.
+            Ref editor = frame->editor();
             if (textOperationRange.characterRange.length)
-                protect(frame->editor())->replaceSelectionWithText(replacementString, Editor::SelectReplacement::Yes, operation.smartReplace == AccessibilityTextOperationSmartReplace::No ? Editor::SmartReplace::No : Editor::SmartReplace::Yes);
+                editor->replaceSelectionWithText(replacementString, Editor::SelectReplacement::Yes, operation.smartReplace == AccessibilityTextOperationSmartReplace::No ? Editor::SmartReplace::No : Editor::SmartReplace::Yes);
             else
-                protect(frame->editor())->insertText(replacementString, /* triggeringEvent */ nullptr);
+                editor->insertText(replacementString, /* triggeringEvent */ nullptr);
 
             result.append(replacementString);
         } else
@@ -1530,7 +1608,7 @@ bool AccessibilityObject::press()
     RefPtr actionElement = this->actionElement();
     if (!actionElement)
         return false;
-    if (RefPtr frame = actionElement->document().frame())
+    if (RefPtr frame = protect(actionElement->document())->frame())
         frame->loader().resetMultipleFormSubmissionProtection();
 
     // Hit test at this location to determine if there is a sub-node element that should act
@@ -1580,6 +1658,73 @@ bool AccessibilityObject::press()
     }
 
     return pressElement->accessKeyAction(true) || pressElement->dispatchSimulatedClick(nullptr, SendMouseUpDownEvents);
+}
+
+bool AccessibilityObject::pressPreservingFocus()
+{
+    RefPtr document = this->document();
+    RefPtr page = document ? document->page() : nullptr;
+    WeakPtr cache = axObjectCache();
+    if (!cache || !document || !page) {
+        // Without a cache to suppress notifications through, or a document / page to reason about
+        // focus within, there's nothing to preserve, so just perform the press.
+        return press();
+    }
+
+    // The focus we want to preserve is the page's focused element, which need not live in the
+    // action target's document. If it's in a remote (out-of-process) frame we can't reach it as an
+    // Element at all. If it's in a different local frame, we can't cleanly suppress its notifications
+    // from here (a cross-document focus change fires onFocusChange on both documents' caches). In
+    // either case, fall back to a plain press, which may move focus to the target as it did before
+    // this change.
+    // FIXME: Preserve focus across frames (local *and* remote) too.
+    auto& focusController = page->focusController();
+    if (is<RemoteFrame>(focusController.focusedFrame()))
+        return press();
+    RefPtr focusedLocalFrame = focusController.localFocusedFrame();
+    RefPtr originalFocusedElement = focusedLocalFrame ? focusedLocalFrame->document()->focusedElement() : nullptr;
+    if (originalFocusedElement && &originalFocusedElement->document() != document.get())
+        return press();
+
+    RefPtr actionTarget = dynamicDowncast<Element>(node());
+    cache->beginSuppressingFocusChange(actionTarget.get());
+    bool result = press();
+
+    if (!cache) {
+        // press() can run author script that tears down the cache, in which case the WeakPtr is nulled
+        // and there's nothing left to clean up.
+        return result;
+    }
+    cache->endSuppressingFocusChange();
+
+    if (!actionTarget || document->focusedElement() != actionTarget) {
+        // Pressing didn't move focus, or author script moved it somewhere else (which we don't
+        // want to overwrite).
+        return result;
+    }
+
+    // Pressing the action target moved focus onto it. Restore focus to where it was (the original
+    // element, or nothing if nothing was focused). We suppress that notification too, since as far
+    // as assistive technology is concerned, focus never left where it was before the action.
+    cache->beginSuppressingFocusChange(originalFocusedElement.get());
+    if (originalFocusedElement)
+        originalFocusedElement->focus({ .preventInputViewPresentation = true });
+    else
+        document->setFocusedElement(nullptr);
+
+    if (!cache) {
+        // focus() / setFocusedElement() can also run author script that tears down the cache.
+        return result;
+    }
+    cache->endSuppressingFocusChange();
+
+    // If focus didn't end up where we intended (e.g. author script disconnected the origin during
+    // the press so it couldn't take focus back), surface the real focus now so assistive technology
+    // moves to it, rather than being left pointed at the stale origin whose focus change we suppressed above.
+    if (RefPtr currentFocusedElement = document->focusedElement(); currentFocusedElement && currentFocusedElement != originalFocusedElement)
+        cache->onFocusChange(nullptr, currentFocusedElement.get());
+
+    return result;
 }
 
 bool AccessibilityObject::performShowMenuAction()
@@ -1643,6 +1788,13 @@ RenderView* AccessibilityObject::topRenderer() const
 unsigned AccessibilityObject::ariaLevel() const
 {
     return std::max(0, integralAttribute(aria_levelAttr));
+}
+
+unsigned AccessibilityObject::computedHeadingLevel() const
+{
+    if (RefPtr heading = dynamicDowncast<HTMLHeadingElement>(node()))
+        return heading->level();
+    return 0;
 }
 
 String AccessibilityObject::language() const
@@ -1934,15 +2086,39 @@ std::optional<SimpleRange> AccessibilityObject::rangeForCharacterRange(const Cha
 VisiblePositionRange AccessibilityObject::lineRangeForPosition(const VisiblePosition& visiblePosition) const
 {
     auto start = startOfLine(visiblePosition);
-    if (start.isNull())
+    if (start.isNull()) {
+        // An out-of-flow (floated or positioned) replaced element generates no inline line
+        // box, so startOfLine() is null and the caret has no line to read. Give it a line of
+        // its own by selecting the element's node. Select the node itself, not its contents,
+        // which are empty for a replaced element, so that reading the line emits the element's
+        // object-replacement attachment.
+        CheckedPtr renderer = this->renderer();
+        if (RefPtr node = this->node(); node && renderer && isReplacedElement()
+            && isRendererReplacedElement(renderer.get())
+            && renderer->isFloatingOrOutOfFlowPositioned())
+            return makeVisiblePositionRange(makeRangeSelectingNode(*node));
         return { };
+    }
 
-    // Move from the given visiblePosition forward until it hits the start of the next line or cross over a line break.
+    // Walk forward to the first position that is no longer on this line. Start the search
+    // one position back because with line-break: after-white-space, the start of the next line
+    // could be the same offset with downstream affinity.
     auto end = visiblePosition;
-    while (end.isNotNull() && inSameLine(end, visiblePosition)) {
+    if (auto previous = visiblePosition.previous(); inSameLine(previous, visiblePosition))
+        end = WTF::move(previous);
+    while (end.isNotNull() && startOfLine(end) == start) {
         auto next = end.next();
         if (next == end) {
             // Without this break, we would loop infinitely.
+            break;
+        }
+
+        if (!inSameBlock(next, visiblePosition)) {
+            // A line that ends its block has no next line to run into, so this position is already in
+            // whatever follows the block, and the newline between the two is synthesized to separate
+            // them rather than being a line break that terminates this line. End the range at the
+            // line. Reaching outside it would, for the last line of an editable element, hand out a
+            // range that leaves the field and counts a character the field's text doesn't have.
             break;
         }
 
@@ -1986,6 +2162,29 @@ bool AccessibilityObject::replacedNodeNeedsCharacter(Node& replacedNode)
     return true;
 }
 
+#if ENABLE(ACCESSIBILITY_ISOLATED_TREE)
+bool AccessibilityObject::isReplacedElementForTextEmission() const
+{
+    // This is the unignored half of replacedNodeNeedsCharacter, so that the AX-thread text walks
+    // can apply the ignored check themselves: an ignored replaced element (e.g. a <legend>) emits
+    // no U+FFFC, but its block boundaries still don't emit newlines.
+    RefPtr node = this->node();
+    return node && !node->isTextNode() && isRendererReplacedElement(node->renderer());
+}
+
+bool AccessibilityObject::isInUserAgentShadowTree() const
+{
+    RefPtr node = this->node();
+    return node && node->isInUserAgentShadowTree();
+}
+
+bool AccessibilityObject::isInsideNativeTextControl() const
+{
+    RefPtr node = this->node();
+    return node && is<HTMLTextFormControlElement>(node->shadowHost());
+}
+#endif // ENABLE(ACCESSIBILITY_ISOLATED_TREE)
+
 #if ENABLE(MODEL_ELEMENT_ACCESSIBILITY)
 
 ModelPlayerAccessibilityChildren AccessibilityObject::modelElementChildren()
@@ -2010,33 +2209,33 @@ static RenderListItem* NODELETE renderListItemContainer(Node* node)
 }
 
 // Returns the text representing a list marker taking into account the position of the text in the line of text.
-static StringView lineStartListMarkerText(const RenderListItem* listItem, const VisiblePosition& startVisiblePosition, std::optional<StringView> markerText = std::nullopt)
+static String lineStartListMarkerText(const RenderListItem* listItem, const VisiblePosition& startVisiblePosition, String markerText = { })
 {
     if (!listItem)
         return { };
 
-    if (!markerText)
-        markerText = listItem->markerTextWithSuffix();
-    if (markerText->isEmpty())
+    if (markerText.isNull())
+        markerText = listItem->markerText();
+    if (markerText.isEmpty())
         return { };
 
     // Only include the list marker if the range includes the line start (where the marker would be), and is in the same line as the marker.
     if (!isStartOfLine(startVisiblePosition) || !inSameLine(startVisiblePosition, firstPositionInNode(protect(*listItem->element()))))
         return { };
-    return *markerText;
+    return markerText;
 }
 
-StringView AccessibilityObject::listMarkerTextForNodeAndPosition(Node* node, Position&& startPosition)
+String AccessibilityObject::listMarkerTextForNodeAndPosition(Node* node, Position&& startPosition)
 {
     CheckedPtr listItem = renderListItemContainer(node);
     if (!listItem)
         return { };
     // Creating a VisiblePosition and determining its relationship to a line of text can be expensive.
     // Thus perform that determination only if we have some text to return.
-    auto markerText = listItem->markerTextWithSuffix();
+    auto markerText = listItem->markerText();
     if (markerText.isEmpty())
         return { };
-    return lineStartListMarkerText(listItem.get(), startPosition, markerText);
+    return lineStartListMarkerText(listItem.get(), startPosition, WTF::move(markerText));
 }
 
 String AccessibilityObject::textContentPrefixFromListMarker() const
@@ -2296,6 +2495,26 @@ bool AccessibilityObject::contentEditableAttributeIsEnabled(Element& element)
     return contentEditableValue.isEmpty() || equalLettersIgnoringASCIICase(contentEditableValue, "true"_s) || equalLettersIgnoringASCIICase(contentEditableValue, "plaintext-only"_s);
 }
 
+// How many lines |laterPosition| sits below |earlierPosition|. Answers nothing when they are on
+// lines of different blocks, whose line boxes can't be reached from one another.
+static std::optional<int> lineCountBetween(const VisiblePosition& earlierPosition, const VisiblePosition& laterPosition)
+{
+    auto earlierLineBox = RenderedPosition(earlierPosition).lineBox();
+    auto laterLineBox = RenderedPosition(laterPosition).lineBox();
+    if (!earlierLineBox || !laterLineBox)
+        return std::nullopt;
+    if (earlierLineBox == laterLineBox)
+        return 0;
+
+    int lineCount = 0;
+    for (auto lineBox = laterLineBox; lineBox; lineBox = lineBox->previous()) {
+        ++lineCount;
+        if (lineBox->previous() == earlierLineBox)
+            return lineCount;
+    }
+    return std::nullopt;
+}
+
 int AccessibilityObject::lineForPosition(const VisiblePosition& visiblePos) const
 {
     if (visiblePos.isNull() || !node())
@@ -2306,18 +2525,28 @@ int AccessibilityObject::lineForPosition(const VisiblePosition& visiblePos) cons
     if (!containerNode->isShadowIncludingInclusiveAncestorOf(node()) && !node()->isShadowIncludingInclusiveAncestorOf(containerNode.get()))
         return -1;
 
-    int lineCount = -1;
+    int lineCount = 0;
     VisiblePosition currentVisiblePos = visiblePos;
     VisiblePosition savedVisiblePos;
 
     // move up until we get to the top
     // FIXME: This only takes us to the top of the rootEditableElement, not the top of the
     // top document.
-    do {
+    while (true) {
         savedVisiblePos = currentVisiblePos;
         currentVisiblePos = previousLinePosition(currentVisiblePos, 0, HasEditableAXRole);
-        ++lineCount;
-    } while (currentVisiblePos.isNotNull() && !(inSameLine(currentVisiblePos, savedVisiblePos)));
+        if (currentVisiblePos.isNull() || inSameLine(currentVisiblePos, savedVisiblePos))
+            break;
+        // Count lines rather than steps, because one step can cross more than one. The start of a
+        // line following an inline replaced element is the very same VisiblePosition as the one
+        // after that element, so it resolves onto the element's line:
+        //   ABCDE
+        //   [img]
+        //   |FGHIJ
+        // Stepping up from "FGHIJ" lands on the image's line, skipping the line "F" is on.
+        // A step into another block counts as the one line it moved.
+        lineCount += lineCountBetween(currentVisiblePos, savedVisiblePos).value_or(1);
+    }
 
     return lineCount;
 }
@@ -2356,10 +2585,12 @@ CharacterRange AccessibilityObject::doAXStyleRangeForIndex(unsigned index) const
 }
 
 // Given an indexed character, the line number of the text associated with this accessibility
-// object that contains the character.
+// object that contains the character. The index one past the last character is accepted too: that
+// is where the caret sits at the end of a field, and it is a position AXInsertionPointLineNumber
+// already answers for.
 unsigned AccessibilityObject::doAXLineForIndex(unsigned index)
 {
-    return lineForPosition(visiblePositionForIndex(index, false));
+    return lineForPosition(visiblePositionForIndex(index, /* lastIndexOK */ true));
 }
 
 void AccessibilityObject::updateBackingStore()
@@ -2449,7 +2680,17 @@ void AccessibilityObject::updateChildrenIfNecessary()
     if (!childrenInitialized()) {
         // Enable the cache in case we end up adding a lot of children, we don't want to recompute axIsIgnored each time.
         AXAttributeCacheScope enableCache(axObjectCache());
+
+        // setIsIgnoredFromParentDataForChild() derives each child's data from ours when we have any.
+        // Compute and set it now so each child doesn't repeat unnecessary work.
+        bool didSetIsIgnoredFromParentData = m_isIgnoredFromParentData.isNull();
+        if (didSetIsIgnoredFromParentData)
+            setIsIgnoredFromParentData(computeIsIgnoredFromParentData());
+
         addChildren();
+
+        if (didSetIsIgnoredFromParentData)
+            clearIsIgnoredFromParentData();
     }
 }
 
@@ -2693,7 +2934,7 @@ bool AccessibilityObject::ignoredFromModalPresence() const
         return false;
 
     // We only want to ignore the objects within the same frame as the modal dialog.
-    if (modalNode->document().frame() != this->frame())
+    if (protect(modalNode->document())->frame() != this->frame())
         return false;
 
     // Some objects might be outside of a modal, but are linked to elements inside of it. Don't ignore those.
@@ -2775,7 +3016,24 @@ bool AccessibilityObject::replaceTextInRange(const String& replacementString, co
     // Also only do this when the field is in editing mode.
     Ref frame = renderer()->frame();
     if (element->shouldUseInputMethod()) {
-        frame->selection().setSelectedRange(rangeForCharacterRange(range), Affinity::Downstream, FrameSelection::ShouldCloseTyping::Yes);
+        // Don't clamp to getLengthForTextRange() here. It reports the value of a text control, and
+        // an editing host need not be one: a design-mode body carries no contenteditable attribute,
+        // so it measures as empty and every index would collapse to 0. visiblePositionForIndex()
+        // already lands an index past the end of the content at the end of it, so the only bound
+        // needed is the one the call itself can represent.
+        constexpr uint64_t maxIndex = std::numeric_limits<int>::max();
+        uint64_t startIndex = std::min<uint64_t>(range.location, maxIndex);
+        uint64_t endIndex = startIndex + std::min<uint64_t>(range.length, maxIndex - startIndex);
+
+        auto start = visiblePositionForIndex(static_cast<int>(startIndex));
+        std::optional insertionRange = makeSimpleRange(start, endIndex == startIndex ? start : visiblePositionForIndex(static_cast<int>(endIndex)));
+        if (!insertionRange)
+            return false;
+
+        // Fail if the selection can't be set, otherwise the wrong text would be replaced.
+        if (!frame->selection().setSelectedRange(*insertionRange, Affinity::Downstream, FrameSelection::ShouldCloseTyping::Yes))
+            return false;
+
         protect(frame->editor())->replaceSelectionWithText(replacementString, Editor::SelectReplacement::No, Editor::SmartReplace::No);
         return true;
     }
@@ -2808,7 +3066,7 @@ bool AccessibilityObject::insertText(const String& text)
         return false;
 
     // Use Editor::insertText to mimic typing into the field.
-    Ref editor = protect(renderer())->frame().editor();
+    Ref editor = protect(protect(renderer())->frame())->editor();
     return editor->insertText(text, nullptr);
 }
 
@@ -3086,7 +3344,7 @@ String AccessibilityObject::embeddedImageDescription() const
 static RefPtr<Image> imageFromRenderer(RenderObject* renderer)
 {
     CheckedPtr renderImage = dynamicDowncast<RenderImage>(renderer);
-    auto* cachedImage = renderImage ? renderImage->cachedImage() : nullptr;
+    RefPtr cachedImage = renderImage ? renderImage->cachedImage() : nullptr;
     return cachedImage ? cachedImage->image() : nullptr;
 }
 
@@ -3121,7 +3379,7 @@ RefPtr<SharedBuffer> AccessibilityObject::imageData(const AXImageDataParameters&
     }
 
     FloatSize bufferSize(targetWidth, targetHeight);
-    auto imageBuffer = ImageBuffer::create(bufferSize, RenderingMode::Unaccelerated, RenderingPurpose::Unspecified, 1.0f, DestinationColorSpace::SRGB(), PixelFormat::BGRA8);
+    auto imageBuffer = ImageBuffer::create(bufferSize, RenderingMode::Unaccelerated, RenderingPurpose::Unspecified, 1.0f, ColorSpace::SRGB(), PixelFormat::BGRA8);
     if (!imageBuffer)
         return nullptr;
 
@@ -3136,7 +3394,7 @@ RefPtr<SharedBuffer> AccessibilityObject::imageData(const AXImageDataParameters&
         extractionRect = IntRect(IntPoint(), IntSize(targetWidth, targetHeight));
 
     // Extract pixels as unpremultiplied RGBA8.
-    PixelBufferFormat format { AlphaPremultiplication::Unpremultiplied, PixelFormat::RGBA8, DestinationColorSpace::SRGB() };
+    PixelBufferFormat format { AlphaPremultiplication::Unpremultiplied, PixelFormat::RGBA8, ColorSpace::SRGB() };
     auto pixelBuffer = imageBuffer->getPixelBuffer(format, extractionRect);
     if (!pixelBuffer)
         return nullptr;
@@ -3393,7 +3651,7 @@ void AccessibilityObject::setFocused(bool focus)
 {
     if (focus) {
         // Ensure that the view is focused and active, otherwise, any attempt to set focus to an object inside it will fail.
-        RefPtr frame = document() ? document()->frame() : nullptr;
+        RefPtr frame = document() ? protect(document())->frame() : nullptr;
         if (frame && frame->selection().isFocusedAndActive())
             return; // Nothing to do, already focused and active.
 
@@ -3956,9 +4214,11 @@ void AccessibilityObject::scrollAreaAndAncestor(std::pair<ScrollableArea*, Acces
 {
     // Search up the parent chain until we find the first one that's scrollable.
     scrollers.first = nullptr;
-    for (scrollers.second = parentObject(); scrollers.second; scrollers.second = protect(scrollers.second)->parentObject()) {
-        if ((scrollers.first = protect(scrollers.second)->getScrollableAreaIfScrollable()))
+    for (scrollers.second = parentObject(); scrollers.second; ) {
+        Ref current = *scrollers.second;
+        if ((scrollers.first = current->getScrollableAreaIfScrollable()))
             break;
+        scrollers.second = current->parentObject();
     }
 }
 
@@ -4095,14 +4355,24 @@ std::optional<InputType::Type> AccessibilityObject::inputType() const
 
 bool AccessibilityObject::isARIAHidden() const
 {
-    if (isFocused())
-        return false;
-
     if (shouldIgnoreARIAHidden())
         return false;
 
     RefPtr node = this->node();
     RefPtr element = dynamicDowncast<Element>(node);
+
+    // Check whether aria-hidden="true" is specified before doing anything else. Every remaining condition
+    // below can only turn a true result into false, so the vast majority of objects, which don't
+    // specify aria-hidden at all, can bail out here without paying for the focus and tag name checks.
+    bool isHiddenByAssignedSlot = false;
+    if (RefPtr assignedSlot = node ? node->assignedSlot() : nullptr)
+        isHiddenByAssignedSlot = equalLettersIgnoringASCIICase(assignedSlot->attributeWithDefaultARIA(aria_hiddenAttr), "true"_s);
+    if (!isHiddenByAssignedSlot && !(element && equalLettersIgnoringASCIICase(element->attributeWithDefaultARIA(aria_hiddenAttr), "true"_s)))
+        return false;
+
+    if (isFocused())
+        return false;
+
     AtomString tag = element ? element->localName() : nullAtom();
     // https://github.com/w3c/aria/pull/1880
     // To prevent authors from hiding all content from assistive technology users, do not respect
@@ -4111,11 +4381,7 @@ bool AccessibilityObject::isARIAHidden() const
     if (bodyTag->hasLocalName(tag) || htmlTag->hasLocalName(tag) || (SVGNames::svgTag->hasLocalName(tag) && !element->parentNode()))
         return false;
 
-    if (RefPtr assignedSlot = node ? node->assignedSlot() : nullptr) {
-        if (equalLettersIgnoringASCIICase(assignedSlot->attributeWithDefaultARIA(aria_hiddenAttr), "true"_s))
-            return true;
-    }
-    return element && equalLettersIgnoringASCIICase(element->attributeWithDefaultARIA(aria_hiddenAttr), "true"_s);
+    return true;
 }
 
 bool AccessibilityObject::isShowingValidationMessage() const
@@ -4434,6 +4700,33 @@ bool AccessibilityObject::ariaRoleHasPresentationalChildren() const
     }
 }
 
+AccessibilityIsIgnoredFromParentData AccessibilityObject::computeIsIgnoredFromParentData()
+{
+    AccessibilityIsIgnoredFromParentData result = AccessibilityIsIgnoredFromParentData(this);
+
+    if (isARIAHidden())
+        result.isAXHidden = true;
+
+    bool ignoreARIAHidden = isFocused();
+    for (RefPtr object = parentObject(); object; object = object->parentObject()) {
+        if (!result.isAXHidden && !ignoreARIAHidden && object->isARIAHidden())
+            result.isAXHidden = true;
+
+        if (!result.isPresentationalChildOfAriaRole && object->ariaRoleHasPresentationalChildren())
+            result.isPresentationalChildOfAriaRole = true;
+
+        if (!result.isDescendantOfBarrenParent && !object->canHaveChildren())
+            result.isDescendantOfBarrenParent = true;
+
+        if (result.isAXHidden && result.isPresentationalChildOfAriaRole && result.isDescendantOfBarrenParent) {
+            // Every field is set, and none of them can be un-set by an ancestor further up.
+            break;
+        }
+    }
+
+    return result;
+}
+
 void AccessibilityObject::setIsIgnoredFromParentDataForChild(AccessibilityObject& child)
 {
     AccessibilityIsIgnoredFromParentData result = AccessibilityIsIgnoredFromParentData(this);
@@ -4442,20 +4735,8 @@ void AccessibilityObject::setIsIgnoredFromParentDataForChild(AccessibilityObject
         result.isPresentationalChildOfAriaRole = m_isIgnoredFromParentData.isPresentationalChildOfAriaRole || ariaRoleHasPresentationalChildren();
         result.isDescendantOfBarrenParent = m_isIgnoredFromParentData.isDescendantOfBarrenParent || !canHaveChildren();
     } else {
-        if (child.isARIAHidden())
-            result.isAXHidden = true;
-
-        bool ignoreARIAHidden = child.isFocused();
-        for (auto* object = child.parentObject(); object; object = object->parentObject()) {
-            if (!result.isAXHidden && !ignoreARIAHidden && object->isARIAHidden())
-                result.isAXHidden = true;
-
-            if (!result.isPresentationalChildOfAriaRole && object->ariaRoleHasPresentationalChildren())
-                result.isPresentationalChildOfAriaRole = true;
-
-            if (!result.isDescendantOfBarrenParent && !object->canHaveChildren())
-                result.isDescendantOfBarrenParent = true;
-        }
+        // We have nothing to inherit from, so |child| has to compute its own data.
+        result = child.computeIsIgnoredFromParentData();
     }
 
     child.setIsIgnoredFromParentData(result);

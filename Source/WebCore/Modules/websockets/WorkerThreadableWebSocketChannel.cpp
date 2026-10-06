@@ -46,9 +46,9 @@
 #include "WorkerGlobalScope.h"
 #include "WorkerLoaderProxy.h"
 #include "WorkerRunLoop.h"
-#include "WorkerSTWParticipation.h"
 #include "WorkerThread.h"
 #include <JavaScriptCore/ArrayBuffer.h>
+#include <JavaScriptCore/VMManager.h>
 #include <wtf/MainThread.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -94,13 +94,13 @@ String WorkerThreadableWebSocketChannel::extensions()
     return m_workerClientWrapper->extensions();
 }
 
-void WorkerThreadableWebSocketChannel::send(CString&& message)
+void WorkerThreadableWebSocketChannel::send(UTF8CString&& message)
 {
     if (RefPtr bridge = m_bridge)
         bridge->send(WTF::move(message));
 }
 
-void WorkerThreadableWebSocketChannel::send(const ArrayBuffer& binaryData, unsigned byteOffset, unsigned byteLength)
+void WorkerThreadableWebSocketChannel::send(const ArrayBuffer& binaryData, size_t byteOffset, size_t byteLength)
 {
     if (RefPtr bridge = m_bridge)
         bridge->send(binaryData, byteOffset, byteLength);
@@ -176,7 +176,7 @@ WorkerThreadableWebSocketChannel::ConnectStatus WorkerThreadableWebSocketChannel
     return channel->connect(url, protocol);
 }
 
-void WorkerThreadableWebSocketChannel::Peer::send(CString&& message)
+void WorkerThreadableWebSocketChannel::Peer::send(UTF8CString&& message)
 {
     ASSERT(isMainThread());
     if (RefPtr channel = m_mainWebSocketChannel)
@@ -280,7 +280,7 @@ void WorkerThreadableWebSocketChannel::Peer::didReceiveBinaryData(Vector<uint8_t
     }, m_taskMode);
 }
 
-void WorkerThreadableWebSocketChannel::Peer::didUpdateBufferedAmount(unsigned bufferedAmount)
+void WorkerThreadableWebSocketChannel::Peer::didUpdateBufferedAmount(uint64_t bufferedAmount)
 {
     ASSERT(isMainThread());
 
@@ -308,7 +308,7 @@ void WorkerThreadableWebSocketChannel::Peer::didStartClosingHandshake()
     }, m_taskMode);
 }
 
-void WorkerThreadableWebSocketChannel::Peer::didClose(unsigned unhandledBufferedAmount, ClosingHandshakeCompletionStatus closingHandshakeCompletion, unsigned short code, const String& reason)
+void WorkerThreadableWebSocketChannel::Peer::didClose(uint64_t unhandledBufferedAmount, ClosingHandshakeCompletionStatus closingHandshakeCompletion, unsigned short code, const String& reason)
 {
     ASSERT(isMainThread());
     m_mainWebSocketChannel = nullptr;
@@ -390,7 +390,10 @@ void WorkerThreadableWebSocketChannel::Bridge::initialize(WorkerGlobalScope& sco
         peer = mainThreadInitialize(context, workerThread.get(), workerContextIdentifier, WTF::move(workerClientWrapper), taskMode, WTF::move(provider), isInitiatedByDedicatedWorker);
         semaphore.signal();
     });
-    waitWithSTWParticipation(semaphore, scope.vm());
+    {
+        JSC::VMBlockingScope blockingScope(scope.vm());
+        semaphore.wait();
+    }
 
     if (peer)
         m_workerClientWrapper->didCreateWebSocketChannel(peer.releaseNonNull());
@@ -419,7 +422,7 @@ void WorkerThreadableWebSocketChannel::Bridge::connect(const URL& url, const Str
     });
 }
 
-void WorkerThreadableWebSocketChannel::Bridge::send(CString&& message)
+void WorkerThreadableWebSocketChannel::Bridge::send(UTF8CString&& message)
 {
     RefPtr peer = m_peer.get();
     if (!peer)
@@ -433,14 +436,18 @@ void WorkerThreadableWebSocketChannel::Bridge::send(CString&& message)
     });
 }
 
-void WorkerThreadableWebSocketChannel::Bridge::send(const ArrayBuffer& binaryData, unsigned byteOffset, unsigned byteLength)
+void WorkerThreadableWebSocketChannel::Bridge::send(const ArrayBuffer& binaryData, size_t byteOffset, size_t byteLength)
 {
     RefPtr peer = m_peer.get();
     if (!peer)
         return;
 
-    // ArrayBuffer isn't thread-safe, hence the content of ArrayBuffer is copied into Vector<uint8_t>.
-    Vector<uint8_t> data(byteLength);
+    // ArrayBuffer isn't thread-safe, so its content is copied into a Vector to cross to the main thread.
+    Vector<uint8_t> data;
+    if (!data.tryGrow(byteLength)) {
+        fail("Failed to send WebSocket frame: payload is too large"_s);
+        return;
+    }
     if (binaryData.byteLength())
         memcpySpan(data.mutableSpan(), binaryData.span().subspan(byteOffset, byteLength));
 

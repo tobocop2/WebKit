@@ -77,6 +77,7 @@ class WebPageGroup;
 class WebPageProxy;
 class WebPreferences;
 class WebProcessPool;
+class WebProcessProxy;
 class WebUserContentControllerProxy;
 class WebsiteDataStore;
 
@@ -173,6 +174,9 @@ public:
 
     WebKit::WebPageProxy* NODELETE relatedPage() const;
     void setRelatedPage(WeakPtr<WebKit::WebPageProxy>&& relatedPage) { m_data.relatedPage = WTF::move(relatedPage); }
+
+    WebKit::WebProcessProxy* NODELETE preferredProcessFromOpener() const;
+    void setPreferredProcessFromOpener(WeakPtr<WebKit::WebProcessProxy>&& process) { m_data.preferredProcessFromOpener = WTF::move(process); }
 
     WebKit::WebPageProxy* NODELETE pageToCloneSessionStorageFrom() const;
     void NODELETE setPageToCloneSessionStorageFrom(WeakPtr<WebKit::WebPageProxy>&&);
@@ -407,9 +411,6 @@ public:
     bool shouldSendConsoleLogsToUIProcessForTesting() const { return m_data.shouldSendConsoleLogsToUIProcessForTesting; }
     void setShouldSendConsoleLogsToUIProcessForTesting(bool should) { m_data.shouldSendConsoleLogsToUIProcessForTesting = should; }
 
-    bool shouldDeferAsynchronousScriptsUntilAfterDocumentLoad() const { return m_data.shouldDeferAsynchronousScriptsUntilAfterDocumentLoad; }
-    void setShouldDeferAsynchronousScriptsUntilAfterDocumentLoad(bool defer) { m_data.shouldDeferAsynchronousScriptsUntilAfterDocumentLoad = defer; }
-
     bool undoManagerAPIEnabled() const { return m_data.undoManagerAPIEnabled; }
     void setUndoManagerAPIEnabled(bool enabled) { m_data.undoManagerAPIEnabled = enabled; }
 
@@ -542,6 +543,7 @@ private:
 #endif
         RefPtr<WebKit::WebPageGroup> pageGroup;
         WeakPtr<WebKit::WebPageProxy> relatedPage;
+        WeakPtr<WebKit::WebProcessProxy> preferredProcessFromOpener;
         Box<std::optional<OpenerInfo>> openerInfo;
         WebCore::Site openedSite;
         bool processInheritedFromOpener { false };
@@ -653,7 +655,6 @@ private:
         bool allowMediaContentTypesRequiringHardwareSupportAsFallback { true };
         bool colorFilterEnabled { false };
         bool incompleteImageBorderEnabled { false };
-        bool shouldDeferAsynchronousScriptsUntilAfterDocumentLoad { true };
         bool undoManagerAPIEnabled { false };
         bool mainContentUserGestureOverrideEnabled { false };
         bool invisibleAutoplayForbidden { false };

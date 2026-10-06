@@ -44,7 +44,7 @@
 
 namespace WebCore {
 
-class DestinatationColorSpace;
+class ColorSpace;
 
 class IOSurfacePool : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<IOSurfacePool> {
     WTF_MAKE_TZONE_ALLOCATED_EXPORT(IOSurfacePool, WEBCORE_EXPORT);
@@ -57,7 +57,7 @@ public:
 
     WEBCORE_EXPORT ~IOSurfacePool();
 
-    std::unique_ptr<IOSurface> takeSurface(IntSize, const DestinationColorSpace&, IOSurface::Format, UseLosslessCompression);
+    WEBCORE_EXPORT std::unique_ptr<IOSurface> takeSurface(IntSize, const ColorSpace&, IOSurface::Format, UseLosslessCompression);
     WEBCORE_EXPORT void addSurface(std::unique_ptr<IOSurface>&&);
 
     WEBCORE_EXPORT void discardAllSurfaces();
@@ -106,6 +106,7 @@ private:
     void tryEvictOldestCachedSurface() WTF_REQUIRES_LOCK(m_lock);
 
     void scheduleCollectionTimer() WTF_REQUIRES_LOCK(m_lock);
+    void stopCollectionTimer() WTF_REQUIRES_LOCK(m_lock);
     void collectionTimerFired();
     void collectInUseSurfaces() WTF_REQUIRES_LOCK(m_lock);
     bool markOlderSurfacesPurgeable() WTF_REQUIRES_LOCK(m_lock);

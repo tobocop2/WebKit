@@ -2,7 +2,7 @@
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
  *           (C) 2004-2005 Allan Sandfeld Jensen (kde@carewolf.com)
  * Copyright (C) 2006, 2007 Nicholas Shanks (webkit@nickshanks.com)
- * Copyright (C) 2005-2023 Apple Inc. All rights reserved.
+ * Copyright (C) 2005-2026 Apple Inc. All rights reserved.
  * Copyright (C) 2007 Alexey Proskuryakov <ap@webkit.org>
  * Copyright (C) 2007, 2008 Eric Seidel <eric@webkit.org>
  * Copyright (C) 2008, 2009 Torch Mobile Inc. All rights reserved. (http://www.torchmobile.com/)
@@ -378,18 +378,9 @@ void ElementRuleCollector::matchHostPseudoClassRules(DeclarationOrigin origin)
     if (!shadowRules)
         return;
 
-    auto collect = [&] (const auto& rules) {
-        if (rules.isEmpty())
-            return;
-
-        MatchRequest hostMatchRequest { *shadowRules, ScopeOrdinal::Shadow };
-        collectMatchingRulesForList(&rules, hostMatchRequest);
-    };
-
-    if (shadowRules->hasHostOrScopePseudoClassRulesInUniversalBucket())
-        collect(shadowRules->universalRules());
-
-    collect(shadowRules->hostPseudoClassRules());
+    MatchRequest hostMatchRequest { *shadowRules, ScopeOrdinal::Shadow };
+    collectMatchingRulesForList(shadowRules->shadowHostRulesInUniversalBucket(), hostMatchRequest);
+    collectMatchingRulesForList(shadowRules->hostPseudoClassRules(), hostMatchRequest);
 }
 
 void ElementRuleCollector::matchSlottedPseudoElementRules(DeclarationOrigin origin)
@@ -557,6 +548,7 @@ inline bool ElementRuleCollector::ruleMatches(const RuleData& ruleData, unsigned
     // We know a sufficiently simple single part selector matches simply because we found it from the rule hash when filtering the RuleSet.
     // This is limited to HTML only so we don't need to check the namespace (because of tag name match).
     auto matchBasedOnRuleHash = ruleData.matchBasedOnRuleHash();
+    ASSERT(styleScopeOrdinal != ScopeOrdinal::Shadow || matchBasedOnRuleHash == MatchBasedOnRuleHash::None);
     if (matchBasedOnRuleHash != MatchBasedOnRuleHash::None && element().isHTMLElement()) {
         ASSERT_WITH_MESSAGE(!m_pseudoElementRequest, "If we match based on the rule hash while collecting for a particular pseudo element ID, we would add incorrect rules for that pseudo element ID. We should never end in ruleMatches() with a pseudo element if the ruleData cannot match any pseudo element.");
 
@@ -596,6 +588,8 @@ inline bool ElementRuleCollector::ruleMatches(const RuleData& ruleData, unsigned
             ASSERT_WITH_MESSAGE(!SelectorCompiler::ruleCollectorSimpleSelectorChecker(compiledSelector, &element(), &ignoreSpecificity) || !m_pseudoElementRequest, "When matching pseudo elements, we should never compile a selector checker without context unless it cannot match anything.");
 #endif
             bool selectorMatches = SelectorCompiler::ruleCollectorSimpleSelectorChecker(compiledSelector, &element(), &specificity);
+            // Compiled selectors do not implement featureless matching, so they must never claim to match the shadow host.
+            ASSERT(styleScopeOrdinal != ScopeOrdinal::Shadow || !selectorMatches);
 
             return selectorMatches;
         }
@@ -622,6 +616,8 @@ inline bool ElementRuleCollector::ruleMatches(const RuleData& ruleData, unsigned
     if (compilerEnabled && compiledSelector.status == SelectorCompilationStatus::SelectorCheckerWithCheckingContext) {
         compiledSelector.wasUsed();
         selectorMatches = SelectorCompiler::ruleCollectorSelectorCheckerWithCheckingContext(compiledSelector, &element(), &context, &specificity);
+        // Compiled selectors do not implement featureless matching, so they must never claim to match the shadow host.
+        ASSERT(styleScopeOrdinal != ScopeOrdinal::Shadow || !selectorMatches);
     } else
 #endif // ENABLE(CSS_SELECTOR_JIT)
     {
@@ -710,8 +706,8 @@ bool ElementRuleCollector::containerQueriesMatch(const RuleData& ruleData, const
 
     // "Style rules defined on an element inside multiple nested container queries apply when all of the wrapping container queries are true for that element."
     ContainerQueryEvaluator evaluator(element(), selectionMode, matchRequest.styleScopeOrdinal, containerQueryEvaluationState);
-    for (auto* query : queries) {
-        if (!evaluator.evaluate(*query))
+    for (auto& containerRule : queries) {
+        if (!evaluator.evaluate(containerRule->containerQuery()))
             return false;
     }
     return true;
@@ -752,8 +748,11 @@ std::pair<bool, std::optional<Vector<ElementRuleCollector::ScopingRootWithDistan
                 }
                 for (const auto& selector : selectorList) {
                     auto appendIfMatch = [&] (std::optional<ScopingRootWithDistance> previousScopingRoot = { }) {
-                        if (previousScopingRoot)
+                        if (previousScopingRoot) {
+                            if (distance > previousScopingRoot->distance)
+                                return;
                             subContext.scope = previousScopingRoot->scopingRoot;
+                        }
                         // Reset visited flag for each scoping root evaluation
                         subContext.scopingRootMatchesVisited = false;
                         subContext.isEvaluatingScopingRoot = true;

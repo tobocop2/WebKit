@@ -127,6 +127,13 @@ static bool NODELETE isZeroToOneCompositionType(WritingTools::Session::Compositi
     }
 }
 
+static CharacterRange rangeClampedToLength(CharacterRange range, unsigned length)
+{
+    range.location = std::min<uint64_t>(range.location, length);
+    range.length = std::min<uint64_t>(range.length, length - range.location);
+    return range;
+}
+
 static std::optional<SimpleRange> contextRangeForSession(Document& document, const std::optional<WritingTools::Session>& session)
 {
     // If the selection is a range, the range of the context should be the range of the paragraph
@@ -174,8 +181,7 @@ static RetainPtr<NSAttributedString> attributedStringApplyingBodyTextColorIfNece
 
     __block BOOL attributedStringHasSpecifiedTextColor = NO;
     [originalAttributedString enumerateAttributesInRange:NSMakeRange(0, originalAttributedString.length) options:0 usingBlock:^(NSDictionary<NSAttributedStringKey, id> *attributes, NSRange, BOOL *stop) {
-        // FIXME: This is a static analysis false positive.
-        SUPPRESS_UNRETAINED_ARG if (attributes[NSForegroundColorAttributeName]) {
+        if (attributes[NSForegroundColorAttributeName]) {
             attributedStringHasSpecifiedTextColor = YES;
             *stop = YES;
         }
@@ -218,7 +224,7 @@ WritingToolsController::WritingToolsController(Page& page)
 
 void WritingToolsController::willBeginWritingToolsSession(const std::optional<WritingTools::Session>& session, WeakHashSet<Node, WeakPtrImplWithEventTargetData>&& preservedNodes, CompletionHandler<void(const Vector<WritingTools::Context>&)>&& completionHandler)
 {
-    RELEASE_LOG(WritingTools, "WritingToolsController::willBeginWritingToolsSession (%s)", session ? session->identifier.toString().utf8().data() : "");
+    RELEASE_LOG(WritingTools, "WritingToolsController::willBeginWritingToolsSession (%s)", session ? session->identifier.toString().utf8() : ""_s);
 
     m_clientPreservedNodes = WTF::move(preservedNodes);
 
@@ -231,7 +237,7 @@ void WritingToolsController::willBeginWritingToolsSession(const std::optional<Wr
 
     auto contextRange = contextRangeForSession(*document, session);
     if (!contextRange) {
-        RELEASE_LOG(WritingTools, "WritingToolsController::willBeginWritingToolsSession (%s) => no context range", session ? session->identifier.toString().utf8().data() : "");
+        RELEASE_LOG(WritingTools, "WritingToolsController::willBeginWritingToolsSession (%s) => no context range", session ? session->identifier.toString().utf8() : ""_s);
         completionHandler({ });
         return;
     }
@@ -266,18 +272,28 @@ void WritingToolsController::willBeginWritingToolsSession(const std::optional<Wr
     auto selectedTextCharacterRange = selectedTextRange ? characterRange(*contextRange, *selectedTextRange) : CharacterRange { };
 
     if (attributedStringFromRange.string.isEmpty())
-        RELEASE_LOG(WritingTools, "WritingToolsController::willBeginWritingToolsSession (%s) => attributed string is empty", session ? session->identifier.toString().utf8().data() : "");
+        RELEASE_LOG(WritingTools, "WritingToolsController::willBeginWritingToolsSession (%s) => attributed string is empty", session ? session->identifier.toString().utf8() : ""_s);
+
+    auto attributedStringLength = attributedStringFromRange.string.length();
+    if (auto clampedRange = rangeClampedToLength(selectedTextCharacterRange, attributedStringLength); clampedRange != selectedTextCharacterRange) [[unlikely]] {
+        RELEASE_LOG_ERROR(WritingTools, "WritingToolsController::willBeginWritingToolsSession (%s) => selected range (%llu, %llu) does not fit within attributed string (length %u)", session ? session->identifier.toString().utf8() : ""_s, selectedTextCharacterRange.location, selectedTextCharacterRange.length, attributedStringLength);
+        selectedTextCharacterRange = clampedRange;
+    }
 
     if (!session) {
         // If there is no session, this implies that the Writing Tools delegate is used for the "non-inline editing" case;
         // as such, no mutating delegate methods will be invoked, and so there need not be any state tracked.
 
-        completionHandler({ { WTF::UUID { 0 }, attributedStringFromRange, selectedTextCharacterRange } });
+        completionHandler({ { std::nullopt, attributedStringFromRange, selectedTextCharacterRange } });
         return;
     }
 
     switch (session->type) {
     case WritingTools::Session::Type::Proofreading:
+        if (session->isForProofreadingReview != WritingTools::IsForProofreadingReview::Yes) {
+            document->markers().removeMarkers(*contextRange, { DocumentMarkerType::Grammar, DocumentMarkerType::WritingToolsTextSuggestion });
+            m_page->chrome().client().clearAnimationsForActiveWritingToolsSession();
+        }
         m_state = ProofreadingState::create(createLiveRange(*contextRange), *session, 0).moveToUniquePtr();
         break;
 
@@ -290,14 +306,13 @@ void WritingToolsController::willBeginWritingToolsSession(const std::optional<Wr
         break;
     }
 
-    auto attributedStringCharacterCount = attributedStringFromRange.string.length();
     auto contextRangeCharacterCount = characterCount(*contextRange);
 
     // Postcondition: the selected text character range must be a valid range within the
     // attributed string formed by the context range; the length of the entire context range
     // being equal to the length of the attributed string implies the range is valid.
-    if (attributedStringCharacterCount != contextRangeCharacterCount) [[unlikely]] {
-        RELEASE_LOG_ERROR(WritingTools, "WritingToolsController::willBeginWritingToolsSession (%s) => attributed string length (%u) != context range length (%llu)", session->identifier.toString().utf8().data(), attributedStringCharacterCount, contextRangeCharacterCount);
+    if (attributedStringLength != contextRangeCharacterCount) [[unlikely]] {
+        RELEASE_LOG_ERROR(WritingTools, "WritingToolsController::willBeginWritingToolsSession (%s) => attributed string length (%u) != context range length (%llu)", session->identifier.toString().utf8(), attributedStringLength, contextRangeCharacterCount);
         ASSERT_NOT_REACHED();
         completionHandler({ });
         return;
@@ -305,7 +320,7 @@ void WritingToolsController::willBeginWritingToolsSession(const std::optional<Wr
 
     document->editor().setSuppressEditingForWritingTools(true);
 
-    completionHandler({ { WTF::UUID { 0 }, attributedStringFromRange, selectedTextCharacterRange } });
+    completionHandler({ { std::nullopt, attributedStringFromRange, selectedTextCharacterRange } });
 }
 
 void WritingToolsController::didBeginWritingToolsSession(const WritingTools::Session& session, const Vector<WritingTools::Context>& contexts)
@@ -362,7 +377,8 @@ void WritingToolsController::proofreadingSessionDidReceiveSuggestions(const Writ
 
     document->markers().forEach(adjustedProcessedRangeBeforeReplacement, { DocumentMarkerType::TransparentContent }, [&](auto&, auto marker) {
         auto& data = std::get<DocumentMarker::TransparentContentData>(marker.data());
-        transparentContentMarkerIdentifiers.add(data.uuid);
+        if (data.uuid)
+            transparentContentMarkerIdentifiers.add(*data.uuid);
 
         return false;
     });
@@ -434,7 +450,7 @@ void WritingToolsController::proofreadingSessionDidUpdateStateForSuggestion(cons
         return;
     }
 
-    RELEASE_LOG(WritingTools, "WritingToolsController::proofreadingSessionDidUpdateStateForSuggestion (%s) [new state: %hhu, suggestion: %s]", state->session.identifier.toString().utf8().data(), std::to_underlying(newTextSuggestionState), textSuggestion.identifier.toString().utf8().data());
+    RELEASE_LOG(WritingTools, "WritingToolsController::proofreadingSessionDidUpdateStateForSuggestion (%s) [new state: %hhu, suggestion: %s]", state->session.identifier.toString().utf8(), std::to_underlying(newTextSuggestionState), textSuggestion.identifier.toString().utf8());
 
     RefPtr document = this->document();
     if (!document) {
@@ -452,13 +468,25 @@ void WritingToolsController::proofreadingSessionDidUpdateStateForSuggestion(cons
 
     auto& [node, marker] = *nodeAndMarker;
 
+    auto data = std::get<DocumentMarker::WritingToolsTextSuggestionData>(marker.data());
+
     auto rangeToReplace = makeSimpleRange(node, marker);
 
-    auto replaceMarkerWithType = [&](const String& replacementText, DocumentMarker::WritingToolsTextSuggestionData::State newState) {
-        auto data = std::get<DocumentMarker::WritingToolsTextSuggestionData>(marker.data());
+    auto expectedCurrentText = data.state == DocumentMarker::WritingToolsTextSuggestionData::State::Accepted
+        ? textSuggestion.replacement
+        : data.originalText;
 
-        auto offsetRange = OffsetRange { marker.startOffset(), marker.endOffset() };
-        document->markers().removeMarkers(node, offsetRange, { DocumentMarkerType::WritingToolsTextSuggestion });
+    auto validatedRange = validatedRangeForSuggestionMarker(sessionRange, node, marker, expectedCurrentText);
+
+    auto removeSuggestionMarker = [&] {
+        document->markers().filterMarkers(sessionRange, [&](const DocumentMarker& candidate) {
+            auto candidateData = std::get<DocumentMarker::WritingToolsTextSuggestionData>(candidate.data());
+            return candidateData.suggestionID == textSuggestion.identifier ? FilterMarkerResult::Remove : FilterMarkerResult::Keep;
+        }, { DocumentMarkerType::WritingToolsTextSuggestion });
+    };
+
+    auto replaceMarkerWithType = [&](const String& replacementText, DocumentMarker::WritingToolsTextSuggestionData::State newState) {
+        removeSuggestionMarker();
 
         auto resolvedCharacterRange = characterRange(sessionRange, rangeToReplace);
 
@@ -486,7 +514,7 @@ void WritingToolsController::proofreadingSessionDidUpdateStateForSuggestion(cons
         auto rect = protect(document)->view()->contentsToRootView(unionRect(RenderObject::absoluteTextRects(rangeToReplace)));
 
         if (CheckedPtr renderStyle = node.renderStyle()) {
-            CheckedRef font = Style::fontCascade(*renderStyle);
+            CheckedRef font = renderStyle->fontCascadeOutOfLine();
             auto [_, height] = DocumentMarkerController::markerYPositionAndHeightForFont(font);
 
             rect.setY(rect.y() + std::round(height / 2.0));
@@ -501,10 +529,11 @@ void WritingToolsController::proofreadingSessionDidUpdateStateForSuggestion(cons
         // When a given suggestion is "reverted" / rejected, remove the marker and replace the suggested text
         // with the original text.
 
-        auto data = std::get<DocumentMarker::WritingToolsTextSuggestionData>(marker.data());
+        if (!validatedRange)
+            return;
+        rangeToReplace = *validatedRange;
 
-        auto offsetRange = OffsetRange { marker.startOffset(), marker.endOffset() };
-        document->markers().removeMarkers(node, offsetRange, { DocumentMarkerType::WritingToolsTextSuggestion });
+        removeSuggestionMarker();
 
         replaceContentsOfRangeInSession(*state, rangeToReplace, data.originalText);
 
@@ -516,7 +545,10 @@ void WritingToolsController::proofreadingSessionDidUpdateStateForSuggestion(cons
             // In the proofreading review case, return to the default state which has the original text.
             // Need to replace the marker as well, so that further updates can continue to be applied.
 
-            auto data = std::get<DocumentMarker::WritingToolsTextSuggestionData>(marker.data());
+            if (!validatedRange)
+                return;
+            rangeToReplace = *validatedRange;
+
             replaceMarkerWithType(data.originalText, DocumentMarker::WritingToolsTextSuggestionData::State::Rejected);
         }
         return;
@@ -527,6 +559,10 @@ void WritingToolsController::proofreadingSessionDidUpdateStateForSuggestion(cons
             // In the proofreading review case, when a given suggestion is accepted, remove the marker
             // and replace the original text with the replacement text. Need to replace the marker
             // as well, so that further updates can continue to be applied.
+
+            if (!validatedRange)
+                return;
+            rangeToReplace = *validatedRange;
 
             replaceMarkerWithType(textSuggestion.replacement, DocumentMarker::WritingToolsTextSuggestionData::State::Accepted);
         }
@@ -599,12 +635,11 @@ void WritingToolsController::intelligenceTextAnimationsDidComplete()
 
 void WritingToolsController::compositionSessionDidFinishReplacement()
 {
-    // An empty optional range implies that an animation should be considered to have already been finished.
-    WTF::UUID emptyUUID { WTF::UUID::emptyValue };
-    m_page->chrome().client().addDestinationTextAnimationForActiveWritingToolsSession(emptyUUID, emptyUUID, std::nullopt, ""_s);
+    // No animation UUIDs and an empty optional range imply that an animation should be considered to have already been finished.
+    m_page->chrome().client().addDestinationTextAnimationForActiveWritingToolsSession({ }, { }, std::nullopt, ""_s);
 }
 
-void WritingToolsController::compositionSessionDidFinishReplacement(const WTF::UUID& sourceAnimationUUID, const WTF::UUID& destinationAnimationUUID, const CharacterRange& updatedRange, const String& replacementText)
+void WritingToolsController::compositionSessionDidFinishReplacement(Markable<WTF::UUID> sourceAnimationUUID, Markable<WTF::UUID> destinationAnimationUUID, const CharacterRange& updatedRange, const String& replacementText)
 {
     m_page->chrome().client().addDestinationTextAnimationForActiveWritingToolsSession(sourceAnimationUUID, destinationAnimationUUID, updatedRange, replacementText);
 }
@@ -654,7 +689,8 @@ void WritingToolsController::smartReplySessionDidReceiveTextWithReplacementRange
 
     document->markers().forEach(resolvedRange, { DocumentMarkerType::TransparentContent }, [&](auto&, auto& marker) {
         auto& data = std::get<DocumentMarker::TransparentContentData>(marker.data());
-        transparentContentMarkerIdentifiers.add(data.uuid);
+        if (data.uuid)
+            transparentContentMarkerIdentifiers.add(*data.uuid);
 
         return false;
     });
@@ -676,7 +712,7 @@ void WritingToolsController::smartReplySessionDidReceiveTextWithReplacementRange
     document->selection().clear();
 }
 
-void WritingToolsController::compositionSessionDidReceiveTextWithReplacementRangeAsync(const WTF::UUID& sourceAnimationUUID, const WTF::UUID& destinationAnimationUUID, const AttributedString& attributedText, const CharacterRange& range, const WritingTools::Context& context, bool finished, TextAnimationRunMode runMode)
+void WritingToolsController::compositionSessionDidReceiveTextWithReplacementRangeAsync(Markable<WTF::UUID> sourceAnimationUUID, Markable<WTF::UUID> destinationAnimationUUID, const AttributedString& attributedText, const CharacterRange& range, const WritingTools::Context& context, bool finished, TextAnimationRunMode runMode)
 {
     RefPtr document = this->document();
     if (!document) {
@@ -702,7 +738,7 @@ void WritingToolsController::compositionSessionDidReceiveTextWithReplacementRang
     // Precondition: the range is always relative to the context's attributed text, so by definition it must
     // be strictly less than the length of the attributed string.
     if (contextTextCharacterCount < range.location + range.length) [[unlikely]] {
-        RELEASE_LOG_ERROR(WritingTools, "WritingToolsController::compositionSessionDidReceiveTextWithReplacementRange (%s) => trying to replace a range larger than the context range (context range length: %u, range.location %llu, range.length %llu)", state->session.identifier.toString().utf8().data(), contextTextCharacterCount, range.location, range.length);
+        RELEASE_LOG_ERROR(WritingTools, "WritingToolsController::compositionSessionDidReceiveTextWithReplacementRange (%s) => trying to replace a range larger than the context range (context range length: %u, range.location %llu, range.length %llu)", state->session.identifier.toString().utf8(), contextTextCharacterCount, range.location, range.length);
         compositionSessionDidFinishReplacement();
         ASSERT_NOT_REACHED();
         return;
@@ -732,7 +768,7 @@ void WritingToolsController::compositionSessionDidReceiveTextWithReplacementRang
     auto sessionRangeCharacterCount = characterCount(sessionRange);
 
     if (range.length + sessionRangeCharacterCount < contextTextCharacterCount) [[unlikely]] {
-        RELEASE_LOG_ERROR(WritingTools, "WritingToolsController::compositionSessionDidReceiveTextWithReplacementRange (%s) => the range offset by the character count delta must have a non-negative size (context range length: %u, range.length %llu, session length: %llu)", state->session.identifier.toString().utf8().data(), contextTextCharacterCount, range.length, sessionRangeCharacterCount);
+        RELEASE_LOG_ERROR(WritingTools, "WritingToolsController::compositionSessionDidReceiveTextWithReplacementRange (%s) => the range offset by the character count delta must have a non-negative size (context range length: %u, range.length %llu, session length: %llu)", state->session.identifier.toString().utf8(), contextTextCharacterCount, range.length, sessionRangeCharacterCount);
         compositionSessionDidFinishReplacement();
         ASSERT_NOT_REACHED();
         return;
@@ -821,8 +857,7 @@ void WritingToolsController::compositionSessionDidReceiveTextWithReplacementRang
     state->pendingReplacedRange = range;
 
     if (session.compositionType == WritingTools::Session::CompositionType::Other) {
-        WTF::UUID emptyUUID { WTF::UUID::emptyValue };
-        compositionSessionDidReceiveTextWithReplacementRangeAsync(emptyUUID, emptyUUID, attributedText, range, context, finished, WebCore::TextAnimationRunMode::OnlyReplaceText);
+        compositionSessionDidReceiveTextWithReplacementRangeAsync({ }, { }, attributedText, range, context, finished, WebCore::TextAnimationRunMode::OnlyReplaceText);
         return;
     }
 
@@ -853,7 +888,7 @@ void WritingToolsController::writingToolsSessionDidReceiveAction<WritingTools::S
         return;
     }
 
-    RELEASE_LOG(WritingTools, "WritingToolsController::writingToolsSessionDidReceiveAction<Proofreading> (%s) [action: %hhu]", state->session.identifier.toString().utf8().data(), std::to_underlying(action));
+    RELEASE_LOG(WritingTools, "WritingToolsController::writingToolsSessionDidReceiveAction<Proofreading> (%s) [action: %hhu]", state->session.identifier.toString().utf8(), std::to_underlying(action));
 
     RefPtr document = this->document();
     if (!document) {
@@ -1300,6 +1335,73 @@ std::optional<std::tuple<Node&, DocumentMarker&>> WritingToolsController::findTe
         return { { *targetNode, *targetMarker } };
 
     return std::nullopt;
+}
+
+std::optional<SimpleRange> WritingToolsController::validatedRangeForSuggestionMarker(const SimpleRange& sessionRange, Node& node, const DocumentMarker& marker, const String& expectedCurrentText) const
+{
+    auto rangeToReplace = makeSimpleRange(node, marker);
+    auto currentText = plainText(rangeToReplace);
+    if (currentText == expectedCurrentText)
+        return rangeToReplace;
+
+    if (expectedCurrentText.isEmpty())
+        return std::nullopt;
+
+    auto sessionPlainText = plainText(sessionRange);
+    auto staleOffset = characterRange(sessionRange, rangeToReplace).location;
+
+    // Re-anchoring is a heuristic, so reject it when ambiguous (a tie) or when it collides with another suggestion's marker.
+    size_t bestMatch = notFound;
+    uint64_t bestDistance = std::numeric_limits<uint64_t>::max();
+    uint64_t secondBestDistance = std::numeric_limits<uint64_t>::max();
+    unsigned searchStart = 0;
+    while (true) {
+        auto matchIndex = sessionPlainText.find(expectedCurrentText, searchStart);
+        if (matchIndex == notFound)
+            break;
+        uint64_t distance = matchIndex > staleOffset ? matchIndex - staleOffset : staleOffset - matchIndex;
+        if (distance < bestDistance) {
+            secondBestDistance = bestDistance;
+            bestDistance = distance;
+            bestMatch = matchIndex;
+        } else if (distance < secondBestDistance)
+            secondBestDistance = distance;
+        searchStart = static_cast<unsigned>(matchIndex + 1);
+    }
+
+    if (bestMatch == notFound) {
+        RELEASE_LOG(WritingTools, "WritingToolsController::validatedRangeForSuggestionMarker bailing - expected text of length %u not found in session range", expectedCurrentText.length());
+        return std::nullopt;
+    }
+
+    if (secondBestDistance == bestDistance) {
+        RELEASE_LOG(WritingTools, "WritingToolsController::validatedRangeForSuggestionMarker bailing - ambiguous match for expected text of length %u", expectedCurrentText.length());
+        return std::nullopt;
+    }
+
+    CharacterRange resolvedCharacterRange { bestMatch, expectedCurrentText.length() };
+
+    auto suggestionID = std::get<DocumentMarker::WritingToolsTextSuggestionData>(marker.data()).suggestionID;
+    bool overlapsOtherSuggestion = false;
+    if (RefPtr document = this->document()) {
+        document->markers().forEach(sessionRange, { DocumentMarkerType::WritingToolsTextSuggestion }, [&](auto& otherNode, auto& otherMarker) {
+            if (std::get<DocumentMarker::WritingToolsTextSuggestionData>(otherMarker.data()).suggestionID == suggestionID)
+                return false;
+            auto otherRange = characterRange(sessionRange, makeSimpleRange(otherNode, otherMarker));
+            if (resolvedCharacterRange.location < otherRange.location + otherRange.length && otherRange.location < resolvedCharacterRange.location + resolvedCharacterRange.length) {
+                overlapsOtherSuggestion = true;
+                return true;
+            }
+            return false;
+        });
+    }
+
+    if (overlapsOtherSuggestion) {
+        RELEASE_LOG(WritingTools, "WritingToolsController::validatedRangeForSuggestionMarker bailing - re-anchored range overlaps another suggestion marker");
+        return std::nullopt;
+    }
+
+    return resolveCharacterRange(sessionRange, resolvedCharacterRange);
 }
 
 std::optional<std::tuple<Node&, DocumentMarker&>> WritingToolsController::findTextSuggestionMarkerContainingRange(const SimpleRange& range) const

@@ -28,6 +28,7 @@
 
 #include "FormattingContextBoxIterator.h"
 #include "GridFormattingContext.h"
+#include "GridItemRect.h"
 #include "GridLayoutConstraints.h"
 #include "GridLayoutUtils.h"
 #include "LayoutIntegrationBoxGeometryUpdater.h"
@@ -149,12 +150,22 @@ static inline Layout::GridLayoutConstraints constraintsForGridContent(const Layo
     return { inlineAxisConstraint, blockAxisConstraint };
 }
 
-void GridLayout::updateGridItemRenderers()
+GridLayout::GridItemBorderBoxRects GridLayout::gridItemBorderBoxRects() const
 {
+    GridItemBorderBoxRects gridItemBorderBoxRects;
+    for (CheckedRef layoutBox : formattingContextBoxes(gridBox()))
+        gridItemBorderBoxRects.append(CheckedRef { downcast<RenderBox>(*layoutBox->rendererForIntegration()) }->borderBoxRectInContainer());
+    return gridItemBorderBoxRects;
+}
+
+void GridLayout::updateGridItemRenderers(const GridItemBorderBoxRects& previousGridItemRects)
+{
+    CheckedRef renderGrid = gridBoxRenderer();
     CheckedRef layoutState = this->layoutState();
     auto& gridBoxGeometry = layoutState->geometryForBox(gridBox());
     auto contentBoxOffset = LayoutPoint(gridBoxGeometry.contentBoxLeft(), gridBoxGeometry.contentBoxTop());
 
+    size_t gridItemIndex = 0;
     for (CheckedRef layoutBox : formattingContextBoxes(gridBox())) {
         CheckedRef renderer = downcast<RenderBox>(*layoutBox->rendererForIntegration());
         auto& gridItemGeometry = layoutState->geometryForBox(layoutBox);
@@ -168,19 +179,36 @@ void GridLayout::updateGridItemRenderers()
         renderer->setMarginAfter(gridItemGeometry.marginAfter());
         renderer->setMarginStart(gridItemGeometry.marginStart());
         renderer->setMarginEnd(gridItemGeometry.marginEnd());
+
+        if (!renderGrid->selfNeedsLayout() && renderer->checkForRepaintDuringLayout())
+            renderer->repaintDuringLayoutIfMoved(previousGridItemRects[gridItemIndex]);
+        ++gridItemIndex;
     }
+    ASSERT(gridItemIndex == previousGridItemRects.size());
 }
 
-void GridLayout::updateFormattingContextRootRenderer(const Layout::GridLayoutConstraints& layoutConstraints, const Layout::UsedTrackSizes& usedTrackSizes)
+void GridLayout::updateFormattingContextRootRenderer(const Layout::GridLayoutConstraints& layoutConstraints, const Layout::UsedTrackSizes& usedTrackSizes, const Layout::GridItemRects& gridItemRects)
 {
     CheckedRef renderGrid = gridBoxRenderer();
     auto& currentGrid = renderGrid->currentGrid();
+
+    // Render tree clients which consult the grid area of a grid item outside of layout (e.g.
+    // RenderGrid::isExtrinsicallySized) would otherwise read from an empty map.
+    for (auto& gridItemRect : gridItemRects) {
+        auto& lineNumbersForGridArea = gridItemRect.lineNumbersForGridArea;
+        auto gridArea = GridArea {
+            GridSpan::translatedDefiniteGridSpan(static_cast<unsigned>(lineNumbersForGridArea.rowStartLine), static_cast<unsigned>(lineNumbersForGridArea.rowEndLine)),
+            GridSpan::translatedDefiniteGridSpan(static_cast<unsigned>(lineNumbersForGridArea.columnStartLine), static_cast<unsigned>(lineNumbersForGridArea.columnEndLine))
+        };
+        currentGrid.setGridItemArea(downcast<RenderBox>(*protect(gridItemRect.layoutBox->rendererForIntegration())), gridArea);
+    }
     currentGrid.setNeedsItemsPlacement(false);
+
     OrderIteratorPopulator orderIteratorPopulator(currentGrid.orderIterator());
 
     if (layoutConstraints.blockAxis.scenario() != Layout::AxisConstraint::FreeSpaceScenario::Definite) {
         auto& rowSizes = usedTrackSizes.rowSizes;
-        auto usedRowGutter = Layout::GridFormattingContext::usedGapValue(renderGrid->style().rowGap());
+        auto usedRowGutter = Layout::GridFormattingContext::usedGapValue(renderGrid->style().rowGap(), renderGrid->style());
         auto blockContentSize = std::reduce(rowSizes.begin(), rowSizes.end()) + Layout::GridLayoutUtils::totalGuttersSize(rowSizes.size(), usedRowGutter);
         renderGrid->setBorderBoxHeight(blockContentSize + renderGrid->borderAndPaddingLogicalHeight());
     } else
@@ -188,6 +216,15 @@ void GridLayout::updateFormattingContextRootRenderer(const Layout::GridLayoutCon
 
     for (CheckedRef layoutBox : formattingContextBoxes(gridBox()))
         orderIteratorPopulator.collectChild(CheckedRef { downcast<RenderBox>(*layoutBox->rendererForIntegration()) });
+}
+
+// updateFormattingContextRootRenderer may mutate bits of RenderGrid to properly reflect
+// the state and result of layout since certain clients may query this information
+// (see RenderGrid::paintChildren). Undo this state if we are falling back to legacy
+// so that we run a full layout.
+void GridLayout::invalidateFormattingContextRootRenderer(RenderGrid& renderGrid)
+{
+    renderGrid.currentGrid().setNeedsItemsPlacement(true);
 }
 
 std::pair<LayoutUnit, LayoutUnit> GridLayout::computeIntrinsicWidths()
@@ -200,10 +237,75 @@ std::pair<LayoutUnit, LayoutUnit> GridLayout::computeIntrinsicWidths()
 void GridLayout::layout()
 {
     auto gridLayoutConstraints = constraintsForGridContent(gridBox());
-    auto usedTrackSizes = Layout::GridFormattingContext { gridBox(), layoutState() }.layout(gridLayoutConstraints);
-    updateGridItemRenderers();
-    updateFormattingContextRootRenderer(gridLayoutConstraints, usedTrackSizes);
+
+    auto previousGridItemRects = gridItemBorderBoxRects();
+
+    auto [ usedTrackSizes, gridItemRects ] = Layout::GridFormattingContext { gridBox(), layoutState() }.layout(gridLayoutConstraints);
+    updateGridItemRenderers(previousGridItemRects);
+    updateFormattingContextRootRenderer(gridLayoutConstraints, usedTrackSizes, gridItemRects);
     layoutOutOfFlowBoxes(usedTrackSizes);
+
+    CheckedRef renderGrid = gridBoxRenderer();
+    renderGrid->updateLogicalHeight();
+    updateOverflow(renderGrid);
+
+    // https://drafts.csswg.org/css-grid-2/#resolved-track-list
+    renderGrid->setResolvedTrackSizes(WTF::move(usedTrackSizes.columnSizes), WTF::move(usedTrackSizes.rowSizes));
+}
+
+void GridLayout::updateOverflow(RenderGrid& renderGrid)
+{
+    ASSERT(renderGrid.style().isOverflowVisible());
+    renderGrid.clearOverflow();
+
+    CheckedRef layoutState = this->layoutState();
+    auto& gridBoxGeometry = layoutState->geometryForBox(gridBox());
+    auto contentBoxOffset = LayoutSize { gridBoxGeometry.contentBoxLeft(), gridBoxGeometry.contentBoxTop() };
+
+    // https://drafts.csswg.org/css-overflow-3/#scrollable
+    auto gridItemsLayoutOverflowRect = LayoutRect { };
+    auto gridItemsVisualOverflowRect = LayoutRect { };
+    for (CheckedRef layoutBox : formattingContextBoxes(gridBox())) {
+        LayoutRect gridItemBorderBoxRect = Layout::BoxGeometry::borderBoxRect(layoutState->geometryForBox(layoutBox));
+        gridItemBorderBoxRect.move(contentBoxOffset);
+        gridItemsVisualOverflowRect.unite(gridItemBorderBoxRect);
+
+        CheckedRef gridItemRenderer = downcast<RenderBox>(*layoutBox->rendererForIntegration());
+
+        // A grid item's content is laid out outside of this formatting context, so the overflow that
+        // its own subtree generates is only available from the renderer. The returned rect already
+        // includes the grid item's border box.
+        auto gridItemLayoutOverflowRect = gridItemRenderer->layoutOverflowRectForPropagation(renderGrid.writingMode());
+        gridItemLayoutOverflowRect.move(gridItemRenderer->locationOffset());
+        gridItemsLayoutOverflowRect.unite(gridItemLayoutOverflowRect);
+
+        if (gridItemRenderer->hasVisualOverflow()) {
+            auto gridItemVisualOverflowRect = gridItemRenderer->visualOverflowRectForPropagation(renderGrid.writingMode());
+            gridItemVisualOverflowRect.move(gridItemRenderer->locationOffset());
+            gridItemsVisualOverflowRect.unite(gridItemVisualOverflowRect);
+        }
+    }
+
+    renderGrid.addLayoutOverflow(gridItemsLayoutOverflowRect);
+
+    // Out-of-flow boxes whose containing block is the grid container are laid out by
+    // layoutOutOfFlowBoxes, also outside of this formatting context.
+    auto outOfFlowBoxesLayoutOverflowRect = LayoutRect { };
+    if (auto* outOfFlowDescendants = renderGrid.outOfFlowBoxes()) {
+        for (CheckedRef outOfFlowBox : *outOfFlowDescendants) {
+            // Fixed positioned boxes do not scroll with the content, so they never contribute to the
+            // scrollable overflow area.
+            if (outOfFlowBox->isFixedPositioned())
+                continue;
+            auto outOfFlowBoxLayoutOverflowRect = outOfFlowBox->layoutOverflowRectForPropagation(renderGrid.writingMode());
+            outOfFlowBoxLayoutOverflowRect.move(outOfFlowBox->locationOffset());
+            outOfFlowBoxesLayoutOverflowRect.unite(outOfFlowBoxLayoutOverflowRect);
+        }
+    }
+    renderGrid.addLayoutOverflow(outOfFlowBoxesLayoutOverflowRect);
+
+    if (!renderGrid.borderBoxRect().contains(gridItemsVisualOverflowRect))
+        renderGrid.addVisualOverflow(gridItemsVisualOverflowRect);
 }
 
 void GridLayout::layoutOutOfFlowBoxes(const Layout::UsedTrackSizes& usedTrackSizes)
@@ -234,7 +336,7 @@ void GridLayout::populateGridPositionsForOutOfFlowLayout(const Layout::UsedTrack
     auto populate = [&](Style::GridTrackSizingDirection direction) {
         bool isColumns = direction == Style::GridTrackSizingDirection::Columns;
         auto& trackSizes = isColumns ? usedTrackSizes.columnSizes : usedTrackSizes.rowSizes;
-        auto gap = Layout::GridFormattingContext::usedGapValue(isColumns ? renderGrid->style().columnGap() : renderGrid->style().rowGap());
+        auto gap = Layout::GridFormattingContext::usedGapValue(isColumns ? renderGrid->style().columnGap() : renderGrid->style().rowGap(), renderGrid->style());
         auto borderAndPadding = isColumns ? renderGrid->borderAndPaddingStart() : renderGrid->borderAndPaddingBefore();
         auto numberOfTracks = trackSizes.size();
         bool hasMultipleTracks = numberOfTracks > 1;

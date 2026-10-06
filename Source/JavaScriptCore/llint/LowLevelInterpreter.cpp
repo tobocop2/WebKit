@@ -137,61 +137,62 @@ class CallLinkInfo;
 // It defines the policy of how ints smaller than intptr_t are packed into the
 // pseudo register, as well as hides endianness differences.
 
+// The emulated register is always 64 bits wide so it can hold an EncodedJSValue,
+// even on 32-bit targets where pointers occupy only the low half.
 class CLoopRegister {
 public:
-    ALWAYS_INLINE intptr_t i() const { return m_value; };
-    ALWAYS_INLINE uintptr_t u() const { return m_value; }
-    ALWAYS_INLINE int32_t i32() const { return m_value; }
-    ALWAYS_INLINE uint32_t u32() const { return m_value; }
-    ALWAYS_INLINE int8_t i8() const { return m_value; }
-    ALWAYS_INLINE uint8_t u8() const { return m_value; }
+    ALWAYS_INLINE intptr_t i() const { return static_cast<intptr_t>(m_value); };
+    ALWAYS_INLINE uintptr_t u() const { return static_cast<uintptr_t>(m_value); }
+    ALWAYS_INLINE int32_t i32() const { return static_cast<int32_t>(m_value); }
+    ALWAYS_INLINE uint32_t u32() const { return static_cast<uint32_t>(m_value); }
+    ALWAYS_INLINE int16_t i16() const { return static_cast<int16_t>(m_value); }
+    ALWAYS_INLINE uint16_t u16() const { return static_cast<uint16_t>(m_value); }
+    ALWAYS_INLINE int8_t i8() const { return static_cast<int8_t>(m_value); }
+    ALWAYS_INLINE uint8_t u8() const { return static_cast<uint8_t>(m_value); }
 
-    ALWAYS_INLINE intptr_t* ip() const { return std::bit_cast<intptr_t*>(m_value); }
-    ALWAYS_INLINE int8_t* i8p() const { return std::bit_cast<int8_t*>(m_value); }
-    ALWAYS_INLINE void* vp() const { return std::bit_cast<void*>(m_value); }
-    ALWAYS_INLINE const void* cvp() const { return std::bit_cast<const void*>(m_value); }
-    ALWAYS_INLINE CallFrame* callFrame() const { return std::bit_cast<CallFrame*>(m_value); }
-    ALWAYS_INLINE const void* instruction() const { return std::bit_cast<const void*>(m_value); }
-    ALWAYS_INLINE VM* vm() const { return std::bit_cast<VM*>(m_value); }
-    ALWAYS_INLINE JSCell* cell() const { return std::bit_cast<JSCell*>(m_value); }
-    ALWAYS_INLINE ProtoCallFrame* protoCallFrame() const { return std::bit_cast<ProtoCallFrame*>(m_value); }
-    ALWAYS_INLINE NativeFunction nativeFunc() const { return std::bit_cast<NativeFunction>(m_value); }
-#if USE(JSVALUE64)
-    ALWAYS_INLINE int64_t i64() const { return m_value; }
+    ALWAYS_INLINE intptr_t* ip() const { return std::bit_cast<intptr_t*>(static_cast<uintptr_t>(m_value)); }
+    ALWAYS_INLINE int8_t* i8p() const { return std::bit_cast<int8_t*>(static_cast<uintptr_t>(m_value)); }
+    ALWAYS_INLINE void* vp() const { return std::bit_cast<void*>(static_cast<uintptr_t>(m_value)); }
+    ALWAYS_INLINE const void* cvp() const { return std::bit_cast<const void*>(static_cast<uintptr_t>(m_value)); }
+    ALWAYS_INLINE CallFrame* callFrame() const { return std::bit_cast<CallFrame*>(static_cast<uintptr_t>(m_value)); }
+    ALWAYS_INLINE const void* instruction() const { return std::bit_cast<const void*>(static_cast<uintptr_t>(m_value)); }
+    ALWAYS_INLINE VM* vm() const { return std::bit_cast<VM*>(static_cast<uintptr_t>(m_value)); }
+    ALWAYS_INLINE JSCell* cell() const { return std::bit_cast<JSCell*>(static_cast<uintptr_t>(m_value)); }
+    ALWAYS_INLINE ProtoCallFrame* protoCallFrame() const { return std::bit_cast<ProtoCallFrame*>(static_cast<uintptr_t>(m_value)); }
+    ALWAYS_INLINE NativeFunction nativeFunc() const { return std::bit_cast<NativeFunction>(static_cast<uintptr_t>(m_value)); }
+    ALWAYS_INLINE int64_t i64() const { return static_cast<int64_t>(m_value); }
     ALWAYS_INLINE uint64_t u64() const { return m_value; }
     ALWAYS_INLINE EncodedJSValue encodedJSValue() const { return std::bit_cast<EncodedJSValue>(m_value); }
-#endif
-    ALWAYS_INLINE Opcode opcode() const { return std::bit_cast<Opcode>(m_value); }
+    ALWAYS_INLINE Opcode opcode() const { return std::bit_cast<Opcode>(static_cast<uintptr_t>(m_value)); }
 
-    operator CallFrame*() { return std::bit_cast<CallFrame*>(m_value); }
-    operator const JSInstruction*() { return std::bit_cast<const JSInstruction*>(m_value); }
-    operator JSCell*() { return std::bit_cast<JSCell*>(m_value); }
-    operator ProtoCallFrame*() { return std::bit_cast<ProtoCallFrame*>(m_value); }
-    operator Register*() { return std::bit_cast<Register*>(m_value); }
-    operator VM*() { return std::bit_cast<VM*>(m_value); }
-    operator CallLinkInfo*() { return std::bit_cast<CallLinkInfo*>(m_value); }
-    operator void*() { return reinterpret_cast<void*>(m_value); }
+    operator CallFrame*() { return std::bit_cast<CallFrame*>(static_cast<uintptr_t>(m_value)); }
+    operator const JSInstruction*() { return std::bit_cast<const JSInstruction*>(static_cast<uintptr_t>(m_value)); }
+    operator JSCell*() { return std::bit_cast<JSCell*>(static_cast<uintptr_t>(m_value)); }
+    operator ProtoCallFrame*() { return std::bit_cast<ProtoCallFrame*>(static_cast<uintptr_t>(m_value)); }
+    operator Register*() { return std::bit_cast<Register*>(static_cast<uintptr_t>(m_value)); }
+    operator VM*() { return std::bit_cast<VM*>(static_cast<uintptr_t>(m_value)); }
+    operator CallLinkInfo*() { return std::bit_cast<CallLinkInfo*>(static_cast<uintptr_t>(m_value)); }
+    operator void*() { return std::bit_cast<void*>(static_cast<uintptr_t>(m_value)); }
+
+    // Assignment must stay templated: intptr_t is a distinct type from every
+    // int<N>_t on 32-bit Darwin, so a fixed-width overload set is ambiguous for it.
+    template<typename T>
+        requires (std::is_pointer_v<T>)
+    ALWAYS_INLINE void operator=(T value) { m_value = std::bit_cast<uintptr_t>(value); }
 
     template<typename T>
-        requires (sizeof(T) == sizeof(uintptr_t))
-    ALWAYS_INLINE void operator=(T value) { m_value = std::bit_cast<uintptr_t>(value); }
-#if USE(JSVALUE64)
-    ALWAYS_INLINE void operator=(int32_t value) { m_value = static_cast<intptr_t>(value); }
-    ALWAYS_INLINE void operator=(uint32_t value) { m_value = static_cast<uintptr_t>(value); }
-#endif
-    ALWAYS_INLINE void operator=(int16_t value) { m_value = static_cast<intptr_t>(value); }
-    ALWAYS_INLINE void operator=(uint16_t value) { m_value = static_cast<uintptr_t>(value); }
-    ALWAYS_INLINE void operator=(int8_t value) { m_value = static_cast<intptr_t>(value); }
-    ALWAYS_INLINE void operator=(uint8_t value) { m_value = static_cast<uintptr_t>(value); }
-    ALWAYS_INLINE void operator=(bool value) { m_value = static_cast<uintptr_t>(value); }
+        requires (std::is_integral_v<T> && std::is_signed_v<T>)
+    ALWAYS_INLINE void operator=(T value) { m_value = static_cast<uint64_t>(static_cast<int64_t>(value)); }
 
-#if USE(JSVALUE64)
+    template<typename T>
+        requires (std::is_integral_v<T> && !std::is_signed_v<T>)
+    ALWAYS_INLINE void operator=(T value) { m_value = static_cast<uint64_t>(value); }
+
     ALWAYS_INLINE double bitsAsDouble() const { return std::bit_cast<double>(m_value); }
     ALWAYS_INLINE int64_t bitsAsInt64() const { return std::bit_cast<int64_t>(m_value); }
-#endif
 
 private:
-    uintptr_t m_value { static_cast<uintptr_t>(0xbadbeef0baddbeef) };
+    uint64_t m_value { 0xbadbeef0baddbeefull };
 };
 
 class CLoopDoubleRegister {
@@ -217,21 +218,6 @@ private:
 //
 
 namespace LLInt {
-
-#if USE(JSVALUE32_64)
-static double ints2Double(uint32_t lo, uint32_t hi)
-{
-    uint64_t value = (static_cast<uint64_t>(hi) << 32) | lo;
-    return std::bit_cast<double>(value);
-}
-
-static void double2Ints(double val, CLoopRegister& lo, CLoopRegister& hi)
-{
-    uint64_t value = std::bit_cast<uint64_t>(val);
-    hi = static_cast<uint32_t>(value >> 32);
-    lo = static_cast<uint32_t>(value);
-}
-#endif // USE(JSVALUE32_64)
 
 static void decodeResult(UGPRPair result, CLoopRegister& t0, CLoopRegister& t1)
 {
@@ -303,37 +289,18 @@ JSValue CLoop::execute(OpcodeID entryOpcodeID, void* executableAddress, VM* vm, 
         return JSValue();
     }
 
-    // Define the pseudo registers used by the LLINT C Loop backend:
-    static_assert(sizeof(CLoopRegister) == sizeof(intptr_t));
+    // Define the pseudo registers used by the LLINT C Loop backend. Each is 64 bits
+    // wide so it can hold an EncodedJSValue.
+    static_assert(sizeof(CLoopRegister) == sizeof(EncodedJSValue));
 
-    // The CLoop llint backend is initially based on the ARMv7 backend, and
-    // then further enhanced with a few instructions from the x86 backend to
-    // support building for X64 targets. Hence, the shape of the generated
-    // code and the usage convention of registers will look a lot like the
-    // ARMv7 backend's.
-    //
-    // For example, on a 32-bit build:
-    // 1. Outgoing args will be set up as follows:
-    //    arg1 in t0 (r0 on ARM)
-    //    arg2 in t1 (r1 on ARM)
-    // 2. 32 bit return values will be in t0 (r0 on ARM).
-    // 3. 64 bit return values (e.g. doubles) will be in t0,t1 (r0,r1 on ARM).
-    //
-    // But instead of naming these simulator registers based on their ARM
-    // counterparts, we'll name them based on their original llint asm names.
-    // This will make it easier to correlate the generated code with the
-    // original llint asm code.
-    //
-    // On a 64-bit build, it more like x64 in that the registers are 64 bit.
-    // Hence:
-    // 1. Outgoing args are still the same: arg1 in t0, arg2 in t1, etc.
-    // 2. 32 bit result values will be in the low 32-bit of t0.
-    // 3. 64 bit result values will be in t0.
+    // The registers are named after their original llint asm names to make it easier
+    // to correlate the generated code with the llint asm. The calling convention:
+    // 1. Outgoing args are arg1 in t0, arg2 in t1, etc.
+    // 2. 32 bit result values are in the low 32-bit of t0.
+    // 3. 64 bit result values are in t0.
 
     CLoopRegister t0, t1, t2, t3, t5, t6, t7, sp, cfr, lr, pc;
-#if USE(JSVALUE64)
     CLoopRegister numberTag, notCellMask;
-#endif
     CLoopRegister pcBase;
     CLoopRegister metadataTable;
     CLoopDoubleRegister d0, d1;
@@ -378,12 +345,10 @@ JSValue CLoop::execute(OpcodeID entryOpcodeID, void* executableAddress, VM* vm, 
     t1 = vm;
     t2 = protoCallFrame;
 
-#if USE(JSVALUE64)
     // For the ASM llint, JITStubs takes care of this initialization. We do
     // it explicitly here for the C loop:
     numberTag = JSValue::NumberTag;
     notCellMask = JSValue::NotCellMask;
-#endif // USE(JSVALUE64)
 
     // Interpreter variables for value passing between opcodes and/or helpers:
     NativeFunction nativeFunc = nullptr;
@@ -454,11 +419,7 @@ JSValue CLoop::execute(OpcodeID entryOpcodeID, void* executableAddress, VM* vm, 
         {
             ASSERT(startSP == sp.vp());
             ASSERT(startCFR == cfr.callFrame());
-#if USE(JSVALUE32_64)
-            return JSValue(t1.i(), t0.i()); // returning JSValue(tag, payload);
-#else
             return JSValue::decode(t0.encodedJSValue());
-#endif
         }
 
 #if !ENABLE(COMPUTED_GOTO_OPCODES)
@@ -508,9 +469,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 // For the spacer instruction, we'll choose a breakpoint instruction. However, we can
 // also just emit an unused piece of data. A breakpoint instruction is preferable.
 
-#if CPU(ARM_THUMB2)
-#define OFFLINE_ASM_BEGIN_SPACER "bkpt #0\n"
-#elif CPU(ARM64)
+#if CPU(ARM64)
 #define OFFLINE_ASM_BEGIN_SPACER "brk #" STRINGIZE_VALUE_OF(WTF_FATAL_CRASH_CODE) "\n"
 #elif CPU(X86_64)
 #define OFFLINE_ASM_BEGIN_SPACER "int3\n"
@@ -561,17 +520,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #define OFFLINE_ASM_TEXT_SECTION ".text\n"
 #endif
 
-#if CPU(ARM_THUMB2)
-#define OFFLINE_ASM_GLOBAL_LABEL_IMPL(label, ALT_ENTRY, ALIGNMENT, VISIBILITY) \
-    OFFLINE_ASM_TEXT_SECTION                     \
-    ALIGNMENT                                    \
-    ALT_ENTRY(label)                             \
-    ".globl " SYMBOL_STRING(label) "\n"          \
-    VISIBILITY(label) "\n"                       \
-    ".thumb\n"                                   \
-    ".thumb_func " THUMB_FUNC_PARAM(label) "\n"  \
-    SYMBOL_STRING(label) ":\n"
-#elif CPU(RISCV64)
+#if CPU(RISCV64)
 #define OFFLINE_ASM_GLOBAL_LABEL_IMPL(label, ALT_ENTRY, ALIGNMENT, VISIBILITY) \
     OFFLINE_ASM_TEXT_SECTION                    \
     ALIGNMENT                                   \
@@ -600,20 +549,19 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #define OFFLINE_ASM_NOALIGN ""
 
 #if CPU(ARM64) && OS(WINDOWS)
-// COFF uses power-of-two alignment: .align N means 2^N bytes
-// For 256-byte alignment: log2(256) = 8, for 64-byte: log2(64) = 6
+// COFF uses power-of-two alignment: .align N means 2^N bytes. Every alignment an `aligned` label
+// can ask for needs an entry here, or the paste below names an undefined macro.
 // Note: COFF doesn't support fill value, so padding bytes are zeros
 #define OFFLINE_ASM_ALIGN_TRAP_1024 "\n .align 10\n"
 #define OFFLINE_ASM_ALIGN_TRAP_512 "\n .align 9\n"
 #define OFFLINE_ASM_ALIGN_TRAP_256 "\n .align 8\n"
+#define OFFLINE_ASM_ALIGN_TRAP_128 "\n .align 7\n"
 #define OFFLINE_ASM_ALIGN_TRAP_64 "\n .align 6\n"
 #define OFFLINE_ASM_ALIGN_TRAP(align) OFFLINE_ASM_ALIGN_TRAP_##align
-#elif CPU(ARM64) || CPU(ARM64E)
+#elif CPU(ARM64)
 #define OFFLINE_ASM_ALIGN_TRAP(align) OFFLINE_ASM_BEGIN_SPACER "\n .balignl " #align ", 0xd4388e20\n" // pad with brk instructions
 #elif CPU(X86_64)
 #define OFFLINE_ASM_ALIGN_TRAP(align) OFFLINE_ASM_BEGIN_SPACER "\n .balign " #align ", 0xcc\n" // pad with int 3 instructions
-#elif CPU(ARM)
-#define OFFLINE_ASM_ALIGN_TRAP(align) OFFLINE_ASM_BEGIN_SPACER "\n .balignw " #align ", 0xde00\n" // pad with udf instructions
 #elif CPU(RISCV64)
 #define OFFLINE_ASM_ALIGN_TRAP(align) OFFLINE_ASM_BEGIN_SPACER "\n .balignw " #align ", 0x9002\n" // pad with c.ebreak instructions
 #endif
@@ -683,19 +631,6 @@ __asm__(
     ".cfi_offset fp, -16\n"
     OFFLINE_ASM_BEGIN_SPACER
 );
-#elif CPU(ARM_THUMB2)
-__asm__(
-    ".cfi_startproc\n"
-    OFFLINE_ASM_BEGIN_SPACER
-    ".cfi_def_cfa r7, 8\n"
-    ".cfi_offset lr, -4\n"
-    ".cfi_offset fp, -8\n"
-    OFFLINE_ASM_BEGIN_SPACER
-    ".cfi_def_cfa r7, 8\n"
-    ".cfi_offset lr, -4\n"
-    ".cfi_offset fp, -8\n"
-    OFFLINE_ASM_BEGIN_SPACER
-);
 #endif
 #endif
 
@@ -705,12 +640,98 @@ __asm__(
 
 // See GdbJIT.cpp for a detailed explanation.
 #if !OS(DARWIN) && COMPILER(CLANG)
-#if CPU(ARM64) || CPU(ARM_THUMB2)
+#if CPU(ARM64)
 __asm__(
     ".cfi_endproc\n"
 );
 #endif
 #endif
+
+#if OS(WINDOWS) && ENABLE(JIT) && (CPU(X86_64) || CPU(ARM64))
+// The Windows unwinder (RtlLookupFunctionEntry, and through it RtlVirtualUnwind,
+// RtlCaptureStackBackTrace, SEH dispatch, ETW and debuggers) only knows code that has
+// a RUNTIME_FUNCTION in the image's .pdata: the DWARF CFI emitted above on ARM64 means
+// nothing to it, and the dynamic function table that registerJITUnwindInfo
+// (ExecutableAllocator.cpp) registers for the JIT pool cannot cover code inside the
+// image. offlineasm emits no .seh_* directives, so without the record below every
+// walk stops or derails at the first LLInt or vmEntry* frame.
+//
+// Everything between jsc_llint_begin and jsc_llint_end keeps the frame pointer on a
+// CallFrame whose first two slots are the caller's frame pointer and the return
+// address (functionPrologue), the frame shape registerJITUnwindInfo describes for the
+// JIT pool. So one RUNTIME_FUNCTION over the whole range, carrying the unwind info
+// registerJITUnwindInfo hand-encodes, unwinds all of it, and its language-specific
+// handler gives a fault under these frames the same catch point a fault under a JIT
+// frame has (hence ENABLE(JIT): the handler is defined in ExecutableAllocator.cpp).
+// The range starts with the jsc_llint_begin and llintPCRangeStart trap instructions,
+// so no real PC falls inside the prologue the record describes.
+//
+// The record is written out by hand rather than with .seh_* directives: on ARM64 LLVM
+// needs the function length when it reaches .seh_endproc and cannot compute it across
+// the alignment directives in the offlineasm output ("Failed to evaluate function
+// length in SEH unwind info", llvm/llvm-project#47432, the bug the -fno-unwind-tables
+// in CMakeLists.txt works around), whereas the data fixups below are resolved after
+// layout. The RVAs are spelled ".long symbol@IMGREL" rather than ".rva symbol" (the
+// two assemble to the same IMAGE_REL_*_ADDR32NB relocation) because LTO's scan of the
+// module asm for the symbols it references does not see .rva operands: with .rva, a
+// -flto build internalizes jscJITSEHHandler and the link fails with an undefined
+// symbol referenced from .xdata.
+#if CPU(X86_64)
+__asm__(
+    ".section .xdata,\"dr\"\n"
+    ".p2align 2\n"
+    LOCAL_LABEL_STRING(jsc_llint_unwind_info) ":\n"
+    // UNWIND_INFO (https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64):
+    // the bytes of JITUnwindRecord::unwindInfo in ExecutableAllocator.cpp, except that
+    // the handler is addressed directly instead of through a thunk in the pool.
+    ".byte 0x09\n" // Version 1, UNW_FLAG_EHANDLER
+    ".byte 4\n" // SizeOfProlog: push rbp (1 byte); mov rbp, rsp (3 bytes)
+    ".byte 2\n" // CountOfCodes
+    ".byte 0x05\n" // FrameRegister rbp, FrameOffset 0
+    ".byte 4, 0x03\n" // offset 4: UWOP_SET_FPREG
+    ".byte 1, 0x50\n" // offset 1: UWOP_PUSH_NONVOL rbp
+    ".long " SYMBOL_STRING(jscJITSEHHandler) "@IMGREL\n"
+
+    ".section .pdata,\"dr\"\n"
+    ".p2align 2\n"
+    ".long " SYMBOL_STRING(jsc_llint_begin) "@IMGREL\n"
+    ".long " SYMBOL_STRING(jsc_llint_end) "@IMGREL\n"
+    ".long " LOCAL_LABEL_STRING(jsc_llint_unwind_info) "@IMGREL\n"
+
+    ".text\n"
+);
+#elif CPU(ARM64)
+__asm__(
+    // The .xdata header holds the function length as 18 bits of instructions, and the
+    // .long below would silently overflow into the flag bits once the range outgrows
+    // that. ADR reaches exactly 2^18 instructions back, so this instruction, which
+    // nothing executes (it sits after the trap that precedes jsc_llint_end), assembled
+    // right after jsc_llint_end and aimed one instruction before jsc_llint_begin, fails
+    // to assemble ("fixup value out of range") as soon as the range no longer fits.
+    ".text\n"
+    "adr xzr, " SYMBOL_STRING(jsc_llint_begin) " - 4\n"
+
+    ".section .xdata,\"dr\"\n"
+    ".p2align 2\n"
+    LOCAL_LABEL_STRING(jsc_llint_unwind_info) ":\n"
+    // .xdata record (https://learn.microsoft.com/en-us/cpp/build/arm64-exception-handling):
+    // the layout and codes of JITUnwindHeader::unwindInfoFull in ExecutableAllocator.cpp
+    // (arm64XdataHeader / arm64JITUnwindCodes), with the real length and the handler
+    // addressed directly instead of through a thunk in the pool. Header fields:
+    // FunctionLength:18 | Version:2 = 0 | X:1 = 1 (handler present) | E:1 = 0 | EpilogCount:5 = 0 | CodeWords:5 = 1
+    ".long ((" SYMBOL_STRING(jsc_llint_end) " - " SYMBOL_STRING(jsc_llint_begin) ") >> 2) | (1 << 20) | (1 << 27)\n"
+    ".byte 0xE1, 0x81, 0xE4, 0xE3\n" // set_fp; save_fplr_x 16; end; nop (padding)
+    ".long " SYMBOL_STRING(jscJITSEHHandler) "@IMGREL\n"
+
+    ".section .pdata,\"dr\"\n"
+    ".p2align 2\n"
+    ".long " SYMBOL_STRING(jsc_llint_begin) "@IMGREL\n"
+    ".long " LOCAL_LABEL_STRING(jsc_llint_unwind_info) "@IMGREL\n"
+
+    ".text\n"
+);
+#endif
+#endif // OS(WINDOWS) && ENABLE(JIT) && (CPU(X86_64) || CPU(ARM64))
 
 DEBUGGER_ANNOTATION_MARKER(after_llint_asm)
 

@@ -38,6 +38,10 @@
 #import <wtf/SystemTracing.h>
 #import <wtf/text/TextStream.h>
 
+#if USE(APPLE_INTERNAL_SDK)
+#import <WebKitAdditions/ScrollingEffectsControllerAdditions.mm>
+#endif
+
 #if PLATFORM(MAC)
 
 namespace WebCore {
@@ -46,6 +50,7 @@ static const Seconds scrollVelocityZeroingTimeout = 100_ms;
 static const float rubberbandDirectionLockStretchRatio = 1;
 static const float rubberbandMinimumRequiredDeltaBeforeStretch = 10;
 
+#if !HAVE(APPKIT_GESTURES_SUPPORT)
 static float elasticDeltaForReboundDelta(float delta)
 {
     return _NSElasticDeltaForReboundDelta(delta);
@@ -55,6 +60,7 @@ static float reboundDeltaForElasticDelta(float delta)
 {
     return _NSReboundDeltaForElasticDelta(delta);
 }
+#endif
 
 static float scrollWheelMultiplier()
 {
@@ -74,13 +80,16 @@ ScrollingEffectsController::~ScrollingEffectsController()
 
 void ScrollingEffectsController::stopAllTimers()
 {
+    // Hand the timers to the client for destruction rather than stopping them here: they may fire on
+    // another thread (e.g. the scrolling thread) than the one tearing down the controller, and stopping
+    // or destroying a timer off its run loop's thread races with an in-flight callback.
     if (m_discreteSnapTransitionTimer) {
-        m_discreteSnapTransitionTimer->stop();
+        m_client.destroyTimer(WTF::move(m_discreteSnapTransitionTimer));
         m_client.didStopScrollSnapAnimation();
     }
 
     if (m_discreteScrollendTimer)
-        m_discreteScrollendTimer->stop();
+        m_client.destroyTimer(WTF::move(m_discreteScrollendTimer));
 
 #if ASSERT_ENABLED
     m_timersWereStopped = true;
@@ -138,6 +147,15 @@ static std::optional<BoxSide> NODELETE affectedSideOnDominantAxis(FloatSize delt
     return ScrollableArea::targetSideForScrollDelta(delta, dominantAxis);
 }
 
+#if HAVE(APPKIT_GESTURES_SUPPORT)
+static FloatSize hyperbolicReboundDeltaForElasticDelta(IntSize stretchAmount, float rubberbandHyperbolicCoefficient, FloatSize viewportSize)
+{
+    const auto width = _NSHyperbolicReboundDeltaForElasticDelta(stretchAmount.width(), rubberbandHyperbolicCoefficient, viewportSize.width());
+    const auto height = _NSHyperbolicReboundDeltaForElasticDelta(stretchAmount.height(), rubberbandHyperbolicCoefficient, viewportSize.height());
+    return { static_cast<float>(width), static_cast<float>(height) };
+}
+#endif
+
 bool ScrollingEffectsController::handleWheelEvent(const PlatformWheelEvent& wheelEvent)
 {
     if (processWheelEventForScrollSnap(wheelEvent))
@@ -171,8 +189,15 @@ bool ScrollingEffectsController::handleWheelEvent(const PlatformWheelEvent& whee
         m_lastGestureEventTime = { };
 
         IntSize stretchAmount = m_client.stretchAmount();
+#if HAVE(APPKIT_GESTURES_SUPPORT)
+        const auto viewportSize = m_client.scrollExtents().viewportSize;
+        m_gestureBeganAtTop = m_client.edgePinnedState().top();
+        m_rubberbandHyperbolicCoefficient = rubberBandHyperbolicCoefficient(wheelEvent);
+        m_stretchScrollForce = hyperbolicReboundDeltaForElasticDelta(stretchAmount, m_rubberbandHyperbolicCoefficient, viewportSize);
+#else
         m_stretchScrollForce.setWidth(reboundDeltaForElasticDelta(stretchAmount.width()));
         m_stretchScrollForce.setHeight(reboundDeltaForElasticDelta(stretchAmount.height()));
+#endif
         m_unappliedOverscrollDelta = { };
 
         stopRubberBandAnimation();
@@ -211,8 +236,12 @@ bool ScrollingEffectsController::handleWheelEvent(const PlatformWheelEvent& whee
     delta += eventDelta;
 
     if (wheelEvent.isGestureEvent()) {
+        // Automation events are already directionally locked upstream in WKAppKitGestureController.
+        auto alreadyDirectionallyLocked = wheelEvent.inputSource() == MouseEventInputSource::Automation;
+
         // FIXME: This axis locking replicates what WheelEventDeltaFilter does. We should apply that to events in all phases, and remove axis locking here (webkit.org/b/231207).
-        delta = deltaAlignedToPredominantGestureAxis(wheelEvent.timestamp(), delta);
+        if (!alreadyDirectionallyLocked)
+            delta = deltaAlignedToPredominantGestureAxis(wheelEvent.timestamp(), delta);
     }
 
     auto momentumPhase = wheelEvent.momentumPhase();
@@ -294,9 +323,14 @@ void ScrollingEffectsController::clampDeltaForAllowedAxes(const PlatformWheelEve
 
 bool ScrollingEffectsController::modifyScrollDeltaForStretching(const PlatformWheelEvent& wheelEvent, FloatSize& delta, bool isHorizontallyStretched, bool isVerticallyStretched)
 {
+    bool allowsDiagonalRubberbanding = wheelEvent.inputSource() == MouseEventInputSource::Automation;
+
     auto affectedSide = affectedSideOnDominantAxis(delta);
+    auto horizontalSide = ScrollableArea::targetSideForScrollDelta(delta, ScrollEventAxis::Horizontal);
+    auto verticalSide = ScrollableArea::targetSideForScrollDelta(delta, ScrollEventAxis::Vertical);
+
     if (isVerticallyStretched) {
-        if (!isHorizontallyStretched && affectedSide && m_client.isPinnedOnSide(*affectedSide)) {
+        if (!allowsDiagonalRubberbanding && !isHorizontallyStretched && affectedSide && m_client.isPinnedOnSide(*affectedSide)) {
             // Stretching only in the vertical.
             if (delta.height() && (std::abs(delta.width() / delta.height()) < rubberbandDirectionLockStretchRatio))
                 delta.setWidth(0);
@@ -312,7 +346,7 @@ bool ScrollingEffectsController::modifyScrollDeltaForStretching(const PlatformWh
 
     if (isHorizontallyStretched) {
         // Stretching only in the horizontal.
-        if (affectedSide && m_client.isPinnedOnSide(*affectedSide)) {
+        if (!allowsDiagonalRubberbanding && affectedSide && m_client.isPinnedOnSide(*affectedSide)) {
             if (delta.width() && (std::abs(delta.height() / delta.width()) < rubberbandDirectionLockStretchRatio))
                 delta.setHeight(0);
             else if (std::abs(delta.height()) < rubberbandMinimumRequiredDeltaBeforeStretch) {
@@ -325,9 +359,11 @@ bool ScrollingEffectsController::modifyScrollDeltaForStretching(const PlatformWh
         return false;
     }
 
-    // Not stretching at all yet.
-    if (affectedSide && m_client.isPinnedOnSide(*affectedSide)) {
-        if (std::abs(delta.height()) >= std::abs(delta.width())) {
+    bool horizontalDeltaAffectsPinnedSide = horizontalSide && m_client.isPinnedOnSide(*horizontalSide);
+    bool verticalDeltaAffectsPinnedSide = verticalSide && m_client.isPinnedOnSide(*verticalSide);
+
+    if (horizontalDeltaAffectsPinnedSide || verticalDeltaAffectsPinnedSide) {
+        if (!allowsDiagonalRubberbanding && std::abs(delta.height()) >= std::abs(delta.width())) {
             if (std::abs(delta.width()) < rubberbandMinimumRequiredDeltaBeforeStretch) {
                 m_unappliedOverscrollDelta.expand(delta.width(), 0);
                 delta.setWidth(0);
@@ -335,7 +371,11 @@ bool ScrollingEffectsController::modifyScrollDeltaForStretching(const PlatformWh
                 m_unappliedOverscrollDelta.expand(delta.width(), 0);
         }
 
-        clampDeltaForAllowedAxes(wheelEvent, delta);
+        if (horizontalDeltaAffectsPinnedSide && !m_client.allowsHorizontalStretching(wheelEvent))
+            delta.setWidth(0);
+
+        if (verticalDeltaAffectsPinnedSide && !m_client.allowsVerticalStretching(wheelEvent))
+            delta.setHeight(0);
 
         return !delta.isZero();
     }
@@ -343,6 +383,48 @@ bool ScrollingEffectsController::modifyScrollDeltaForStretching(const PlatformWh
     return false;
 }
 
+#if HAVE(APPKIT_GESTURES_SUPPORT)
+float ScrollingEffectsController::deltaAdjustedForRefreshController(float generalDampedHeight, float verticalDelta, float verticalStretch, bool verticalDeltaOpposesStretch)
+{
+    // This logic mirrors AppKit. We layer the refresh-control reveal on top of the general vertical curve.
+    if (!m_client.hasRefreshController() || verticalDeltaOpposesStretch || !verticalDelta)
+        return generalDampedHeight;
+
+    if (!m_gestureBeganAtTop || m_momentumScrollInProgress)
+        return generalDampedHeight;
+
+    if (verticalStretch > 0 || verticalDelta >= 0)
+        return generalDampedHeight;
+
+    // Vertical stretch at the top is negative. Take the absolute value and work in positive magnitudes.
+    const auto currentStretchMagnitude = std::abs(verticalStretch);
+    verticalDelta = std::abs(verticalDelta);
+
+    const auto activationHeight = m_client.refreshControllerSnappingThreshold();
+    const auto viewportHeight = m_client.scrollExtents().viewportSize.height();
+
+    // Split delta between the linear zone (below the control's activation height) and the hyperbolic zone (above).
+    auto newStretchMagnitude = 0.f;
+    if (currentStretchMagnitude + verticalDelta > activationHeight) {
+        const auto stretchAlreadyInHyperbolic = std::max(0.0f, currentStretchMagnitude - activationHeight);
+        const auto deltaConsumedInLinear = std::max(0.0f, activationHeight - currentStretchMagnitude);
+        const auto deltaForHyperbolic = verticalDelta - deltaConsumedInLinear;
+        const auto currentHyperbolicReboundDelta = _NSHyperbolicReboundDeltaForElasticDelta(stretchAlreadyInHyperbolic, m_rubberbandHyperbolicCoefficient, viewportHeight);
+        const auto combinedHyperbolicReboundDelta = currentHyperbolicReboundDelta + deltaForHyperbolic;
+
+        // The new magnitude will be layered on top of the general scroll curve. Floor it like the non-refresh-control
+        // path so that the positions remain pixel-aligned.
+        newStretchMagnitude = activationHeight + std::ceilf(_NSHyperbolicElasticDeltaForReboundDelta(combinedHyperbolicReboundDelta, m_rubberbandHyperbolicCoefficient, viewportHeight));
+    } else
+        newStretchMagnitude = currentStretchMagnitude + verticalDelta;
+
+    const auto signedNewStretch = -newStretchMagnitude;
+    // Keep the force as if this stretch had come from the general hyperbolic curve so that any
+    // later general-path event that takes place is handled correctly.
+    m_stretchScrollForce.setHeight(_NSHyperbolicReboundDeltaForElasticDelta(signedNewStretch, m_rubberbandHyperbolicCoefficient, viewportHeight));
+    return signedNewStretch - verticalStretch;
+}
+#else
 FloatSize ScrollingEffectsController::deltaAdjustedForRefreshController(const FloatSize& delta, bool verticalDeltaOpposesStretch)
 {
 #if HAVE(NSREFRESHCONTROLLER)
@@ -387,6 +469,52 @@ FloatSize ScrollingEffectsController::deltaAdjustedForRefreshController(const Fl
     return delta;
 #endif
 }
+#endif
+
+#if HAVE(APPKIT_GESTURES_SUPPORT)
+
+FloatSize ScrollingEffectsController::computeDampedStretchDelta(FloatSize delta, bool horizontalDeltaOpposesStretch, bool verticalDeltaOpposesStretch)
+{
+    // This logic mirrors AppKit.
+    const auto stretchAmount = m_client.stretchAmount();
+    auto hyperbolicDampedDeltaForAxis = [&](ScrollEventAxis axis) -> std::pair<float, float> {
+        // Returns (dampedDelta, newForce). When the axis opposes the current stretch we don't
+        // accumulate into force (the caller already zeroed it), and the delta passes straight through.
+
+        auto lengthForAxis = [](FloatSize size, ScrollEventAxis axis) {
+            return (axis == ScrollEventAxis::Horizontal) ? size.width() : size.height();
+        };
+        const auto viewportSize = m_client.scrollExtents().viewportSize;
+        const auto viewportLength = lengthForAxis(viewportSize, axis);
+        const auto deltaForAxis = lengthForAxis(delta, axis);
+        const auto currentForce = lengthForAxis(m_stretchScrollForce, axis);
+        const auto currentStretch = lengthForAxis(stretchAmount, axis);
+        const auto opposesStretch = axis == ScrollEventAxis::Horizontal ? horizontalDeltaOpposesStretch : verticalDeltaOpposesStretch;
+
+        if (opposesStretch) {
+            const auto remainingStretch = currentStretch + deltaForAxis;
+            const auto forceForRemainingStretch = _NSHyperbolicReboundDeltaForElasticDelta(remainingStretch, m_rubberbandHyperbolicCoefficient, viewportLength);
+            return { deltaForAxis, static_cast<float>(forceForRemainingStretch) };
+        }
+
+        if (!deltaForAxis)
+            return { 0, currentForce };
+
+        const auto newForce = currentForce + deltaForAxis;
+        const auto newStretch = ceilf(_NSHyperbolicElasticDeltaForReboundDelta(newForce, m_rubberbandHyperbolicCoefficient, viewportLength));
+        return { newStretch - currentStretch, newForce };
+    };
+
+    const auto [dampedWidth, newForceWidth] = hyperbolicDampedDeltaForAxis(ScrollEventAxis::Horizontal);
+    auto [dampedHeight, newForceHeight] = hyperbolicDampedDeltaForAxis(ScrollEventAxis::Vertical);
+    m_stretchScrollForce = { newForceWidth, newForceHeight };
+
+    dampedHeight = deltaAdjustedForRefreshController(dampedHeight, delta.height(), stretchAmount.height(), verticalDeltaOpposesStretch);
+
+    return { dampedWidth, dampedHeight };
+}
+
+#endif
 
 bool ScrollingEffectsController::shouldAttemptRubberbandingRestoration(const RubberbandingState& state)
 {
@@ -403,37 +531,37 @@ bool ScrollingEffectsController::shouldAttemptRubberbandingRestoration(const Rub
 bool ScrollingEffectsController::applyScrollDeltaWithStretching(const PlatformWheelEvent& wheelEvent, FloatSize delta, bool isHorizontallyStretched, bool isVerticallyStretched)
 {
     auto eventDelta = (isVerticallyStretched || isHorizontallyStretched) ? -wheelEvent.unacceleratedScrollingDelta() : -wheelEvent.delta();
-    auto affectedSide = affectedSideOnDominantAxis(delta);
+
+    auto horizontalSide = ScrollableArea::targetSideForScrollDelta(delta, ScrollEventAxis::Horizontal);
+    auto verticalSide = ScrollableArea::targetSideForScrollDelta(delta, ScrollEventAxis::Vertical);
 
     const auto horizontalDeltaOpposesStretch = isHorizontallyStretched && m_client.isScrollDeltaOpposingStretch(ScrollEventAxis::Horizontal, delta.width());
     const auto verticalDeltaOpposesStretch = isVerticallyStretched && m_client.isScrollDeltaOpposingStretch(ScrollEventAxis::Vertical, delta.height());
 
-    if (horizontalDeltaOpposesStretch)
-        m_stretchScrollForce.setWidth(0);
-    if (verticalDeltaOpposesStretch)
-        m_stretchScrollForce.setHeight(0);
+    const bool allowsDiagonalRubberbanding = wheelEvent.inputSource() == MouseEventInputSource::Automation;
+    const bool canScrollHorizontally = !isHorizontallyStretched && horizontalSide && !m_client.isPinnedOnSide(*horizontalSide);
+    const bool canScrollVertically = !isVerticallyStretched && verticalSide && !m_client.isPinnedOnSide(*verticalSide);
 
     FloatSize deltaToScroll;
-
     if (delta.width()) {
-        if (!m_client.allowsHorizontalStretching(wheelEvent)) {
-            delta.setWidth(0);
-            eventDelta.setWidth(0);
-        } else if (!isHorizontallyStretched && !m_client.isPinnedOnSide(*affectedSide)) {
+        if (canScrollHorizontally && (allowsDiagonalRubberbanding || m_client.allowsHorizontalStretching(wheelEvent))) {
             delta.scale(scrollWheelMultiplier(), 1);
             deltaToScroll += FloatSize { delta.width(), 0 };
             delta.setWidth(0);
+        } else if (!m_client.allowsHorizontalStretching(wheelEvent)) {
+            delta.setWidth(0);
+            eventDelta.setWidth(0);
         }
     }
 
     if (delta.height()) {
-        if (!m_client.allowsVerticalStretching(wheelEvent)) {
-            delta.setHeight(0);
-            eventDelta.setHeight(0);
-        } else if (!isVerticallyStretched && !m_client.isPinnedOnSide(*affectedSide)) {
+        if (canScrollVertically && (allowsDiagonalRubberbanding || m_client.allowsVerticalStretching(wheelEvent))) {
             delta.scale(1, scrollWheelMultiplier());
             deltaToScroll += FloatSize { 0, delta.height() };
             delta.setHeight(0);
+        } else if (!m_client.allowsVerticalStretching(wheelEvent)) {
+            delta.setHeight(0);
+            eventDelta.setHeight(0);
         }
     }
 
@@ -450,6 +578,9 @@ bool ScrollingEffectsController::applyScrollDeltaWithStretching(const PlatformWh
     if (delta.isZero())
         return canStartAnimation;
 
+#if HAVE(APPKIT_GESTURES_SUPPORT)
+    auto dampedDelta = computeDampedStretchDelta(delta, horizontalDeltaOpposesStretch, verticalDeltaOpposesStretch);
+#else
     auto stretchAmount = m_client.stretchAmount();
 
     FloatSize adjustedDelta = deltaAdjustedForRefreshController(delta, verticalDeltaOpposesStretch);
@@ -477,10 +608,11 @@ bool ScrollingEffectsController::applyScrollDeltaWithStretching(const PlatformWh
         const auto dampedHeight = ceilf(elasticDeltaForReboundDelta(m_stretchScrollForce.height()));
         dampedDelta.setHeight(dampedHeight - stretchAmount.height());
     }
+#endif
 
     clampDeltaForAllowedAxes(wheelEvent, dampedDelta);
 
-    LOG_WITH_STREAM(ScrollAnimations, stream << "ScrollingEffectsController::applyScrollDeltaWithStretching() - stretchScrollForce " << m_stretchScrollForce << " move delta " << delta << " adjustedDelta " << adjustedDelta << " dampedDelta " << dampedDelta);
+    LOG_WITH_STREAM(ScrollAnimations, stream << "ScrollingEffectsController::applyScrollDeltaWithStretching() - stretchScrollForce " << m_stretchScrollForce << " move delta " << delta << " dampedDelta " << dampedDelta);
 
     m_client.immediateScrollBy(dampedDelta, ScrollClamping::Unclamped);
 

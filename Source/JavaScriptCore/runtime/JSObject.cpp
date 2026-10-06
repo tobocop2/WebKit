@@ -25,7 +25,11 @@
 #include "JSObject.h"
 
 #include "AllocationFailureMode.h"
+#include "BlockDirectory.h"
+#include "ClonedArguments.h"
+#include "CompleteSubspace.h"
 #include "CustomGetterSetter.h"
+#include "ErrorInstance.h"
 #include "Exception.h"
 #include "GCDeferralContextInlines.h"
 #include "GetterSetter.h"
@@ -37,11 +41,16 @@
 #include "JSCustomGetterFunction.h"
 #include "JSCustomSetterFunction.h"
 #include "JSFunction.h"
+#include "JSGlobalProxy.h"
 #include "Lookup.h"
+#include "MarkedSpace.h"
 #include "PropertyDescriptor.h"
 #include "PropertyNameArray.h"
 #include "ProxyObject.h"
+#include "RegExpObject.h"
 #include "ResourceExhaustion.h"
+#include "StringObject.h"
+#include "SymbolTable.h"
 #include "TopExceptionScope.h"
 #include "TypeError.h"
 #include "VMInlines.h"
@@ -64,6 +73,7 @@ STATIC_ASSERT_IS_TRIVIALLY_DESTRUCTIBLE(JSObjectWithButterfly);
 STATIC_ASSERT_IS_TRIVIALLY_DESTRUCTIBLE(JSFinalObject);
 
 const ASCIILiteral NonExtensibleObjectPropertyDefineError { "Attempting to define property on object that is not extensible."_s };
+const ASCIILiteral ImmutablePropertyDefineError { "Attempting to define property on object with immutable properties."_s };
 const ASCIILiteral ReadonlyPropertyWriteError { "Attempted to assign to readonly property."_s };
 const ASCIILiteral ReadonlyPropertyChangeError { "Attempting to change value of a readonly property."_s };
 const ASCIILiteral UnableToDeletePropertyError { "Unable to delete property."_s };
@@ -643,7 +653,7 @@ bool JSObject::getOwnPropertySlotByIndex(JSObject* thisObject, JSGlobalObject* g
         } else if (SparseArrayValueMap* map = storage->m_sparseMap.get()) {
             SparseArrayValueMap::iterator it = map->find(i);
             if (it != map->notFound()) {
-                it->value.get(thisObject, slot);
+                it->get(thisObject, slot);
                 return true;
             }
         }
@@ -784,13 +794,13 @@ bool ordinarySetWithOwnDescriptor(JSGlobalObject* globalObject, JSObject* object
 
     // 9.1.9.1-8 Perform ? Call(setter, Receiver, << V >>).
     JSObject* setterObject = asObject(setter);
-    MarkedArgumentBuffer args;
-    args.append(value);
-    ASSERT(!args.hasOverflowed());
+    auto args = WTF::toArray<EncodedJSValue>({
+        JSValue::encode(value),
+    });
 
     auto callData = JSC::getCallData(setterObject);
     scope.release();
-    call(globalObject, setterObject, callData, receiver, args);
+    call(globalObject, setterObject, callData, receiver, ArgList { args.data(), args.size() });
 
     // 9.1.9.1-9 Return true.
     return true;
@@ -834,6 +844,11 @@ bool JSObject::putInlineSlow(JSGlobalObject* globalObject, PropertyName property
 
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
+
+    // Every put this object is the receiver of is refused: data properties, setters and custom setters alike. It comes here because
+    // canPerformFastPutInlineExcludingProto() says no for such a receiver.
+    if (structure()->hasImmutableProperties() && !isThisValueAltered(slot, this)) [[unlikely]]
+        return typeError(globalObject, scope, slot.isStrictMode(), ReadonlyPropertyWriteError);
 
     if (!vm.isSafeToRecurseSoft()) [[unlikely]] {
         throwStackOverflowError(globalObject, scope);
@@ -885,17 +900,19 @@ bool JSObject::putInlineSlow(JSGlobalObject* globalObject, PropertyName property
                 ASSERT(customSetter);
                 // FIXME: We should only be caching these if we're not an uncacheable dictionary:
                 // https://bugs.webkit.org/show_bug.cgi?id=215347
-                slot.setCustomAccessor(obj, customSetter);
+                slot.setCustomAccessor(obj, customSetter, offset);
                 scope.release();
                 customSetter(obj->realm(), JSValue::encode(slot.thisValue()), JSValue::encode(value), propertyName);
                 return true;
             }
+            // (The two shortcuts below put on the receiver without asking. A receiver with immutable properties goes on to
+            // definePropertyOnReceiver(), where its [[DefineOwnProperty]] decides.)
             if (attributes & PropertyAttribute::CustomValue) {
-                if (!isThisValueAltered(slot, obj)) {
+                if (!isThisValueAltered(slot, obj) && !obj->structure()->hasImmutableProperties()) {
                     if (customSetter) {
                         // FIXME: We should only be caching these if we're not an uncacheable dictionary:
                         // https://bugs.webkit.org/show_bug.cgi?id=215347
-                        slot.setCustomValue(obj, customSetter);
+                        slot.setCustomValue(obj, customSetter, offset);
                         RELEASE_AND_RETURN(scope, customSetter(obj->realm(), JSValue::encode(obj), JSValue::encode(value), propertyName));
                     }
                     // Avoid PutModePut because it fails for non-extensible structures.
@@ -904,7 +921,7 @@ bool JSObject::putInlineSlow(JSGlobalObject* globalObject, PropertyName property
                 }
             }
             if (attributes & PropertyAttribute::BuiltinOrFunctionOrLazyProperty) {
-                if (!isThisValueAltered(slot, obj)) {
+                if (!isThisValueAltered(slot, obj) && !obj->structure()->hasImmutableProperties()) {
                     // Avoid PutModePut because it fails for non-extensible structures.
                     obj->putDirect(vm, propertyName, value, attributesForStructure(attributes), slot);
                     return true;
@@ -956,8 +973,9 @@ static NEVER_INLINE bool definePropertyOnReceiverSlow(JSGlobalObject* globalObje
             return typeError(globalObject, scope, shouldThrow, ReadonlyPropertyWriteError);
 
         if (slot.attributes() & PropertyAttribute::CustomValue) {
+            // (Not for a receiver with immutable properties: a native setter does not ask, and [[DefineOwnProperty]] below does.)
             PutValueFunc customSetter = slot.customSetter();
-            if (customSetter)
+            if (customSetter && !receiver->structure()->hasImmutableProperties())
                 RELEASE_AND_RETURN(scope, customSetter(receiver->realm(), JSValue::encode(receiver), JSValue::encode(value), propertyName));
         }
 
@@ -981,9 +999,12 @@ bool JSObject::definePropertyOnReceiver(JSGlobalObject* globalObject, PropertyNa
     // FIXME: For a failure due to primitive receiver, the error message is misleading.
     if (!receiver)
         return typeError(globalObject, scope, slot.isStrictMode(), ReadonlyPropertyWriteError);
-    scope.release();
     if (receiver->type() == GlobalProxyType)
         receiver = uncheckedDowncast<JSGlobalProxy>(receiver)->target();
+    scope.release();
+    // The steps as the specification has them, in which the receiver's [[DefineOwnProperty]] decides: the shortcuts below put.
+    if (receiver->structure()->hasImmutableProperties()) [[unlikely]]
+        return definePropertyOnReceiverSlow(globalObject, propertyName, value, receiver, slot.isStrictMode());
 
     if (slot.isTaintedByOpaqueObject() || receiver->methodTable()->defineOwnProperty != JSObject::defineOwnProperty) {
         if (mightBeSpecialProperty(vm, receiver->type(), propertyName.uid()))
@@ -1034,6 +1055,11 @@ bool JSObject::putByIndex(JSCell* cell, JSGlobalObject* globalObject, unsigned p
 {
     VM& vm = globalObject->vm();
     JSObject* thisObject = uncheckedDowncast<JSObject>(cell);
+
+    if (thisObject->structure()->hasImmutableProperties()) [[unlikely]] {
+        auto scope = DECLARE_THROW_SCOPE(vm);
+        return typeError(globalObject, scope, shouldThrow, ReadonlyPropertyWriteError);
+    }
 
     if (propertyName > MAX_ARRAY_INDEX) {
         PutPropertySlot slot(cell, shouldThrow);
@@ -1175,7 +1201,7 @@ ArrayStorage* JSObject::enterDictionaryIndexingModeWhenArrayStorageAlreadyExists
         // This will always be a new entry in the map, so no need to check we can write,
         // and attributes are default so no need to set them.
         if (value)
-            map->add(this, i).iterator->value.forceSet(vm, map, value, 0);
+            map->add(this, i).iterator->forceSet(vm, map, value, 0);
     }
 
     DeferGC deferGC(vm);
@@ -1819,6 +1845,8 @@ void JSObject::convertInt32ForValue(VM& vm, JSValue value)
 void JSObject::convertFromCopyOnWrite(VM& vm)
 {
     ASSERT(isCopyOnWrite(indexingMode()));
+    // Every caller that reaches this for an object with immutable properties is about to write its elements in place.
+    RELEASE_ASSERT(!structure()->hasImmutableProperties());
     ASSERT(structure()->indexingMode() == indexingMode());
 
     const bool hasIndexingHeader = true;
@@ -1881,6 +1909,9 @@ ContiguousJSValues JSObject::tryMakeWritableInt32Slow(VM& vm)
     ASSERT(inherits(info()));
 
     if (isCopyOnWrite(indexingMode())) {
+        // Compiled code asks for this before it stores in place.
+        if (structure()->hasImmutableProperties()) [[unlikely]]
+            return { };
         if (leastUpperBoundOfIndexingTypes(indexingType() & IndexingShapeMask, Int32Shape) == Int32Shape) {
             ASSERT(hasInt32(indexingMode()));
             convertFromCopyOnWrite(vm);
@@ -1918,6 +1949,9 @@ ContiguousDoubles JSObject::tryMakeWritableDoubleSlow(VM& vm)
     ASSERT(inherits(info()));
 
     if (isCopyOnWrite(indexingMode())) {
+        // Compiled code asks for this before it stores in place.
+        if (structure()->hasImmutableProperties()) [[unlikely]]
+            return { };
         if (leastUpperBoundOfIndexingTypes(indexingType() & IndexingShapeMask, DoubleShape) == DoubleShape) {
             convertFromCopyOnWrite(vm);
             if (hasDouble(indexingMode()))
@@ -1957,6 +1991,9 @@ ContiguousJSValues JSObject::tryMakeWritableContiguousSlow(VM& vm)
     ASSERT(inherits(info()));
 
     if (isCopyOnWrite(indexingMode())) {
+        // Compiled code asks for this before it stores in place.
+        if (structure()->hasImmutableProperties()) [[unlikely]]
+            return { };
         if (leastUpperBoundOfIndexingTypes(indexingType() & IndexingShapeMask, ContiguousShape) == ContiguousShape) {
             convertFromCopyOnWrite(vm);
             if (hasContiguous(indexingMode()))
@@ -1995,6 +2032,10 @@ ContiguousJSValues JSObject::tryMakeWritableContiguousSlow(VM& vm)
 
 ArrayStorage* JSObject::ensureArrayStorageSlow(VM& vm)
 {
+    // Compiled code asks for this before it stores elements in place. An object with immutable properties keeps the storage it has:
+    // none (Object.prototype or Array.prototype with storage would make every array pay for it), or copy-on-write storage.
+    if (structure()->hasImmutableProperties()) [[unlikely]]
+        return nullptr;
     ASSERT(inherits(info()));
 
     if (structure()->hijacksIndexingHeader())
@@ -2069,11 +2110,20 @@ ArrayStorage* JSObject::ensureArrayStorageExistsAndEnterDictionaryIndexingMode(V
 
 void JSObject::switchToSlowPutArrayStorage(VM& vm)
 {
-    ensureWritable(vm);
+    // Slow-put storage makes a store into a hole consult the prototype chain. Nothing is stored into an array with immutable
+    // properties, and its copy-on-write elements stay readable in place.
+    if (!tryMakeWritable(vm)) [[unlikely]]
+        return;
 
     switch (indexingType()) {
     case ArrayClass:
-        ensureArrayStorage(vm);
+        // ensureArrayStorage() gives an object with immutable properties none, because compiled code asks for it before it stores
+        // elements in place. This conversion is the engine's own. The storage it makes here is the kind every other such object
+        // has: no capacity, and a sparse map in sparse mode, which is what makes a put consult extensibility.
+        if (structure()->hasImmutableProperties()) [[unlikely]]
+            ensureArrayStorageExistsAndEnterDictionaryIndexingMode(vm);
+        else
+            ensureArrayStorage(vm);
         RELEASE_ASSERT(hasAnyArrayStorage(indexingType()));
         if (hasSlowPutArrayStorage(indexingType()))
             return;
@@ -2114,6 +2164,9 @@ void JSObject::switchToSlowPutArrayStorage(VM& vm)
 void JSObject::setPrototypeDirect(VM& vm, JSValue prototype)
 {
     ASSERT(prototype.isObject() || prototype.isNull());
+    // (No result to give. setPrototypeWithCycleCheck() has refused before it comes here; this is for a caller that does not ask.)
+    if (structure()->hasImmutableProperties()) [[unlikely]]
+        return;
     if (prototype.isObject())
         asObject(prototype)->didBecomePrototype(vm);
     else if (!prototype.isNull()) [[unlikely]] // Conservative hardening.
@@ -2157,6 +2210,12 @@ bool JSObject::setPrototypeWithCycleCheck(VM& vm, JSGlobalObject* globalObject, 
             return true;
 
         return typeError(globalObject, scope, shouldThrowIfCantSet, "Cannot set prototype of immutable prototype object"_s);
+    }
+
+    if (this->structure()->hasImmutableProperties()) [[unlikely]] {
+        if (this->getPrototypeDirect() == prototype)
+            return true;
+        return typeError(globalObject, scope, shouldThrowIfCantSet, "Cannot set prototype of object with immutable properties"_s);
     }
 
     // Default realm global objects should have mutable prototypes despite having
@@ -2259,6 +2318,9 @@ bool JSObject::putDirectCustomAccessor(VM& vm, PropertyName propertyName, JSValu
 
     PutPropertySlot slot(this);
     bool result = putDirectInternal<PutModeDefineOwnProperty>(vm, propertyName, value, attributes, slot).isNull();
+    // (Refused, for an object with immutable properties: nothing was put, so there is nothing to record on the Structure.)
+    if (!result) [[unlikely]]
+        return false;
 
     ASSERT(slot.type() == PutPropertySlot::NewProperty);
 
@@ -2274,6 +2336,9 @@ void JSObject::putDirectCustomGetterSetterWithoutTransition(VM& vm, PropertyName
     ASSERT(!parseIndex(propertyName));
     ASSERT(value.isCustomGetterSetter());
     ASSERT(attributes & PropertyAttribute::CustomAccessorOrValue);
+    // (No result to give: the caller is initializing an object it takes to be new, and the property is not put.)
+    if (structure()->hasImmutableProperties() && !vm.allowLazyMaterializationOfImmutablePropertiesCount) [[unlikely]]
+        return;
 
     StructureID structureID = this->structureID();
     Structure* structure = structureID.decode();
@@ -2290,6 +2355,9 @@ bool JSObject::putDirectNonIndexAccessor(VM& vm, PropertyName propertyName, Gett
     ASSERT(attributes & PropertyAttribute::Accessor);
     PutPropertySlot slot(this);
     bool result = putDirectInternal<PutModeDefineOwnProperty>(vm, propertyName, accessor, attributes, slot).isNull();
+    // (As in putDirectCustomAccessor().)
+    if (!result) [[unlikely]]
+        return false;
 
     Structure* structure = this->structure();
     if (attributes & PropertyAttribute::ReadOnly)
@@ -2302,6 +2370,9 @@ bool JSObject::putDirectNonIndexAccessor(VM& vm, PropertyName propertyName, Gett
 void JSObject::putDirectNonIndexAccessorWithoutTransition(VM& vm, PropertyName propertyName, GetterSetter* accessor, unsigned attributes)
 {
     ASSERT(attributes & PropertyAttribute::Accessor);
+    // (As above.)
+    if (structure()->hasImmutableProperties() && !vm.allowLazyMaterializationOfImmutablePropertiesCount) [[unlikely]]
+        return;
     StructureID structureID = this->structureID();
     Structure* structure = structureID.decode();
     PropertyOffset offset = prepareToPutDirectWithoutTransition(vm, propertyName, attributes, structureID, structure);
@@ -2362,6 +2433,10 @@ bool JSObject::deleteProperty(JSCell* cell, JSGlobalObject* globalObject, Proper
 {
     JSObject* thisObject = uncheckedDowncast<JSObject>(cell);
     VM& vm = globalObject->vm();
+
+    // Every property the object has stays. Deleting one it does not have succeeds, as it does for any object.
+    if (thisObject->structure()->hasImmutableProperties()) [[unlikely]]
+        return !thisObject->hasOwnProperty(globalObject, propertyName);
     
     if (std::optional<uint32_t> index = parseIndex(propertyName))
         return thisObject->methodTable()->deletePropertyByIndex(thisObject, globalObject, index.value());
@@ -2405,9 +2480,9 @@ bool JSObject::deleteProperty(JSCell* cell, JSGlobalObject* globalObject, Proper
             ASSERT(!isValidOffset(structure->get(vm, propertyName, attributes)));
             if (offset != invalidOffset)
                 thisObject->locationForOffset(offset)->clear();
-            if (thisObject->mayBePrototype()) [[unlikely]]
-                vm.invalidateStructureChainIntegrity(VM::StructureChainIntegrityEvent::Remove);
         }
+        if (thisObject->mayBePrototype()) [[unlikely]]
+            vm.invalidateStructureChainIntegrity(VM::StructureChainIntegrityEvent::Remove);
     } else
         slot.setConfigurableMiss();
 
@@ -2418,6 +2493,9 @@ bool JSObject::deletePropertyByIndex(JSCell* cell, JSGlobalObject* globalObject,
 {
     VM& vm = globalObject->vm();
     JSObject* thisObject = uncheckedDowncast<JSObject>(cell);
+
+    if (thisObject->structure()->hasImmutableProperties()) [[unlikely]]
+        return !thisObject->hasOwnProperty(globalObject, i);
     
     if (i > MAX_ARRAY_INDEX)
         return JSCell::deleteProperty(thisObject, globalObject, Identifier::from(vm, i));
@@ -2473,7 +2551,7 @@ bool JSObject::deletePropertyByIndex(JSCell* cell, JSGlobalObject* globalObject,
         } else if (SparseArrayValueMap* map = storage->m_sparseMap.get()) {
             SparseArrayValueMap::iterator it = map->find(i);
             if (it != map->notFound()) {
-                if (it->value.attributes() & PropertyAttribute::DontDelete)
+                if (it->attributes() & PropertyAttribute::DontDelete)
                     return false;
                 map->remove(it);
             }
@@ -2531,7 +2609,8 @@ static ALWAYS_INLINE JSValue callToPrimitiveFunction(JSGlobalObject* globalObjec
         return scope.exception();
     }
 
-    MarkedArgumentBuffer callArgs;
+    constexpr size_t argCount = key == CachedSpecialPropertyKey::ToPrimitive ? 1 : 0;
+    std::array<EncodedJSValue, argCount> callArgs { };
     if constexpr (key == CachedSpecialPropertyKey::ToPrimitive) {
         JSString* hintString = nullptr;
         switch (hint) {
@@ -2545,13 +2624,12 @@ static ALWAYS_INLINE JSValue callToPrimitiveFunction(JSGlobalObject* globalObjec
             hintString = vm.smallStrings.stringString();
             break;
         }
-        callArgs.append(hintString);
+        callArgs[0] = JSValue::encode(hintString);
     } else {
         UNUSED_PARAM(hint);
     }
-    ASSERT(!callArgs.hasOverflowed());
 
-    JSValue result = call(globalObject, function, callData, const_cast<JSObject*>(object), callArgs);
+    JSValue result = call(globalObject, function, callData, const_cast<JSObject*>(object), ArgList { callArgs.data(), callArgs.size() });
     RETURN_IF_EXCEPTION(scope, scope.exception());
     ASSERT(!result.isGetterSetter());
     if (result.isObject()) {
@@ -2610,6 +2688,11 @@ JSValue JSObject::toPrimitive(JSGlobalObject* globalObject, PreferredPrimitiveTy
             RELEASE_AND_RETURN(scope, array->fastToString(globalObject));
     }
 
+    // For a plain default object ordinaryToPrimitive collapses to the cached ToStringTag string
+    // for both hints (primordial valueOf is skipped), so returning it here matches the slow path.
+    if (auto* tag = structure()->defaultToPrimitiveFastAndNonObservable(vm))
+        return tag;
+
     JSValue value = callToPrimitiveFunction<CachedSpecialPropertyKey::ToPrimitive>(globalObject, this, vm.propertyNames->toPrimitiveSymbol, preferredType);
     RETURN_IF_EXCEPTION(scope, { });
     if (value)
@@ -2646,10 +2729,10 @@ bool JSObject::hasInstance(JSGlobalObject* globalObject, JSValue value, JSValue 
             return false;
         }
 
-        MarkedArgumentBuffer args;
-        args.append(value);
-        ASSERT(!args.hasOverflowed());
-        JSValue result = call(globalObject, hasInstanceValue, callData, this, args);
+        auto args = WTF::toArray<EncodedJSValue>({
+            JSValue::encode(value),
+        });
+        JSValue result = call(globalObject, hasInstanceValue, callData, this, ArgList { args.data(), args.size() });
         RETURN_IF_EXCEPTION(scope, false);
         return result.toBoolean(globalObject);
     }
@@ -2802,8 +2885,8 @@ void JSObject::getOwnIndexedPropertyNames(JSGlobalObject*, PropertyNameArrayBuil
             
             if (SparseArrayValueMap* map = storage->m_sparseMap.get()) {
                 auto keys = WTF::compactMap<0, UnsafeVectorOverflow>(*map, [mode](auto& entry) ->std::optional<unsigned> {
-                    if (mode == DontEnumPropertiesMode::Include || !(entry.value.attributes() & PropertyAttribute::DontEnum))
-                        return static_cast<unsigned>(entry.key);
+                    if (mode == DontEnumPropertiesMode::Include || !(entry.attributes() & PropertyAttribute::DontEnum))
+                        return entry.index();
                     return std::nullopt;
                 });
                 
@@ -2853,6 +2936,9 @@ JSString* JSObject::toString(JSGlobalObject* globalObject) const
             RELEASE_AND_RETURN(scope, array->fastToString(globalObject));
     }
 
+    if (auto* tag = structure()->defaultToPrimitiveFastAndNonObservable(vm))
+        return tag;
+
     JSValue primitive = callToPrimitiveFunction<CachedSpecialPropertyKey::ToPrimitive>(globalObject, this, vm.propertyNames->toPrimitiveSymbol, PreferString);
     RETURN_IF_EXCEPTION(scope, jsEmptyString(vm));
     if (!primitive) [[likely]] {
@@ -2865,6 +2951,9 @@ JSString* JSObject::toString(JSGlobalObject* globalObject) const
 
 void JSObject::seal(VM& vm)
 {
+    // The attributes do not change. Object.seal() does not come here for such an object: it takes the generic path, which reports the refusal.
+    if (structure()->hasImmutableProperties()) [[unlikely]]
+        return;
     if (isSealed(vm))
         return;
     materializeLazyOwnProperties(vm);
@@ -2878,6 +2967,9 @@ void JSObject::seal(VM& vm)
 
 void JSObject::freeze(VM& vm)
 {
+    // The attributes do not change. Object.freeze() does not come here for such an object: it takes the generic path, which reports the refusal.
+    if (structure()->hasImmutableProperties()) [[unlikely]]
+        return;
     if (isFrozen(vm))
         return;
     materializeLazyOwnProperties(vm);
@@ -2886,6 +2978,8 @@ void JSObject::freeze(VM& vm)
         Structure* oldStructure = structure();
         DeferredStructureTransitionWatchpointFire deferred(vm, oldStructure);
         setStructure(vm, Structure::freezeTransition(vm, oldStructure, &deferred));
+        if (mayBePrototype()) [[unlikely]]
+            vm.invalidateStructureChainIntegrity(VM::StructureChainIntegrityEvent::Change);
     }
 }
 
@@ -2902,6 +2996,146 @@ void JSObject::materializeLazyOwnProperties(VM& vm)
     auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
     methodTable()->getOwnPropertyNames(this, globalObject, propertyNames, DontEnumPropertiesMode::Include);
     scope.releaseAssertNoExceptionExceptTermination();
+}
+
+// A class that overrides a write hook can change the object before, or without, reaching JSObject's checks. The classes listed here
+// do not. ErrorInstance, StringObject, RegExpObject and ClonedArguments only materialize lazy properties or refuse on their own
+// account before they call JSObject's implementation (RegExpObject because makePropertiesImmutable() makes lastIndex non-writable).
+// JSArray and JSFunction test hasImmutableProperties() where they write directly. JSGlobalObject's hooks only add its variables,
+// which makePropertiesImmutable() makes read-only.
+static bool canMakePropertiesImmutable(JSObject* object)
+{
+    // Not DirectArguments or ScopedArguments: a mapped element is a view of the function's parameter variable, which the function
+    // can still assign.
+    const MethodTable* methodTable = object->methodTable();
+    for (const ClassInfo* classInfo : { JSObject::info(), JSArray::info(), JSFunction::info(), ErrorInstance::info(), RegExpObject::info(), StringObject::info(), ClonedArguments::info(), JSGlobalObject::info() }) {
+        // The object's write hooks have to be this class's own: nothing is known about a hook a subclass brings.
+        const MethodTable& classMethodTable = classInfo->methodTable;
+        if (object->inherits(classInfo)
+            && methodTable->put == classMethodTable.put
+            && methodTable->putByIndex == classMethodTable.putByIndex
+            && methodTable->deleteProperty == classMethodTable.deleteProperty
+            && methodTable->deletePropertyByIndex == classMethodTable.deletePropertyByIndex
+            && methodTable->defineOwnProperty == classMethodTable.defineOwnProperty
+            && methodTable->setPrototype == classMethodTable.setPrototype
+            && methodTable->preventExtensions == classMethodTable.preventExtensions)
+            return true;
+    }
+    return false;
+}
+
+bool JSObject::hasImmutableProperties() const
+{
+    if (type() == GlobalProxyType)
+        return uncheckedDowncast<JSGlobalProxy>(this)->target()->hasImmutableProperties();
+    return structure()->hasImmutableProperties();
+}
+
+// Copy-on-write storage is the one kind every tier reads in place and no tier stores into in place. It is a cell of its own with
+// room for elements only, and its users expect no holes. Null: this object's elements cannot go there.
+static JSCellButterfly* tryCreateCopyOnWriteButterfly(VM& vm, JSObject* object)
+{
+    if (!isJSArray(object) || object->structure()->outOfLineCapacity() || object->structure()->hijacksIndexingHeader())
+        return nullptr;
+    IndexingType type = object->indexingType();
+    Butterfly* butterfly = object->butterfly();
+    unsigned length = butterfly->publicLength();
+    IndexingType copyOnWriteType;
+    if (hasInt32(type))
+        copyOnWriteType = CopyOnWriteArrayWithInt32;
+    else if (hasDouble(type))
+        copyOnWriteType = CopyOnWriteArrayWithDouble;
+    else if (hasContiguous(type))
+        copyOnWriteType = CopyOnWriteArrayWithContiguous;
+    else
+        return nullptr;
+    for (unsigned i = 0; i < length; ++i) {
+        if (hasDouble(type)) {
+            double value = butterfly->contiguousDouble().at(object, i);
+            if (value != value)
+                return nullptr;
+        } else if (!butterfly->contiguous().at(object, i).get())
+            return nullptr;
+    }
+    JSCellButterfly* result = JSCellButterfly::tryCreate(vm, copyOnWriteType, length);
+    if (!result)
+        return nullptr;
+    // (Allocating can run the collector, which leaves the object's own storage where it is.)
+    butterfly = object->butterfly();
+    for (unsigned i = 0; i < length; ++i) {
+        if (hasDouble(type))
+            result->setIndex(vm, i, jsDoubleNumber(butterfly->contiguousDouble().at(object, i)));
+        else
+            result->setIndex(vm, i, butterfly->contiguous().at(object, i).get());
+    }
+    return result;
+}
+
+bool JSObject::makePropertiesImmutable(VM& vm)
+{
+    if (structure()->hasImmutableProperties())
+        return true;
+    // `globalThis` may be the proxy in front of the global object: act on the object behind it.
+    if (type() == GlobalProxyType)
+        return uncheckedDowncast<JSGlobalProxy>(this)->target()->makePropertiesImmutable(vm);
+    if (!canMakePropertiesImmutable(this))
+        return false;
+    // The global object keeps top-level `var` and function declarations in its symbol table, and compiled code writes those slots
+    // directly, past every property check. Make each one read-only and fire the watchpoint that makes such code look again: the
+    // same two steps JSGlobalObject::defineOwnProperty takes when a script freezes the global.
+    if (auto* global = dynamicDowncast<JSGlobalObject>(this)) {
+        bool changed = false;
+        {
+            SymbolTable* symbolTable = global->symbolTable();
+            ConcurrentJSLocker locker(symbolTable->m_lock);
+            for (auto iter = symbolTable->begin(locker), end = symbolTable->end(locker); iter != end; ++iter) {
+                if (!iter->value.isReadOnly()) {
+                    iter->value.setReadOnly();
+                    changed = true;
+                }
+            }
+        }
+        if (changed)
+            global->varReadOnlyWatchpointSet().fireAll(vm, "The global object's properties were made immutable");
+    }
+    // The JIT and the quick C++ paths write Int32/Double/Contiguous/ArrayStorage elements in place, slow-put storage included
+    // (it only diverts stores to holes). There are two kinds of storage they do not write in place, so that each indexed store,
+    // delete and length change reaches a C++ path, which refuses: copy-on-write storage, which every tier still reads in place,
+    // and the sparse map of dictionary indexing mode. A JSArray's Int32, Double or Contiguous elements go to the first if they have
+    // no holes (an array literal's are there already), elements of any other kind to the second. Objects with no indexed storage (every intrinsic prototype) are
+    // untouched, so Array.prototype keeps its blank indexing.
+    JSCellButterfly* copyOnWriteButterfly = nullptr;
+    if (hasIndexedProperties(indexingType())) {
+        bool willBeCopyOnWrite = false;
+        if (Options::useCopyOnWriteArraysForImmutableProperties()) {
+            if (isCopyOnWrite(indexingMode()))
+                willBeCopyOnWrite = true;
+            else {
+                copyOnWriteButterfly = tryCreateCopyOnWriteButterfly(vm, this);
+                willBeCopyOnWrite = copyOnWriteButterfly;
+            }
+        }
+        if (!willBeCopyOnWrite)
+            enterDictionaryIndexingMode(vm);
+    }
+    // Compiled code tests RegExpObject's own lastIndex-writable flag, not the Structure: make the two agree, and tell the realm, as
+    // RegExpObject::defineOwnProperty() does, so that code which folded a search on a constant RegExp is not relied on.
+    if (auto* regExpObject = dynamicDowncast<RegExpObject>(this)) {
+        regExpObject->setLastIndexIsNotWritable();
+        regExpObject->realm()->regExpLastIndexWritableWatchpointSet().fireAll(vm, "RegExp lastIndex was made non-writable");
+    }
+    StructureID oldStructureID = structureID();
+    Structure* oldStructure = oldStructureID.decode();
+    // Deferred, so adaptive watchpoints on this object see the new structure and re-install instead of firing their sets.
+    DeferredStructureTransitionWatchpointFire deferred(vm, oldStructure);
+    Structure* newStructure = Structure::makePropertiesImmutableTransition(vm, oldStructure, &deferred);
+    RELEASE_ASSERT(isCopyOnWrite(newStructure->indexingMode()) == (copyOnWriteButterfly || isCopyOnWrite(oldStructure->indexingMode())));
+    if (copyOnWriteButterfly)
+        nukeStructureAndSetButterfly(vm, oldStructureID, copyOnWriteButterfly->toButterfly());
+    setStructure(vm, newStructure);
+    if (mayBePrototype()) [[unlikely]]
+        vm.invalidateStructureChainIntegrity(VM::StructureChainIntegrityEvent::Change);
+    return true;
 }
 
 bool JSObject::preventExtensions(JSObject* object, JSGlobalObject* globalObject)
@@ -2948,6 +3182,10 @@ void JSObject::reifyAllStaticProperties(JSGlobalObject* globalObject)
     if (!structure()->isDictionary())
         convertToDictionary(vm);
 
+    // A PropertyCallback builder can enter JS; defer termination (like
+    // LazyProperty::callFunc) so it can't return with one pending. No
+    // ThrowScope here: JSObject::deleteProperty reaches this without one.
+    DeferTerminationForAWhile deferScope(vm);
     for (const ClassInfo* info = classInfo(); info; info = info->parentClass) {
         const HashTable* hashTable = info->staticPropHashTable;
         if (!hashTable)
@@ -2957,8 +3195,12 @@ void JSObject::reifyAllStaticProperties(JSGlobalObject* globalObject)
             unsigned attributes;
             auto key = Identifier::fromString(vm, value.m_key);
             PropertyOffset offset = getDirectOffset(vm, key, attributes);
-            if (!isValidOffset(offset))
+            if (!isValidOffset(offset)) {
                 reifyStaticProperty(vm, hashTable->classForThis, key, value, *this);
+                // Leave the rest lazy on throw; the caller propagates.
+                if (vm.exceptionForInspection()) [[unlikely]]
+                    return;
+            }
         }
     }
 
@@ -3032,6 +3274,10 @@ bool JSObject::defineOwnIndexedProperty(JSGlobalObject* globalObject, unsigned i
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
 
+    // Nothing below applies: the descriptor is validated against the current one, which defineOwnNonIndexProperty() does.
+    if (structure()->hasImmutableProperties()) [[unlikely]]
+        RELEASE_AND_RETURN(scope, defineOwnNonIndexProperty(globalObject, Identifier::from(vm, index), descriptor, throwException));
+
     ASSERT(index <= MAX_ARRAY_INDEX);
 
     ensureWritable(vm);
@@ -3069,14 +3315,14 @@ bool JSObject::defineOwnIndexedProperty(JSGlobalObject* globalObject, unsigned i
     
     // 1. Let current be the result of calling the [[GetOwnProperty]] internal method of O with property name P.
     SparseArrayValueMap::AddResult result = map->add(this, index);
-    SparseArrayEntry* entryInMap = &result.iterator->value;
+    SparseArrayEntry* entryInMap = &*result.iterator;
 
     // 2. Let extensible be the value of the [[Extensible]] internal property of O.
     // 3. If current is undefined and extensible is false, then Reject.
     // 4. If current is undefined and extensible is true, then
     if (result.isNewEntry) {
         if (!isStructureExtensible()) {
-            map->remove(result.iterator);
+            map->remove(static_cast<SparseArrayValueMap::const_iterator>(result.iterator));
             return typeError(globalObject, scope, throwException, NonExtensibleObjectPropertyDefineError);
         }
 
@@ -3195,9 +3441,9 @@ bool JSObject::attemptToInterceptPutByIndexOnHoleForPrototype(JSGlobalObject* gl
         ArrayStorage* storage = current->arrayStorageOrNull();
         if (storage && storage->m_sparseMap) {
             SparseArrayValueMap::iterator iter = storage->m_sparseMap->find(i);
-            if (iter != storage->m_sparseMap->notFound() && (iter->value.attributes() & (PropertyAttribute::Accessor | PropertyAttribute::ReadOnly))) {
+            if (iter != storage->m_sparseMap->notFound() && (iter->attributes() & (PropertyAttribute::Accessor | PropertyAttribute::ReadOnly))) {
                 scope.release();
-                putResult = iter->value.put(globalObject, thisValue, storage->m_sparseMap.get(), value, shouldThrow);
+                putResult = SparseArrayValueMap::entryFor(iter).put(globalObject, thisValue, storage->m_sparseMap.get(), value, shouldThrow);
                 return true;
             }
         }
@@ -3365,7 +3611,7 @@ bool JSObject::putByIndexBeyondVectorLengthWithArrayStorage(JSGlobalObject* glob
     WriteBarrier<Unknown>* vector = storage->m_vector;
     SparseArrayValueMap::const_iterator end = map->end();
     for (SparseArrayValueMap::const_iterator it = map->begin(); it != end; ++it)
-        vector[it->key].set(vm, this, it->value.getNonSparseMode());
+        vector[it->index()].set(vm, this, it->getNonSparseMode());
     deallocateSparseIndexMap();
 
     // Store the new property into the vector.
@@ -3517,7 +3763,7 @@ bool JSObject::putDirectIndexBeyondVectorLengthWithArrayStorage(JSGlobalObject* 
     WriteBarrier<Unknown>* vector = storage->m_vector;
     SparseArrayValueMap::const_iterator end = map->end();
     for (SparseArrayValueMap::const_iterator it = map->begin(); it != end; ++it)
-        vector[it->key].set(vm, this, it->value.getNonSparseMode());
+        vector[it->index()].set(vm, this, it->getNonSparseMode());
     deallocateSparseIndexMap();
 
     // Store the new property into the vector.
@@ -3533,7 +3779,8 @@ bool JSObject::putDirectIndexSlowOrBeyondVectorLength(JSGlobalObject* globalObje
     VM& vm = globalObject->vm();
     ASSERT(!value.isCustomGetterSetter());
 
-    if (!canDoFastPutDirectIndex(this)) {
+    // (An object with immutable properties: [[DefineOwnProperty]] succeeds for it if it changes nothing.)
+    if (!canDoFastPutDirectIndex(this) || structure()->hasImmutableProperties()) {
         PropertyDescriptor descriptor;
         descriptor.setDescriptor(value, attributes);
         return methodTable()->defineOwnProperty(this, globalObject, Identifier::from(vm, i), descriptor, mode == PutDirectIndexShouldThrow);
@@ -3787,6 +4034,7 @@ bool JSObject::increaseVectorLength(VM& vm, unsigned newLength)
         // The cell was already big enough for the desired length!
         for (unsigned i = vectorLength; i < availableVectorLength; ++i)
             storage->m_vector[i].clear();
+        WTF::storeStoreFence();
         storage->setVectorLength(availableVectorLength);
         return true;
     }
@@ -3947,6 +4195,33 @@ bool JSObject::putDirectMayBeIndex(JSGlobalObject* globalObject, PropertyName pr
     return putDirect(globalObject->vm(), propertyName, value);
 }
 
+// True if every field of the descriptor is already in the current one with the same value.
+static bool isPropertyUnchangedByDescriptor(JSGlobalObject* globalObject, const PropertyDescriptor& current, const PropertyDescriptor& descriptor)
+{
+    if (descriptor.enumerablePresent() && descriptor.enumerable() != current.enumerable())
+        return false;
+    if (descriptor.configurablePresent() && descriptor.configurable() != current.configurable())
+        return false;
+    if (descriptor.isAccessorDescriptor()) {
+        if (!current.isAccessorDescriptor())
+            return false;
+        if (descriptor.getterPresent() && descriptor.getter() != current.getter())
+            return false;
+        if (descriptor.setterPresent() && descriptor.setter() != current.setter())
+            return false;
+        return true;
+    }
+    if (descriptor.isDataDescriptor()) {
+        if (!current.isDataDescriptor())
+            return false;
+        if (descriptor.writablePresent() && descriptor.writable() != current.writable())
+            return false;
+        if (descriptor.value() && !sameValue(globalObject, descriptor.value(), current.value()))
+            return false;
+    }
+    return true;
+}
+
 // https://tc39.es/ecma262/#sec-validateandapplypropertydescriptor
 bool validateAndApplyPropertyDescriptor(JSGlobalObject* globalObject, JSObject* object, PropertyName propertyName, bool isExtensible,
     const PropertyDescriptor& descriptor, bool isCurrentDefined, const PropertyDescriptor& current, bool throwException)
@@ -3961,6 +4236,7 @@ bool validateAndApplyPropertyDescriptor(JSGlobalObject* globalObject, JSObject* 
         // Step 2.a
         if (!isExtensible)
             return typeError(globalObject, scope, throwException, NonExtensibleObjectPropertyDefineError);
+        ASSERT(!object || !object->structure()->hasImmutableProperties());
 
         if (object) {
             if (descriptor.isAccessorDescriptor()) {
@@ -3983,6 +4259,15 @@ bool validateAndApplyPropertyDescriptor(JSGlobalObject* globalObject, JSObject* 
     RETURN_IF_EXCEPTION(scope, false);
     if (isEqual)
         return true;
+
+    // An object with immutable properties accepts a definition that changes nothing and refuses every other one.
+    if (object && object->structure()->hasImmutableProperties()) [[unlikely]] {
+        bool isUnchanged = isPropertyUnchangedByDescriptor(globalObject, current, descriptor);
+        RETURN_IF_EXCEPTION(scope, false);
+        if (!isUnchanged)
+            return typeError(globalObject, scope, throwException, ImmutablePropertyDefineError);
+        return true;
+    }
 
     // Step 4.
     if (!current.configurable()) {
@@ -4096,7 +4381,7 @@ void JSObject::convertToUncacheableDictionary(VM& vm)
 }
 
 
-void JSObject::shiftButterflyAfterFlattening(const GCSafeConcurrentJSLocker&, VM& vm, Structure* structure, size_t outOfLineCapacityAfter)
+void JSObject::shiftButterflyAfterFlattening(const ConcurrentJSLocker&, VM& vm, Structure* structure, size_t outOfLineCapacityAfter)
 {
     // This could interleave visitChildren because some old structure could have been a non
     // dictionary structure. We have to be crazy careful. But, we are guaranteed to be holding
@@ -4333,6 +4618,431 @@ ASCIILiteral JSObject::putDirectToDictionaryWithoutExtensibility(VM& vm, Propert
     }
 
     return NonExtensibleObjectPropertyDefineError;
+}
+
+#if CPU(ARM64) && CPU(ADDRESS64)
+template <size_t N>
+static uint64_t saturate(uint64_t value)
+{
+    static_assert(N < 64);
+    if (value < (1ul << N))
+        return value;
+    return (1ul << N) - 1;
+}
+
+// Formal nibble layout of the crash-info registers filled in below and passed to WTFCrashWithInfo.
+// Every field occupies whole nibbles and no two fields share a nibble, so each reads straight out of
+// the hex register dump. The constants are nibble indices (the low nibble of each field);
+// nibbleShift() turns an index into a bit shift. reg3 (raw cell header) and reg6 (this) aren't packed.
+namespace EmptyValueCrashLayout {
+
+constexpr unsigned nibbleShift(unsigned nibbleIndex) { return nibbleIndex * 4; }
+
+// Per-object GC state returned by gcStateFor(), one nibble per boolean (nibbles 0-5).
+namespace GCState {
+constexpr unsigned isPreciseAllocation = 0;
+constexpr unsigned isMarked = 1;
+constexpr unsigned isNewlyAllocated = 2; // meaningful while marking
+constexpr unsigned isFreeListed = 3; // MarkedBlock only: block still being allocated out of
+constexpr unsigned isAllocated = 4; // MarkedBlock only: block was allocated from, now full
+constexpr unsigned isOnFreeList = 5; // MarkedBlock + freeListed only: cell is a free (dead) cell
+constexpr unsigned nibbleCount = 6;
+}
+
+// reg1: offending offset + bad-object data validity + butterfly state + structure dictionary state.
+namespace Reg1 {
+constexpr unsigned propertyOffset = 0; // nibbles 0-3 (16 bits)
+constexpr unsigned offsetIsInline = 4; // 0 => out-of-line (in the butterfly)
+constexpr unsigned structureIDMapsToValidStructure = 5; // this->structureID().tryDecode() != null
+constexpr unsigned structureOfStructureIsStructureStructure = 6;
+constexpr unsigned badObjectIsZeroFilled = 7; // every word of the cell is zero
+constexpr unsigned blockHeaderVMPointerState = 8; // MarkedBlock only: 0 => zero, 1 => non-null but not equal to structure's VM, 2 => equal to structure's VM
+constexpr unsigned butterflyIsNull = 9; // out-of-line only
+constexpr unsigned butterflyInButterflySpace = 10; // out-of-line only: in vm.auxiliarySpace()
+constexpr unsigned butterflyOutOfLineStorageIsZeroFilled = 11; // out-of-line only
+constexpr unsigned structureIsDictionary = 12;
+constexpr unsigned structureIsUncacheableDictionary = 13; // the kind flattenDictionaryStructure() renumbers
+constexpr unsigned structureHasBeenFlattenedBefore = 14; // ineligible for further flattening
+constexpr unsigned structureInlineCapacity = 15; // saturated to 4 bits
+}
+
+// reg2: sizes/counts, 16 bits (4 nibbles) each.
+namespace Reg2 {
+constexpr unsigned blankCellWordCount = 0; // nibbles 0-3: zero 8-byte words in the cell
+constexpr unsigned outOfLineSize = 4; // nibbles 4-7: structure's out-of-line slot count
+constexpr unsigned butterflyPublicLength = 8; // nibbles 8-11: out-of-line + indexed only
+constexpr unsigned butterflyVectorLength = 12; // nibbles 12-15: out-of-line + indexed only
+}
+
+// reg4: GC state of the bad object and its prototype-chain child.
+namespace Reg4 {
+constexpr unsigned badObjectGCState = 0; // nibbles 0-5
+constexpr unsigned previousInChainGCState = GCState::nibbleCount; // nibbles 6-11
+constexpr unsigned blockHeaderZeroByteCount = 12; // nibbles 12-15 (16 bits): number of zero bytes in the block header, MarkedBlock only
+}
+
+// reg5: GC state of the base object + global GC state + chain metadata.
+namespace Reg5 {
+constexpr unsigned bottomOfChainGCState = 0; // nibbles 0-5
+constexpr unsigned isMarking = 6; // MarkedSpace::isMarking()
+constexpr unsigned previousInChainIsNull = 7;
+constexpr unsigned badObjectIsBottomOfChain = 8;
+constexpr unsigned chainDepth = 9; // nibbles 9-10 (8 bits); 0xff => not reached within cap
+constexpr unsigned collectionScope = 11; // 0 => none, 1 => eden, 2 => full
+constexpr unsigned worldIsStopped = 12;
+constexpr unsigned mutatorState = 13; // 0 => running, 1 => allocating, 2 => sweeping, 3 => collecting
+constexpr unsigned previousSlotClassification = 14; // see classifySlotWord
+constexpr unsigned nextSlotClassification = 15; // ditto
+}
+
+// The layout must stay nibble-aligned with no field overlapping the next.
+static_assert(Reg4::previousInChainGCState == Reg4::badObjectGCState + GCState::nibbleCount);
+static_assert(Reg5::isMarking == Reg5::bottomOfChainGCState + GCState::nibbleCount);
+static_assert(Reg5::chainDepth + 2 <= Reg5::collectionScope); // chainDepth spans 2 nibbles
+static_assert(Reg5::nextSlotClassification <= 15);
+static_assert(Reg5::nextSlotClassification == Reg5::previousSlotClassification + 1);
+static_assert(Reg1::offsetIsInline == Reg1::propertyOffset + 4); // propertyOffset spans 4 nibbles
+static_assert(Reg2::outOfLineSize == Reg2::blankCellWordCount + 4); // 16-bit fields span 4 nibbles
+static_assert(Reg2::butterflyPublicLength == Reg2::outOfLineSize + 4);
+static_assert(Reg2::butterflyVectorLength + 4 <= 16);
+static_assert(Reg4::blockHeaderZeroByteCount == Reg4::previousInChainGCState + GCState::nibbleCount);
+static_assert(Reg4::blockHeaderZeroByteCount + 4 <= 16); // 16-bit count spans 4 nibbles
+static_assert(Reg1::structureIsDictionary == Reg1::butterflyOutOfLineStorageIsZeroFilled + 1);
+static_assert(Reg1::structureIsUncacheableDictionary == Reg1::structureIsDictionary + 1);
+static_assert(Reg1::structureHasBeenFlattenedBefore == Reg1::structureIsUncacheableDictionary + 1);
+static_assert(Reg1::structureInlineCapacity == Reg1::structureHasBeenFlattenedBefore + 1);
+static_assert(Reg1::structureInlineCapacity <= 15);
+
+}
+#endif
+
+NO_RETURN_DUE_TO_CRASH NEVER_INLINE void JSObject::crashDueToEmptyValueAtValidOffset(Structure* structure, PropertyName propertyName, PropertyOffset offset, JSObject* bottomOfChain, JSObject* previousInChain, unsigned attributes, int line, const char* filename, const char* function_name)
+{
+#if CPU(ARM64) && CPU(ADDRESS64)
+    register volatile uint64_t reg1 __asm__(CRASH_GPR1) { };
+    register volatile uint64_t reg2 __asm__(CRASH_GPR2) { };
+    register volatile uint64_t reg3 __asm__(CRASH_GPR3) { };
+    register volatile uint64_t reg4 __asm__(CRASH_GPR4) { };
+    register volatile uint64_t reg5 __asm__(CRASH_GPR5) { };
+    register volatile uint64_t reg6 __asm__(CRASH_GPR6) { };
+    register volatile uint64_t dumpState __asm__("x28") { };
+#define updateDumpState(newState) do { \
+        WTF::compilerFence(); \
+        __asm__ volatile("" :: "r"(reg1), "r"(reg2), "r"(reg3), "r"(reg4), "r"(reg5), "r"(reg6)); \
+        __asm__ volatile( \
+            "mov %0, #" #newState "\n\t" \
+            "orr %0, %0, #0xffffffffffff0000" \
+            : "=r"(dumpState)); \
+        WTF::compilerFence(); \
+    } while (false)
+
+    updateDumpState(0x5700);
+
+    reg6 = reinterpret_cast<uint64_t>(this);
+
+    // Fields are appended from least likely to fault while computing to most likely, so if we crash
+    // partway through, every append so far is preserved in the crash registers. reg6 = this (the bad
+    // object); reg3 = its raw first 8 bytes (m_structureID & m_blob). The nibble layout of the packed
+    // registers is captured formally in the EmptyValueCrashLayout namespace above; the shifts below
+    // are derived from it via nibbleShift().
+    using namespace EmptyValueCrashLayout;
+
+    JSObject* badObject = this;
+    VM* vm = std::bit_cast<uint64_t>(structure) > 0x10000 ? &structure->vm() : nullptr;
+
+    reg3 = *std::bit_cast<uint64_t*>(badObject); // raw cell header: m_structureID + m_blob
+
+    updateDumpState(0x5701);
+
+    reg1 |= saturate<16>(offset) << nibbleShift(Reg1::propertyOffset);
+    reg1 |= static_cast<uint64_t>(isInlineOffset(offset)) << nibbleShift(Reg1::offsetIsInline);
+
+    updateDumpState(0x5702);
+
+    // Global GC state: Are we marking? What is the collection scope? Is the world stopped? What is the mutator doing?
+    // This could catch a concurrent-collector race that could clear a slot.
+    bool heapIsMarking = vm != nullptr && vm->heap.objectSpace().isMarking();
+    reg5 |= static_cast<uint64_t>(heapIsMarking) << nibbleShift(Reg5::isMarking);
+    if (vm) {
+        std::optional<CollectionScope> collectionScope = vm->heap.collectionScope();
+        uint64_t collectionScopeCode = !collectionScope ? 0 : (*collectionScope == CollectionScope::Eden ? 1 : 2);
+        reg5 |= collectionScopeCode << nibbleShift(Reg5::collectionScope);
+        reg5 |= static_cast<uint64_t>(vm->heap.worldIsStopped()) << nibbleShift(Reg5::worldIsStopped);
+        reg5 |= static_cast<uint64_t>(vm->heap.mutatorState()) << nibbleShift(Reg5::mutatorState);
+    }
+
+    // Allocation kind, mark/newly-allocated state, and (for MarkedBlock cells)
+    // whether the block is still being allocated out of and whether the cell is
+    // itself a free (dead) cell on the allocator's free list.
+    auto gcStateFor = [](JSCell* cell) -> uint64_t {
+        if (!cell)
+            return 0;
+        uint64_t state = 0;
+        if (cell->isPreciseAllocation()) {
+            auto& allocation = cell->preciseAllocation();
+            state |= 1ull << nibbleShift(GCState::isPreciseAllocation); // isPreciseAllocation() == true
+            state |= static_cast<uint64_t>(allocation.isMarked()) << nibbleShift(GCState::isMarked);
+            state |= static_cast<uint64_t>(allocation.isNewlyAllocated()) << nibbleShift(GCState::isNewlyAllocated);
+        } else {
+            auto& block = cell->markedBlock();
+            auto& handle = block.handle();
+            state |= static_cast<uint64_t>(block.isMarked(cell)) << nibbleShift(GCState::isMarked);
+            state |= static_cast<uint64_t>(block.isNewlyAllocated(cell)) << nibbleShift(GCState::isNewlyAllocated);
+            bool freeListed = handle.isFreeListed();
+            state |= static_cast<uint64_t>(freeListed) << nibbleShift(GCState::isFreeListed);
+            state |= static_cast<uint64_t>(handle.isAllocated()) << nibbleShift(GCState::isAllocated);
+            if (freeListed) {
+                if (BlockDirectory* directory = handle.directory())
+                    state |= static_cast<uint64_t>(directory->isFreeListedCell(cell)) << nibbleShift(GCState::isOnFreeList);
+            }
+        }
+        return state;
+    };
+
+    updateDumpState(0x5703);
+
+    uint64_t badObjectState = gcStateFor(badObject);
+    reg4 |= badObjectState << nibbleShift(Reg4::badObjectGCState);
+
+    updateDumpState(0x5704);
+
+    uint64_t previousState = gcStateFor(previousInChain);
+    reg4 |= previousState << nibbleShift(Reg4::previousInChainGCState);
+
+    updateDumpState(0x5705);
+
+    uint64_t bottomState = gcStateFor(bottomOfChain);
+    reg5 |= bottomState << nibbleShift(Reg5::bottomOfChainGCState);
+
+    reg5 |= static_cast<uint64_t>(!previousInChain) << nibbleShift(Reg5::previousInChainIsNull);
+    reg5 |= static_cast<uint64_t>(bottomOfChain == badObject) << nibbleShift(Reg5::badObjectIsBottomOfChain);
+
+    updateDumpState(0x5706);
+
+    // Backtrack the prototype chain from the original baseValue to discover how far up the bad
+    // object manifests. 0xff means we did not reach it within the cap (corrupt/cyclic chain).
+    uint64_t chainDepth = 0;
+    JSObject* chainCursor = bottomOfChain;
+    {
+        constexpr uint64_t maxDepth = 0xff;
+        while (chainCursor && chainCursor != badObject && chainDepth < maxDepth) {
+            Structure* cursorStructure = chainCursor->structureID().tryDecode();
+            if (!cursorStructure)
+                break;
+            JSValue prototype = cursorStructure->storedPrototype(chainCursor);
+            if (!prototype.isObject())
+                break;
+            chainCursor = asObject(prototype);
+            ++chainDepth;
+        }
+        if (chainCursor != badObject)
+            chainDepth = maxDepth;
+    }
+    reg5 |= saturate<8>(chainDepth) << nibbleShift(Reg5::chainDepth);
+
+    updateDumpState(0x5707);
+
+    // Validate the bad object's structure: does its StructureID decode to an allocated Structure,
+    // and is that Structure itself described by the canonical structureStructure?
+    StructureID badStructureID = badObject->structureID();
+    Structure* decodedStructure = badStructureID.tryDecode();
+    reg1 |= static_cast<uint64_t>(decodedStructure != nullptr) << nibbleShift(Reg1::structureIDMapsToValidStructure);
+
+    updateDumpState(0x5708);
+
+    Structure* metaStructure = nullptr;
+    bool structureOfStructureIsStructureStructure = false;
+    if (decodedStructure) {
+        metaStructure = decodedStructure->structureID().tryDecode();
+        structureOfStructureIsStructureStructure = metaStructure && vm != nullptr && metaStructure == vm->structureStructure.get();
+        reg1 |= static_cast<uint64_t>(decodedStructure->isDictionary()) << nibbleShift(Reg1::structureIsDictionary);
+        reg1 |= static_cast<uint64_t>(decodedStructure->isUncacheableDictionary()) << nibbleShift(Reg1::structureIsUncacheableDictionary);
+        reg1 |= static_cast<uint64_t>(decodedStructure->hasBeenFlattenedBefore()) << nibbleShift(Reg1::structureHasBeenFlattenedBefore);
+        reg1 |= saturate<4>(decodedStructure->inlineCapacity()) << nibbleShift(Reg1::structureInlineCapacity);
+    }
+    reg1 |= static_cast<uint64_t>(structureOfStructureIsStructureStructure) << nibbleShift(Reg1::structureOfStructureIsStructureStructure);
+
+    updateDumpState(0x5709);
+
+    // Is the bad object zero-filled? Count its zero 8-byte words.
+    std::array<char, 8> emptyWord { };
+    uint64_t blankCellWords = 0;
+    size_t cellWords = badObject->cellSize() / 8;
+    {
+        auto* wordBase = reinterpret_cast<const char*>(badObject);
+        for (size_t i = 0; i < cellWords; ++i) {
+            if (equalSpans(unsafeMakeSpan(wordBase + i * 8, 8), std::span(emptyWord)))
+                ++blankCellWords;
+        }
+    }
+    reg1 |= static_cast<uint64_t>(cellWords && blankCellWords == cellWords) << nibbleShift(Reg1::badObjectIsZeroFilled);
+    reg2 |= saturate<16>(blankCellWords) << nibbleShift(Reg2::blankCellWordCount);
+
+    updateDumpState(0x570a);
+
+    // If the bad object lives in a MarkedBlock, how zeroed-out is that block's header?
+    // The header holds some words that are written non-zero even after the payload is
+    // zero-filled, so zero bytes there are the stronger corruption signal. Also capture
+    // the header's VM pointer, mirroring MarkedBlock::analyzeInvalidHandleAndCrash().
+    if (!badObject->isPreciseAllocation()) {
+        MarkedBlock& block = badObject->markedBlock();
+        auto* blockStart = reinterpret_cast<const char*>(&block);
+
+        auto countZeroBytes = [](const char* begin, const char* end) -> uint64_t {
+            uint64_t zeros = 0;
+            for (auto* p = begin; p < end; ++p) {
+                if (!*p)
+                    ++zeros;
+            }
+            return zeros;
+        };
+        uint64_t headerZeroBytes = countZeroBytes(blockStart + MarkedBlock::offsetOfHeader, blockStart + MarkedBlock::offsetOfHeader + MarkedBlock::headerSize);
+        reg4 |= saturate<16>(headerZeroBytes) << nibbleShift(Reg4::blockHeaderZeroByteCount);
+
+        // Is a critical value like the header's VM pointer zeroed out?
+        // 0 => zeroed, 1 => non-null but not this structure's VM, 2 => matches `vm` from from the `structure` argument.
+        VM* blockVM = *std::bit_cast<VM* const*>(blockStart + MarkedBlock::offsetOfHeader + MarkedBlock::Header::offsetOfVM());
+        uint64_t blockVMState = !blockVM ? 0 : (blockVM == vm ? 2 : 1);
+        reg1 |= blockVMState << nibbleShift(Reg1::blockHeaderVMPointerState);
+
+        updateDumpState(0x570b);
+    }
+
+    // Classify a raw slot word read as a JSValue without dereferencing it:
+    // 0 => empty,
+    // 1 => non-cell value,
+    // 2 => cell-tagged and pointing at a live heap cell (MarkedBlock or precise allocation),
+    // 3 => cell-tagged but not a valid heap object,
+    // 4 => cell-tagged precise-looking cell but the VM isn't available to find the precise-allocation set,
+    // 5 => cell-tagged precise-looking cell but the precise-allocation set isn't available to verify.
+    auto classifySlotWord = [&](uint64_t word) -> uint64_t {
+        JSValue value = JSValue::decode(std::bit_cast<EncodedJSValue>(word));
+        if (!value)
+            return 0;
+        if (!value.isCell())
+            return 1;
+        if (!vm)
+            return 4;
+        JSCell* candidate = value.asCell();
+        if (candidate->isPreciseAllocation()) {
+            auto& preciseSet = vm->heap.objectSpace().preciseAllocationSet();
+            if (!preciseSet)
+                return 5;
+            return preciseSet->contains(candidate) ? 2 : 3;
+        }
+        if (!MarkedBlock::isAtomAligned(candidate))
+            return 3;
+        MarkedBlock* candidateBlock = MarkedBlock::blockFor(candidate);
+        return vm->heap.objectSpace().blocks().set().contains(candidateBlock) ? 2 : 3;
+    };
+
+    // For an out-of-line offending offset, inspect the butterfly the null was fetched from.
+    if (isOutOfLineOffset(offset)) {
+        unsigned outOfLineSize = structure->outOfLineSize();
+        reg2 |= saturate<16>(outOfLineSize) << nibbleShift(Reg2::outOfLineSize);
+
+        Butterfly* butterfly = badObject->butterfly();
+        reg1 |= static_cast<uint64_t>(!butterfly) << nibbleShift(Reg1::butterflyIsNull);
+
+        updateDumpState(0x570c);
+
+        // Is the butterfly in butterfly (auxiliary) space? Locate its MarkedBlock without
+        // dereferencing the butterfly, and trust it only if that's a known live block.
+        MarkedBlock* butterflyBlock = butterfly ? MarkedBlock::blockFor(butterfly) : nullptr;
+        bool butterflyInButterflySpace = false;
+        if (butterfly && vm) {
+            const auto& blockSet = vm->heap.objectSpace().blocks().set();
+            if (blockSet.contains(butterflyBlock))
+                butterflyInButterflySpace = butterflyBlock->subspace() == &vm->auxiliarySpace();
+        }
+        reg1 |= static_cast<uint64_t>(butterflyInButterflySpace) << nibbleShift(Reg1::butterflyInButterflySpace);
+
+        updateDumpState(0x570d);
+
+        // Only read butterfly contents once we know it is a real butterfly.
+        if (butterfly && butterflyInButterflySpace) {
+            auto* storageBase = reinterpret_cast<const char*>(butterfly->propertyStorage());
+            auto* blockStart = reinterpret_cast<const char*>(butterflyBlock);
+            const char* blockEnd = blockStart + MarkedBlock::blockSize;
+
+            // Out-of-line slots live at negative offsets from the property-storage base.
+            // Is the whole out-of-line storage zero-filled? Stay within the block.
+            if (outOfLineSize) {
+                bool allZero = true;
+                for (unsigned i = 1; i <= outOfLineSize; ++i) {
+                    auto* slot = storageBase - i * 8;
+                    if (slot < blockStart)
+                        break;
+                    if (!equalSpans(unsafeMakeSpan(slot, 8), std::span(emptyWord))) {
+                        allZero = false;
+                        break;
+                    }
+                }
+                reg1 |= static_cast<uint64_t>(allZero) << nibbleShift(Reg1::butterflyOutOfLineStorageIsZeroFilled);
+            }
+
+            // Butterfly indexing header lengths.
+            // Meaningful only when the object has an indexing header, which sits immediately before the property-storage base.
+            if (structure->hasIndexingHeader(badObject)) {
+                IndexingHeader* header = butterfly->indexingHeader();
+                reg2 |= saturate<16>(header->publicLength()) << nibbleShift(Reg2::butterflyPublicLength);
+                reg2 |= saturate<16>(header->vectorLength()) << nibbleShift(Reg2::butterflyVectorLength);
+            }
+
+            updateDumpState(0x570e);
+
+            // The offending slot itself and its immediate neighbors. Re-reading the slot now can
+            // reveal a race (it was empty when getDirect saw it). A neighbor that is cell-tagged
+            // but doesn't resolve to a live heap cell is a strong corruption signal, so classify
+            // each neighbor.
+            const char* slot = storageBase + offsetInOutOfLineStorage(offset) * 8;
+            uint64_t offendingWord = 0;
+            uint64_t prevWord = 0;
+            uint64_t nextWord = 0;
+            if (slot >= blockStart && slot + 8 <= blockEnd)
+                memcpySpan(asMutableByteSpan(offendingWord), unsafeMakeSpan(reinterpret_cast<const uint8_t*>(slot), 8));
+            if (slot - 8 >= blockStart)
+                memcpySpan(asMutableByteSpan(prevWord), unsafeMakeSpan(reinterpret_cast<const uint8_t*>(slot - 8), 8));
+            if (slot + 16 <= blockEnd)
+                memcpySpan(asMutableByteSpan(nextWord), unsafeMakeSpan(reinterpret_cast<const uint8_t*>(slot + 8), 8));
+            reg5 |= classifySlotWord(prevWord) << nibbleShift(Reg5::previousSlotClassification);
+            reg5 |= classifySlotWord(nextWord) << nibbleShift(Reg5::nextSlotClassification);
+            updateDumpState(0x570f);
+        } else
+            updateDumpState(0x5710);
+    } else if (isInlineOffset(offset)) {
+        // Inline offending slot: read it and its neighbors, bounded by the containing cell.
+        auto* slot = reinterpret_cast<const char*>(badObject->inlineStorage()) + offsetInInlineStorage(offset) * 8;
+        auto* cellStart = reinterpret_cast<const char*>(badObject);
+        const char* cellEnd = cellStart + badObject->cellSize();
+        uint64_t offendingWord = 0;
+        uint64_t prevWord = 0;
+        uint64_t nextWord = 0;
+        if (slot >= cellStart && slot + 8 <= cellEnd)
+            memcpySpan(asMutableByteSpan(offendingWord), unsafeMakeSpan(reinterpret_cast<const uint8_t*>(slot), 8));
+        if (slot - 8 >= cellStart)
+            memcpySpan(asMutableByteSpan(prevWord), unsafeMakeSpan(reinterpret_cast<const uint8_t*>(slot - 8), 8));
+        if (slot + 16 <= cellEnd)
+            memcpySpan(asMutableByteSpan(nextWord), unsafeMakeSpan(reinterpret_cast<const uint8_t*>(slot + 8), 8));
+        reg5 |= classifySlotWord(prevWord) << nibbleShift(Reg5::previousSlotClassification);
+        reg5 |= classifySlotWord(nextWord) << nibbleShift(Reg5::nextSlotClassification);
+        updateDumpState(0x5711);
+    }
+
+    updateDumpState(0x5712);
+
+    UNUSED_PARAM(propertyName);
+    UNUSED_PARAM(attributes);
+    WTFCrashWithInfo(line, filename, function_name, 0x100900d0ff5e7bad, reg1, reg2, reg3, reg4, reg5, reg6);
+#else
+    UNUSED_PARAM(structure);
+    UNUSED_PARAM(propertyName);
+    UNUSED_PARAM(offset);
+    UNUSED_PARAM(bottomOfChain);
+    UNUSED_PARAM(previousInChain);
+    UNUSED_PARAM(attributes);
+    WTFCrashWithInfo(line, filename, function_name, 0x100900d0ff5e7bad);
+#endif
 }
 
 } // namespace JSC

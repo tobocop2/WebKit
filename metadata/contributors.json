@@ -678,6 +678,7 @@
          "acarlsson@apple.com"
       ],
       "expertise" : "Storage, Networking, Core DOM, Plug-ins and Java (Win, General), XML, JavaScript/ECMAScript",
+      "github" : "andersca",
       "name" : "Anders Carlsson",
       "nicks" : [
          "andersca"
@@ -3785,11 +3786,13 @@
          "i_gower@apple.com"
       ],
       "github" : "igower",
-      "name" : "Ian Gower"
+      "name" : "Ian Gower",
+      "status" : "committer"
    },
    {
       "emails" : [
-         "ian.grunert@gmail.com"
+         "ian.grunert@gmail.com",
+         "ig@anthropic.com"
       ],
       "github" : "iangrunert",
       "name" : "Ian Grunert",
@@ -3904,7 +3907,8 @@
          "issacroy05@gmail.com"
       ],
       "github" : "TheBoyRoy05",
-      "name" : "Issac Roy"
+      "name" : "Issac Roy",
+      "status" : "committer"
    },
    {
       "emails" : [
@@ -4407,7 +4411,7 @@
       "nicks" : [
          "jlee53"
       ],
-      "status" : "committer"
+      "status" : "reviewer"
    },
    {
       "emails" : [
@@ -4429,6 +4433,14 @@
       "nicks" : [
          "jeez_"
       ]
+   },
+   {
+      "emails" : [
+         "jespinal23@apple.com"
+      ],
+      "github" : "JEspinal01",
+      "name" : "Jetzel Espinal",
+      "status" : "committer"
    },
    {
       "emails" : [
@@ -5609,8 +5621,9 @@
          "info.aeslilly@gmail.com",
          "lilly_le@apple.com"
       ],
-      "github" : "codedbycupidity",
-      "name" : "Lilly Le"
+      "github" : "cupidsity",
+      "name" : "Lilly Le",
+      "status" : "committer"
    },
    {
       "emails" : [
@@ -5819,7 +5832,7 @@
       "nicks" : [
          "marcosc"
       ],
-      "status" : "committer"
+      "status" : "reviewer"
    },
    {
       "emails" : [
@@ -6431,6 +6444,18 @@
    },
    {
       "emails" : [
+         "morne@apple.com",
+         "morne@morneveldsman.com"
+      ],
+      "expertise" : "Web Compatibility",
+      "github" : "mveldsman",
+      "name" : "Morne Veldsman",
+      "nicks" : [
+         "mveldsman"
+      ]
+   },
+   {
+      "emails" : [
          "Ms2ger@igalia.com",
          "Ms2ger@gmail.com"
       ],
@@ -6574,6 +6599,13 @@
       "nicks" : [
          "thakis"
       ]
+   },
+   {
+      "emails" : [
+         "nicolas.breidinger@sony.com"
+      ],
+      "github" : "CaptainNic",
+      "name" : "Nicolas Breidinger"
    },
    {
       "emails" : [
@@ -7697,6 +7729,15 @@
    },
    {
       "emails" : [
+         "s_krigel@apple.com",
+         "sasha.krigel@gmail.com",
+         "skrigel@mit.edu"
+      ],
+      "github" : "skrigel",
+      "name" : "Sasha Krigel"
+   },
+   {
+      "emails" : [
          "satish@chromium.org"
       ],
       "name" : "Satish Sampath"
@@ -7762,7 +7803,8 @@
       "name" : "Sergey Rubanov",
       "nicks" : [
          "chicoxyzzy"
-      ]
+      ],
+      "status" : "committer"
    },
    {
       "emails" : [
@@ -8956,7 +8998,7 @@
    },
    {
       "emails" : [
-         "yousuke.kimoto@sony.com"
+         "yousuke.kimoto@gmail.com"
       ],
       "github" : "ykimot",
       "name" : "Yousuke Kimoto",
@@ -9106,6 +9148,17 @@
       "nicks" : [
          "zhifei_fang",
          "z.f"
+      ]
+   },
+   {
+      "emails" : [
+         "z_jiangli@apple.com",
+         "zhuoyingjiangli@gmail.com"
+      ],
+      "github" : "RoundofThree",
+      "name" : "Zhuo Ying Jiang Li",
+      "nicks" : [
+         "RoundofThree"
       ]
    },
    {

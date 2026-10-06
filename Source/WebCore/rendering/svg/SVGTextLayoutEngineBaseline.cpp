@@ -50,15 +50,13 @@ float SVGTextLayoutEngineBaseline::calculateBaselineShift(const Style::ComputedS
             return m_font->metricsOfPrimaryFont().height() / 2;
         },
         [&](const Style::SVGBaselineShift::LengthPercentage& value) -> float {
-            return Style::evaluate<float>(value, m_font->size(), Style::ZoomNeeded { });
+            return Style::evaluate<float>(value, m_font->size(), style.usedZoomForLength());
         }
     );
 }
 
 AlignmentBaseline SVGTextLayoutEngineBaseline::dominantBaselineToAlignmentBaseline(bool isVerticalText, const RenderElement& textRenderer) const
 {
-    ASSERT(textRenderer.parent());
-
     DominantBaseline baseline = textRenderer.style().dominantBaseline();
     if (baseline == DominantBaseline::Auto) {
         // Per SVG2 and CSS Inline 3, auto maps to alphabetic in horizontal writing
@@ -75,13 +73,6 @@ AlignmentBaseline SVGTextLayoutEngineBaseline::dominantBaselineToAlignmentBaseli
     }
 
     switch (baseline) {
-    case DominantBaseline::UseScript:
-        // FIXME: The dominant-baseline and the baseline-table components are set by determining the predominant script of the character data content.
-        return AlignmentBaseline::Alphabetic;
-    case DominantBaseline::NoChange:
-        return dominantBaselineToAlignmentBaseline(isVerticalText, *textRenderer.parent());
-    case DominantBaseline::ResetSize:
-        return dominantBaselineToAlignmentBaseline(isVerticalText, *textRenderer.parent());
     case DominantBaseline::Ideographic:
         return AlignmentBaseline::Ideographic;
     case DominantBaseline::Alphabetic:

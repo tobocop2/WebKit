@@ -117,6 +117,11 @@ JSRetainPtr<JSStringRef> UIScriptControllerCocoa::scrollingTreeAsText() const
     return adopt(JSStringCreateWithCFString((CFStringRef)[webView() _scrollingTreeAsText]));
 }
 
+JSRetainPtr<JSStringRef> UIScriptControllerCocoa::scrollingTreeIncludingNodeIDsAsText() const
+{
+    return adopt(JSStringCreateWithCFString((CFStringRef)[webView() _scrollingTreeIncludingNodeIDsAsText]));
+}
+
 void UIScriptControllerCocoa::removeViewFromWindow(JSValueRef callback)
 {
     // FIXME: On iOS, we never invoke the completion callback that's passed in. Fixing this causes the layout
@@ -694,7 +699,7 @@ void UIScriptControllerCocoa::setObscuredInsets(double top, double right, double
 #if ENABLE(THREADED_ANIMATIONS)
 JSRetainPtr<JSStringRef> UIScriptControllerCocoa::animationStackForLayerWithID(uint64_t layerID) const
 {
-    return adopt(JSStringCreateWithCFString((CFStringRef) [webView() _animationStackForLayerWithID:layerID]));
+    return adopt(JSStringCreateWithCFString((CFStringRef) [webView() _animationStackForLayerWithIDInMainFrame:layerID]));
 }
 
 JSRetainPtr<JSStringRef> UIScriptControllerCocoa::progressBasedTimelinesForScrollingNodeID(unsigned long long scrollingNodeID, unsigned long long processID) const

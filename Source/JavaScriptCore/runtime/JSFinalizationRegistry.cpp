@@ -57,8 +57,8 @@ void JSFinalizationRegistry::finishCreation(VM& vm, JSGlobalObject* globalObject
         Base::internalField(index).setWithoutWriteBarrier(values[index]);
     internalField(Field::Callback).setWithoutWriteBarrier(callback);
 
-    // Make sure we init the DOM wrapper for our document since it must be allocated before finalizeUnconditionally is called. finalizeUnconditionally,
-    // is called during the GC flip so no JS objects can be allocated there. This only works because we no longer weakly hold on to DOM wrappers.
+    // Init the DOM wrapper for our document now: reconciliation runs during the GC flip, where no
+    // JS objects can be allocated. This only works because we no longer weakly hold DOM wrappers.
     globalObject->globalObjectMethodTable()->currentScriptExecutionOwner(globalObject);
 }
 
@@ -97,7 +97,7 @@ void JSFinalizationRegistry::destroy(JSCell* table)
     static_cast<JSFinalizationRegistry*>(table)->~JSFinalizationRegistry();
 }
 
-NEVER_INLINE void JSFinalizationRegistry::finalizeUnconditionally(VM& vm, CollectionScope)
+void JSFinalizationRegistry::reconcileWeakReferencesAtGCEnd(VM& vm, CollectionScope)
 {
     Locker locker { cellLock() };
 
@@ -151,15 +151,17 @@ NEVER_INLINE void JSFinalizationRegistry::finalizeUnconditionally(VM& vm, Collec
     });
 
     if (!m_hasAlreadyScheduledWork && (readiedCell || deadCount(locker))) {
-        auto ticket = vm.deferredWorkTimer->addPendingWork(DeferredWorkTimer::WorkType::ImminentlyScheduled, vm, this, { });
-        #ifndef BUN_SKIP_FAILING_ASSERTIONS
-        ASSERT(vm.deferredWorkTimer->hasPendingWork(ticket));
-        #endif
-        vm.deferredWorkTimer->scheduleWorkSoon(ticket, [this](DeferredWorkTimer::Ticket) {
+        auto weakTicket = vm.deferredWorkTimer->addPendingWork(DeferredWorkTimer::WorkType::ImminentlyScheduled, vm, this, { });
+        bool queued = vm.deferredWorkTimer->scheduleWorkSoonIfActive(weakTicket, [this](DeferredWorkTimer::Ticket&) {
             JSGlobalObject* globalObject = this->realm();
             this->m_hasAlreadyScheduledWork = false;
             this->runFinalizationCleanup(globalObject);
         });
+        #ifndef BUN_SKIP_FAILING_ASSERTIONS
+        RELEASE_ASSERT(queued);
+        #else
+        (void)queued;
+        #endif
         m_hasAlreadyScheduledWork = true;
     }
 }
@@ -170,9 +172,10 @@ void JSFinalizationRegistry::runFinalizationCleanup(JSGlobalObject* globalObject
     auto scope = DECLARE_THROW_SCOPE(vm);
 
     while (JSValue value = takeDeadHoldingsValue()) {
-        MarkedArgumentBuffer args;
-        args.append(value);
-        call(globalObject, callback(), args, "This should not be visible: please report a bug to bugs.webkit.org"_s);
+        auto args = WTF::toArray<EncodedJSValue>({
+            JSValue::encode(value),
+        });
+        call(globalObject, callback(), ArgList { args.data(), args.size() }, "This should not be visible: please report a bug to bugs.webkit.org"_s);
         RETURN_IF_EXCEPTION(scope, void());
     }
 }

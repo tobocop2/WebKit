@@ -11,6 +11,8 @@ $(BUILT_PRODUCTS_DIR)/usr/local/include/WebKitAdditions/AppKitGesturesExtras.swi
 $(BUILT_PRODUCTS_DIR)/usr/local/include/WebKitAdditions/TestWebKitAPILibraryAdditions.swift.in
 $(BUILT_PRODUCTS_DIR)/usr/local/include/WebKitAdditions/WKWebView+SystemTextExtraction.swift.in
 $(BUILT_PRODUCTS_DIR)/usr/local/include/WebKitAdditions/WKWebView+WKBannerViewOverlay.swift.in
+$(BUILT_PRODUCTS_DIR)/usr/local/include/WebKitAdditions/WebPageProxyAdditions.messages.in
+$(BUILT_PRODUCTS_DIR)/usr/local/include/WebKitAdditions/WebPreferencesAdditions.yaml
 $(BUILT_PRODUCTS_DIR)/usr/local/include/WebKitAdditions/WebViewRepresentable+Extras.swift.in
 $(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/Compiler.h
 $(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/Platform.h
@@ -23,6 +25,8 @@ $(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/PlatformLegacy.h
 $(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/PlatformOS.h
 $(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/PlatformUse.h
 $(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/Scripts/GeneratePreferences.rb
+$(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/Scripts/GenerateSecurityFlags.rb
+$(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/Scripts/Preferences/SecurityFlags.yaml
 $(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/Scripts/Preferences/UnifiedWebPreferences.yaml
 $(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/Scripts/Preferences/WebPreferences.yaml
 $(BUILT_PRODUCTS_DIR)/usr/local/include/wtf/Scripts/Preferences/WebPreferencesDebug.yaml
@@ -153,6 +157,7 @@ $(PROJECT_DIR)/NetworkProcess/NetworkResourceLoader.messages.in
 $(PROJECT_DIR)/NetworkProcess/NetworkSessionCreationParameters.serialization.in
 $(PROJECT_DIR)/NetworkProcess/NetworkSocketChannel.messages.in
 $(PROJECT_DIR)/NetworkProcess/NetworkTransportChannel.messages.in
+$(PROJECT_DIR)/NetworkProcess/PreconnectRequest.serialization.in
 $(PROJECT_DIR)/NetworkProcess/PrivateClickMeasurement/PrivateClickMeasurementManagerInterface.serialization.in
 $(PROJECT_DIR)/NetworkProcess/ServiceWorker/ServiceWorkerDownloadTask.messages.in
 $(PROJECT_DIR)/NetworkProcess/ServiceWorker/ServiceWorkerFetchTask.messages.in
@@ -206,6 +211,9 @@ $(PROJECT_DIR)/Scripts/PreferencesTemplates/WebPreferencesGetterSetters.cpp.erb
 $(PROJECT_DIR)/Scripts/PreferencesTemplates/WebPreferencesKeys.cpp.erb
 $(PROJECT_DIR)/Scripts/PreferencesTemplates/WebPreferencesKeys.h.erb
 $(PROJECT_DIR)/Scripts/PreferencesTemplates/WebPreferencesStoreDefaultsMap.cpp.erb
+$(PROJECT_DIR)/Scripts/SecurityFlagsTemplates/SecurityFlags.cpp.erb
+$(PROJECT_DIR)/Scripts/SecurityFlagsTemplates/SecurityFlags.h.erb
+$(PROJECT_DIR)/Scripts/SecurityFlagsTemplates/SecurityFlags.serialization.in.erb
 $(PROJECT_DIR)/Scripts/create-http-header-serialization-interface.py
 $(PROJECT_DIR)/Scripts/generate-derived-log-sources.py
 $(PROJECT_DIR)/Scripts/generate-https-upgrade-database.sh
@@ -217,6 +225,7 @@ $(PROJECT_DIR)/Scripts/webkit/model.py
 $(PROJECT_DIR)/Scripts/webkit/opaque_ipc_types.py
 $(PROJECT_DIR)/Scripts/webkit/opaque_ipc_types.tracking.in
 $(PROJECT_DIR)/Scripts/webkit/parser.py
+$(PROJECT_DIR)/Scripts/webkit/untrusted_origins.py
 $(PROJECT_DIR)/Shared/API/APIArray.serialization.in
 $(PROJECT_DIR)/Shared/API/APIData.serialization.in
 $(PROJECT_DIR)/Shared/API/APIDictionary.serialization.in
@@ -324,6 +333,7 @@ $(PROJECT_DIR)/Shared/Extensions/WebExtensionMatchedRuleParameters.serialization
 $(PROJECT_DIR)/Shared/Extensions/WebExtensionMenuItem.serialization.in
 $(PROJECT_DIR)/Shared/Extensions/WebExtensionMessageSenderParameters.serialization.in
 $(PROJECT_DIR)/Shared/Extensions/WebExtensionMessageTargetParameters.serialization.in
+$(PROJECT_DIR)/Shared/Extensions/WebExtensionNotification.serialization.in
 $(PROJECT_DIR)/Shared/Extensions/WebExtensionSidebarParameters.serialization.in
 $(PROJECT_DIR)/Shared/Extensions/WebExtensionStorage.serialization.in
 $(PROJECT_DIR)/Shared/Extensions/WebExtensionTab.serialization.in
@@ -343,7 +353,6 @@ $(PROJECT_DIR)/Shared/GoToBackForwardItemParameters.serialization.in
 $(PROJECT_DIR)/Shared/HTTPSUpgrade/HTTPSUpgradeList.txt
 $(PROJECT_DIR)/Shared/IPCConnectionTester.messages.in
 $(PROJECT_DIR)/Shared/IPCStreamTester.messages.in
-$(PROJECT_DIR)/Shared/IPCStreamTesterProxy.messages.in
 $(PROJECT_DIR)/Shared/IPCTester.messages.in
 $(PROJECT_DIR)/Shared/IPCTester.serialization.in
 $(PROJECT_DIR)/Shared/IPCTesterReceiver.messages.in
@@ -366,6 +375,7 @@ $(PROJECT_DIR)/Shared/NodeHitTestResult.serialization.in
 $(PROJECT_DIR)/Shared/Notifications/NotificationManagerMessageHandler.messages.in
 $(PROJECT_DIR)/Shared/Notifications/NotificationManagerProxy.messages.in
 $(PROJECT_DIR)/Shared/PALArgumentCoders.serialization.in
+$(PROJECT_DIR)/Shared/PDFAccessibilityDisplayModeState.serialization.in
 $(PROJECT_DIR)/Shared/PDFDisplayMode.serialization.in
 $(PROJECT_DIR)/Shared/Pasteboard.serialization.in
 $(PROJECT_DIR)/Shared/PlatformPopupMenuData.serialization.in
@@ -420,7 +430,6 @@ $(PROJECT_DIR)/Shared/WebCoreArgumentCodersAuth.serialization.in
 $(PROJECT_DIR)/Shared/WebCoreArgumentCodersMedia.serialization.in
 $(PROJECT_DIR)/Shared/WebCoreArgumentCodersNetwork.serialization.in
 $(PROJECT_DIR)/Shared/WebCoreArgumentCodersPayment.serialization.in
-$(PROJECT_DIR)/Shared/WebCoreArgumentCodersPlatform.serialization.in
 $(PROJECT_DIR)/Shared/WebCoreArgumentCodersStorage.serialization.in
 $(PROJECT_DIR)/Shared/WebCoreFont.serialization.in
 $(PROJECT_DIR)/Shared/WebEvent.serialization.in
@@ -557,6 +566,7 @@ $(PROJECT_DIR)/UIProcess/Automation/Automation.json
 $(PROJECT_DIR)/UIProcess/Automation/WebAutomationSession.messages.in
 $(PROJECT_DIR)/UIProcess/Automation/protocol/BidiBrowser.json
 $(PROJECT_DIR)/UIProcess/Automation/protocol/BidiBrowsingContext.json
+$(PROJECT_DIR)/UIProcess/Automation/protocol/BidiDigitalCredentials.json
 $(PROJECT_DIR)/UIProcess/Automation/protocol/BidiLog.json
 $(PROJECT_DIR)/UIProcess/Automation/protocol/BidiPermissions.json
 $(PROJECT_DIR)/UIProcess/Automation/protocol/BidiScript.json
@@ -591,6 +601,7 @@ $(PROJECT_DIR)/UIProcess/VisitedLinkStore.messages.in
 $(PROJECT_DIR)/UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy.messages.in
 $(PROJECT_DIR)/UIProcess/WebBackForwardList.messages.in
 $(PROJECT_DIR)/UIProcess/WebFrameProxy.messages.in
+$(PROJECT_DIR)/UIProcess/WebFrameProxyFromNetworkProcess.messages.in
 $(PROJECT_DIR)/UIProcess/WebFullScreenManagerProxy.messages.in
 $(PROJECT_DIR)/UIProcess/WebGeolocationManagerProxy.messages.in
 $(PROJECT_DIR)/UIProcess/WebLockRegistryProxy.messages.in
@@ -635,6 +646,7 @@ $(PROJECT_DIR)/WebProcess/Extensions/Interfaces/WebExtensionAPILocalization.idl
 $(PROJECT_DIR)/WebProcess/Extensions/Interfaces/WebExtensionAPIMenus.idl
 $(PROJECT_DIR)/WebProcess/Extensions/Interfaces/WebExtensionAPINamespace.idl
 $(PROJECT_DIR)/WebProcess/Extensions/Interfaces/WebExtensionAPINotifications.idl
+$(PROJECT_DIR)/WebProcess/Extensions/Interfaces/WebExtensionAPIOffscreen.idl
 $(PROJECT_DIR)/WebProcess/Extensions/Interfaces/WebExtensionAPIPermissions.idl
 $(PROJECT_DIR)/WebProcess/Extensions/Interfaces/WebExtensionAPIPort.idl
 $(PROJECT_DIR)/WebProcess/Extensions/Interfaces/WebExtensionAPIRuntime.idl

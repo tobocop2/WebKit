@@ -134,7 +134,7 @@ headers: "LayerProperties.h" "PlatformCALayerRemote.h"
 };
 
 [Nested] struct WebKit::RemoteLayerTreeTransaction::LayerCreationProperties::VideoElementData {
-    WebKit::PlaybackSessionContextIdentifier playerIdentifier;
+    WebCore::MediaPlayerClientIdentifier playerIdentifier;
     WebCore::FloatSize initialSize;
     WebCore::FloatSize naturalSize;
 };
@@ -285,7 +285,8 @@ using WebKit::PageData::TransactionCallbackID = IPC::AsyncReplyID;
     bool viewportMetaTagWidthWasExplicit;
     bool viewportMetaTagCameFromImageDocument;
     bool isInStableState;
-    WebCore::InteractiveWidget viewportMetaTagInteractiveWidget;
+    bool hasMainThreadScrollDrivenAnimations;
+    WebCore::InteractiveWidgetValue viewportMetaTagInteractiveWidget;
 
 #if PLATFORM(IOS_FAMILY)
     std::optional<uint64_t> dynamicViewportSizeUpdateID;

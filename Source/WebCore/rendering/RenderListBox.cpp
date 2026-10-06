@@ -311,7 +311,7 @@ RenderBox::LogicalExtentComputedValues RenderListBox::computeLogicalHeight(Layou
     }
 
     if (CheckedPtr flexContainer = dynamicDowncast<RenderFlexibleBox>(parent()))
-        flexContainer->setFlexItemContentLogicalHeightIfNeeded(*this, logicalHeight);
+        flexContainer->setFlexItemContentLogicalHeightFromLayout(*this, logicalHeight);
     logicalHeight += writingMode().isHorizontal() ? verticalBorderAndPaddingExtent() : horizontalBorderAndPaddingExtent();
     return RenderBox::computeLogicalHeight(logicalHeight, logicalTop);
 }
@@ -886,17 +886,17 @@ ScrollbarOrientation RenderListBox::scrollbarOrientationForWritingMode() const
 int RenderListBox::scrollWidth() const
 {
     if (writingMode().isHorizontal())
-        return roundToInt(clientWidth());
+        return roundToInt(paddingBoxWidth());
 
-    return roundToInt(std::max(clientWidth(), listLogicalHeight()));
+    return roundToInt(std::max(paddingBoxWidth(), listLogicalHeight()));
 }
 
 int RenderListBox::scrollHeight() const
 {
     if (writingMode().isHorizontal())
-        return roundToInt(std::max(clientHeight(), listLogicalHeight()));
+        return roundToInt(std::max(paddingBoxHeight(), listLogicalHeight()));
 
-    return roundToInt(clientHeight());
+    return roundToInt(paddingBoxHeight());
 }
 
 int RenderListBox::scrollLeft() const

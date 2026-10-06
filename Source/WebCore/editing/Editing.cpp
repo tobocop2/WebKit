@@ -209,11 +209,11 @@ RefPtr<Element> unsplittableElementForPosition(const Position& position)
     return editableRootForPosition(position);
 }
 
-Position nextCandidate(const Position& position)
+Position nextCandidate(const Position& position, AllowUserSelectNone allowUserSelectNone)
 {
     for (PositionIterator nextPosition = position; !nextPosition.atEnd(); ) {
         nextPosition.increment();
-        if (nextPosition.isCandidate())
+        if (nextPosition.isCandidate(allowUserSelectNone))
             return nextPosition;
     }
     return { };
@@ -241,12 +241,12 @@ Position nextVisuallyDistinctCandidate(const Position& position, SkipDisplayCont
     return { };
 }
 
-Position previousCandidate(const Position& position)
+Position previousCandidate(const Position& position, AllowUserSelectNone allowUserSelectNone)
 {
     PositionIterator previousPosition = position;
     while (!previousPosition.atStart()) {
         previousPosition.decrement();
-        if (previousPosition.isCandidate())
+        if (previousPosition.isCandidate(allowUserSelectNone))
             return previousPosition;
     }
     return { };
@@ -992,7 +992,8 @@ int indexForVisiblePosition(const VisiblePosition& visiblePosition, RefPtr<Conta
     auto position = visiblePosition.deepEquivalent();
     Ref document = *position.document();
 
-    auto editableRoot = highestEditableRoot(position, AXObjectCache::accessibilityEnabled() ? HasEditableAXRole : ContentIsEditable);
+    bool useAccessibilityEditability = AXObjectCache::accessibilityEnabled() && document->existingAXObjectCache();
+    auto editableRoot = highestEditableRoot(position, useAccessibilityEditability ? HasEditableAXRole : ContentIsEditable);
     if (editableRoot && !document->inDesignMode())
         scope = editableRoot;
     else {
@@ -1026,11 +1027,11 @@ VisiblePosition visiblePositionForPositionWithOffset(const VisiblePosition& posi
     return visiblePositionForIndex(startIndex + offset, root.get());
 }
 
-VisiblePosition visiblePositionForIndex(int index, Node* scope, TextIteratorBehaviors behaviors)
+VisiblePosition visiblePositionForIndex(int index, Node* scope, TextIteratorBehaviors behaviors, AllowUserSelectNone allowUserSelectNone)
 {
     if (!scope)
         return { };
-    return { makeDeprecatedLegacyPosition(resolveCharacterLocation(makeRangeSelectingNodeContents(*scope), index, behaviors)) };
+    return { makeDeprecatedLegacyPosition(resolveCharacterLocation(makeRangeSelectingNodeContents(*scope), index, behaviors)), VisiblePosition::defaultAffinity, allowUserSelectNone };
 }
 
 VisiblePosition visiblePositionForIndexUsingCharacterIterator(Node& node, int index)
@@ -1205,12 +1206,13 @@ LayoutRect localCaretRectInRendererForRect(LayoutRect& localRect, Node* node, Re
     caretPainter = rendererForCaretPainting(node);
 
     // Compute an offset between the renderer and the caretPainter.
-    while (renderer != caretPainter) {
-        CheckedPtr containerObject = renderer->container();
+    CheckedPtr currentRenderer = renderer;
+    while (currentRenderer != caretPainter) {
+        CheckedPtr containerObject = currentRenderer->container();
         if (!containerObject)
             return LayoutRect();
-        localRect.move(renderer->offsetFromContainer(*containerObject, localRect.location()));
-        renderer = containerObject.get();
+        localRect.move(currentRenderer->offsetFromContainer(*containerObject, localRect.location()));
+        currentRenderer = containerObject;
     }
 
     return localRect;

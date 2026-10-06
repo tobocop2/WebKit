@@ -27,6 +27,7 @@
 #include "ScrollView.h"
 
 #include "AccessibilityRegionContext.h"
+#include "BitmapImage.h"
 #include "CornerRadii.h"
 #include "FloatQuad.h"
 #include "GraphicsContext.h"
@@ -1232,19 +1233,36 @@ void ScrollView::setScrollbarsSuppressed(bool suppressed, bool repaintOnUnsuppre
     }
 }
 
-Scrollbar* ScrollView::scrollbarAtPoint(const IntPoint& windowPoint)
+Scrollbar* ScrollView::scrollbarAtPoint(const IntPoint& windowPoint, ScrollbarHitTestTolerance tolerance)
 {
     if (platformWidget())
-        return 0;
+        return nullptr;
 
     // convertFromContainingWindow doesn't do what it sounds like it does. We need it here just to get this
     // point into the right coordinates if this is the ScrollView of a sub-frame.
-    IntPoint convertedPoint = convertFromContainingWindow(windowPoint);
-    if (m_horizontalScrollbar && protect(m_horizontalScrollbar)->shouldParticipateInHitTesting() && protect(m_horizontalScrollbar)->frameRect().contains(convertedPoint))
-        return m_horizontalScrollbar.get();
-    if (m_verticalScrollbar && protect(m_verticalScrollbar)->shouldParticipateInHitTesting() && protect(m_verticalScrollbar)->frameRect().contains(convertedPoint))
-        return m_verticalScrollbar.get();
-    return 0;
+    const auto convertedPoint = convertFromContainingWindow(windowPoint);
+
+    if (RefPtr scrollbar = m_horizontalScrollbar; scrollbar && scrollbar->shouldParticipateInHitTesting()) {
+        auto hitRect = scrollbar->frameRect();
+
+        if (tolerance == ScrollbarHitTestTolerance::Expanded)
+            hitRect.inflateY(scrollbar->expandedHitTestToleranceThreshold());
+
+        if (hitRect.contains(convertedPoint))
+            return m_horizontalScrollbar;
+    }
+
+    if (RefPtr scrollbar = m_verticalScrollbar; scrollbar && scrollbar->shouldParticipateInHitTesting()) {
+        auto hitRect = scrollbar->frameRect();
+
+        if (tolerance == ScrollbarHitTestTolerance::Expanded)
+            hitRect.inflateX(scrollbar->expandedHitTestToleranceThreshold());
+
+        if (hitRect.contains(convertedPoint))
+            return m_verticalScrollbar;
+    }
+
+    return nullptr;
 }
 
 IntPoint ScrollView::convertChildToSelf(const Widget* child, IntPoint point) const
@@ -1455,11 +1473,11 @@ void ScrollView::paintScrollbars(GraphicsContext& context, const IntRect& rect)
 
 void ScrollView::paintPanScrollIcon(GraphicsContext& context)
 {
-    static NeverDestroyed<Ref<Image>> panScrollIcon = ImageAdapter::loadPlatformResource("panIcon");
+    static NeverDestroyed<Ref<BitmapImage>> panScrollIcon = ImageAdapter::loadPlatformResource("panIcon");
     IntPoint iconGCPoint = m_panScrollIconPoint;
     if (parent())
         iconGCPoint = protect(parent())->windowToContents(iconGCPoint);
-    context.drawImage(panScrollIcon.get(), iconGCPoint);
+    context.drawBitmapImage(panScrollIcon.get(), iconGCPoint);
 }
 
 void ScrollView::paint(GraphicsContext& context, const IntRect& rect, SecurityOriginPaintPolicy securityOriginPaintPolicy, RegionContext* regionContext)

@@ -98,15 +98,13 @@ private:
 
     AnimationTimelinesController* controller() const override;
 #if ENABLE(THREADED_ANIMATIONS)
-    bool canBeAccelerated() const final { return true; }
+    bool canBeAccelerated() const final;
     Ref<AcceleratedTimeline> createAcceleratedRepresentation() const final;
 #endif
 
     void applyPendingAcceleratedAnimations();
-    void scheduleInvalidationTaskIfNeeded();
     void scheduleAnimationResolution();
     void clearTickScheduleTimer();
-    void internalUpdateAnimationsAndSendEvents();
     void scheduleNextTick();
     bool animationCanBeRemoved(WebAnimation&);
     bool shouldRunUpdateAnimationsAndSendEventsIgnoringSuspensionState() const;

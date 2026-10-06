@@ -49,6 +49,9 @@
 #include "FrameTracers.h"
 #include "GlobalObjectMethodTable.h"
 #include "InlineCallFrame.h"
+#if USE(BUN_JSC_ADDITIONS)
+#include "InternalFieldTuple.h"
+#endif
 #include "InterpreterInlines.h"
 #include "JITCode.h"
 #include "JSArrayInlines.h"
@@ -56,6 +59,7 @@
 #include "JSBoundFunctionInlines.h"
 #include "JSCInlines.h"
 #include "JSCellButterfly.h"
+#include "JSGenericTypedArrayViewInlines.h"
 #include "JSLexicalEnvironment.h"
 #include "JSModuleEnvironment.h"
 #include "JSModuleRecord.h"
@@ -252,7 +256,7 @@ unsigned sizeOfVarargs(JSGlobalObject* globalObject, JSValue arguments, uint32_t
         length = uncheckedDowncast<ScopedArguments>(cell)->length(globalObject);
         break;
     case ClonedArgumentsType:
-        length = uncheckedDowncast<ClonedArguments>(cell)->length(globalObject);
+        length = clampToUnsigned(uncheckedDowncast<ClonedArguments>(cell)->length(globalObject));
         break;
     case JSCellButterflyType:
         length = uncheckedDowncast<JSCellButterfly>(cell)->length();
@@ -311,6 +315,32 @@ unsigned sizeFrameForVarargs(JSGlobalObject* globalObject, CallFrame* callFrame,
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
+static bool NEVER_INLINE loadTypedArrayVarargs(JSCell* cell, JSValue* firstElementDest, uint32_t offset, uint32_t length)
+{
+    switch (cell->type()) {
+#define JSC_LOAD_VARARGS_TYPED_ARRAY_CASE(name) \
+    case name##ArrayType: { \
+        if constexpr (!JS##name##Array::Adaptor::canConvertToJSQuickly) \
+            return false; \
+        else { \
+            auto* typedArray = uncheckedDowncast<JS##name##Array>(cell); \
+            uint64_t arrayLength = typedArray->length(); \
+            uint64_t inBounds = arrayLength > offset ? std::min<uint64_t>(length, arrayLength - offset) : 0; \
+            uint64_t i = 0; \
+            for (; i < inBounds; ++i) \
+                firstElementDest[i] = typedArray->getIndexQuickly(i + offset); \
+            for (; i < length; ++i) \
+                firstElementDest[i] = jsUndefined(); \
+            return true; \
+        } \
+    }
+        FOR_EACH_TYPED_ARRAY_TYPE_EXCLUDING_DATA_VIEW(JSC_LOAD_VARARGS_TYPED_ARRAY_CASE)
+#undef JSC_LOAD_VARARGS_TYPED_ARRAY_CASE
+    default:
+        return false;
+    }
+}
+
 void loadVarargs(JSGlobalObject* globalObject, JSValue* firstElementDest, JSValue arguments, uint32_t offset, uint32_t length)
 {
     if (!arguments.isCell()) [[unlikely]]
@@ -347,6 +377,8 @@ void loadVarargs(JSGlobalObject* globalObject, JSValue* firstElementDest, JSValu
             uncheckedDowncast<JSArray>(object)->copyToArguments(globalObject, firstElementDest, offset, length);
             return;
         }
+        if (loadTypedArrayVarargs(cell, firstElementDest, offset, length))
+            return;
         unsigned i;
         for (i = 0; i < length && object->canGetIndexQuickly(i + offset); ++i)
             firstElementDest[i] = object->getIndexQuickly(i + offset);
@@ -462,7 +494,16 @@ void Interpreter::getAsyncStackTrace(JSCell* owner, Vector<StackFrame>& results,
     auto getContextValueFromPromise = [&](JSPromise* promise) -> JSValue {
         if (!promise)
             return { };
-        return promise->asyncStackTraceContext();
+        JSValue context = promise->asyncStackTraceContext();
+#if USE(BUN_JSC_ADDITIONS)
+        // JSPromise::resolveWithInternalMicrotaskForAsyncAwait stores
+        // InternalFieldTuple(context, asyncContext) when ALS is active.
+        if (context) {
+            if (auto* tuple = dynamicDowncast<InternalFieldTuple>(context))
+                return tuple->getInternalField(0);
+        }
+#endif
+        return context;
     };
 
     auto getParentGenerator = [&](JSAsyncFunctionGenerator* gen) -> JSAsyncFunctionGenerator* {
@@ -1004,7 +1045,11 @@ void Interpreter::notifyDebuggerOfExceptionToBeThrown(VM& vm, JSGlobalObject* gl
     exception->setDidNotifyInspectorOfThrow();
 }
 
+#if USE(BUN_JSC_ADDITIONS)
+JSValue Interpreter::executeProgram(const SourceCode& source, JSGlobalObject*, JSObject* thisObj, UnlinkedProgramCodeBlock* precompiled)
+#else
 JSValue Interpreter::executeProgram(const SourceCode& source, JSGlobalObject*, JSObject* thisObj)
+#endif
 {
     VM& vm = this->vm();
     auto throwScope = DECLARE_THROW_SCOPE(vm);
@@ -1151,11 +1196,11 @@ JSValue Interpreter::executeProgram(const SourceCode& source, JSGlobalObject*, J
                 auto callData = JSC::getCallDataInline(function);
                 if (callData.type == CallData::Type::None)
                     return throwException(globalObject, throwScope, createNotAFunctionError(globalObject, function));
-                MarkedArgumentBuffer jsonArg;
-                jsonArg.append(JSONPValue);
-                ASSERT(!jsonArg.hasOverflowed());
+                auto jsonArg = WTF::toArray<EncodedJSValue>({
+                    JSValue::encode(JSONPValue),
+                });
                 JSValue thisValue = JSONPPath.size() == 1 ? jsUndefined() : baseObject;
-                JSONPValue = JSC::call(globalObject, function, callData, thisValue, jsonArg);
+                JSONPValue = JSC::call(globalObject, function, callData, thisValue, ArgList { jsonArg.data(), jsonArg.size() });
                 RETURN_IF_EXCEPTION(throwScope, JSValue());
                 break;
             }
@@ -1182,7 +1227,11 @@ failedJSONP:
     // object.
 
     // Compile source to bytecode if necessary:
+#if USE(BUN_JSC_ADDITIONS)
+    JSObject* error = program->initializeGlobalProperties(vm, globalObject, scope, precompiled);
+#else
     JSObject* error = program->initializeGlobalProperties(vm, globalObject, scope);
+#endif
     EXCEPTION_ASSERT(!throwScope.exception() || !error || vm.hasPendingTerminationException());
     RETURN_IF_EXCEPTION(throwScope, throwScope.exception());
     if (error) [[unlikely]]
@@ -1215,7 +1264,11 @@ failedJSONP:
     // Execute the code:
     throwScope.release();
     ASSERT(jitCode == program->generatedJITCode().ptr());
-    return JSValue::decode(vmEntryToJavaScript(jitCode->addressForCall(), &vm, &protoCallFrame));
+    JSValue result = JSValue::decode(vmEntryToJavaScript(jitCode->addressForCall(), &vm, &protoCallFrame));
+    // This executable was made for this one run; only the functions it created still refer to it.
+    if (Options::useRunOnceCodeRelease() && program->canReleaseLinkedCodeNow(vm))
+        program->clearCode(Heap::ScriptExecutableSpaceAndSets::clearableCodeSetFor(*program->subspace()));
+    return result;
 }
 
 JSValue Interpreter::executeBoundCall(VM& vm, JSBoundFunction* function, JSCell* context, const ArgList& args)

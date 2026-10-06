@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include "FontMetricsOverrides.h"
 #include "FontSelectionAlgorithm.h"
 #include "FontTaggedSettings.h"
 #include "RenderStyleConstants.h"
@@ -75,6 +76,9 @@ public:
     void setUnicodeRange(CSSValueList&);
     void setFeatureSettings(CSSValue&);
     void setDisplay(CSSValue&);
+    void setAscentOverride(CSSValue&);
+    void setDescentOverride(CSSValue&);
+    void setLineGapOverride(CSSValue&);
 
     AtomString family() const;
     String style() const;
@@ -83,6 +87,9 @@ public:
     String unicodeRange() const;
     String featureSettings() const;
     String display() const;
+    String ascentOverride() const;
+    String descentOverride() const;
+    String lineGapOverride() const;
     String sizeAdjust() const;
 
     // Pending => Loading  => TimedOut
@@ -181,6 +188,7 @@ private:
     FontLoadingBehavior m_loadingBehavior { FontLoadingBehavior::Auto };
 
     float m_sizeAdjust { 1.0 };
+    FontMetricsOverrides m_metricsOverrides;
 
     Vector<std::unique_ptr<CSSFontFaceSource>, 0, CrashOnOverflow, 0> m_sources;
     WeakHashSet<CSSFontFaceClient> m_clients;

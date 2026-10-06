@@ -100,6 +100,10 @@ public:
     bool isNetworkInstrumentationEnabled() const;
     bool isPageInstrumentationEnabled() const;
 
+    void setShowPaintRects(bool);
+
+    void disconnectFrameTargetForTesting(WebCore::FrameIdentifier);
+
 private:
     WebPageAgentContext NODELETE webPageAgentContext();
     void createLazyAgents();

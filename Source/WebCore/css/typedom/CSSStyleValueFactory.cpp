@@ -40,6 +40,7 @@
 #include "CSSCustomPropertyValue.h"
 #include "CSSEasingFunctionValue.h"
 #include "CSSFilterValue.h"
+#include "CSSFontPaletteValue.h"
 #include "CSSGridLineValue.h"
 #include "CSSGridTemplateListValue.h"
 #include "CSSGridTrackSizesValue.h"
@@ -231,7 +232,7 @@ static ExceptionOr<Ref<CSSStyleValue>> reifyValue(const T& numeric)
         [&](const typename T::Raw& raw) -> ExceptionOr<Ref<CSSStyleValue>> {
             if constexpr (T::category == CSS::Category::Integer) {
                 // Integer is special cased to resolved the same as <number>.
-                return upcast<CSSStyleValue>(CSSUnitValue::create(raw.value, CSSUnitType::CSS_NUMBER));
+                return upcast<CSSStyleValue>(CSSUnitValue::create(raw.value, CSSUnitType::Number));
             } else {
                 return upcast<CSSStyleValue>(CSSUnitValue::create(raw.value, toCSSUnitType(raw.unit)));
             }
@@ -249,9 +250,9 @@ static ExceptionOr<Ref<CSSStyleValue>> reifyValue(const CSSPrimitiveValue& primi
             return upcast<CSSStyleValue>(result.releaseReturnValue());
         },
         [&](const CSSPrimitiveValue::Raw& raw) -> ExceptionOr<Ref<CSSStyleValue>> {
-            if (raw.unit == CSSUnitType::CSS_INTEGER) {
+            if (raw.unit == CSSUnitType::Integer) {
                 // Integer is special cased to resolved the same as <number>.
-                return upcast<CSSStyleValue>(CSSUnitValue::create(raw.value, CSSUnitType::CSS_NUMBER));
+                return upcast<CSSStyleValue>(CSSUnitValue::create(raw.value, CSSUnitType::Number));
             } else {
                 return upcast<CSSStyleValue>(CSSUnitValue::create(raw.value, raw.unit));
             }
@@ -471,6 +472,18 @@ ExceptionOr<Ref<CSSStyleValue>> CSSStyleValueFactory::reifyValue(Document& docum
                 return WebCore::reifyValue(keyword);
             },
             [&](const CSS::ClipRect&) -> ExceptionOr<Ref<CSSStyleValue>> {
+                return CSSStyleValue::create(Ref(const_cast<CSSValue&>(cssValue)), WTF::move(associatedProperty));
+            }
+        );
+    } else if (RefPtr property = dynamicDowncast<CSSFontPaletteValue>(cssValue)) {
+        return WTF::switchOn(property->fontPalette(),
+            [&]<CSSValueID Id>(const Constant<Id>& keyword) -> ExceptionOr<Ref<CSSStyleValue>> {
+                return WebCore::reifyValue(keyword);
+            },
+            [&](const CSS::CustomIdent& customIdent) -> ExceptionOr<Ref<CSSStyleValue>> {
+                return WebCore::reifyValue(customIdent);
+            },
+            [&](const CSS::FontPaletteMixFunction&) -> ExceptionOr<Ref<CSSStyleValue>> {
                 return CSSStyleValue::create(Ref(const_cast<CSSValue&>(cssValue)), WTF::move(associatedProperty));
             }
         );

@@ -27,11 +27,13 @@
 
 #include "ErrorType.h"
 #include "JSModuleRecord.h"
+#include "ModuleMap.h"
 #include "Nodes.h"
 #include <wtf/EnumeratedArray.h>
 
 namespace JSC {
 
+class JSModuleLoader;
 class JSModuleRecord;
 class SourceCode;
 class ScriptFetchParameters;
@@ -40,9 +42,9 @@ class ModuleAnalyzer {
     WTF_MAKE_NONCOPYABLE(ModuleAnalyzer);
     WTF_FORBID_HEAP_ALLOCATION;
 public:
-    ModuleAnalyzer(JSGlobalObject*, const Identifier& moduleKey, const SourceCode&, const VariableEnvironment& declaredVariables, const VariableEnvironment& lexicalVariables, CodeFeatures);
+    ModuleAnalyzer(JSGlobalObject*, JSModuleLoader*, const Identifier& moduleKey, const SourceCode&, CodeFeatures);
 
-    Expected<JSModuleRecord*, std::tuple<ErrorType, String>> analyze(ModuleProgramNode&);
+    std::expected<JSModuleRecord*, std::tuple<ErrorType, String>> analyze(ModuleProgramNode&);
 
     VM& vm() { return m_vm; }
 
@@ -57,7 +59,7 @@ private:
 
     VM& m_vm;
     JSModuleRecord* m_moduleRecord;
-    EnumeratedArray<AbstractModuleRecord::ModulePhase, IdentifierSet, AbstractModuleRecord::ModulePhase::Defer> m_requestedModules;
+    EnumeratedArray<AbstractModuleRecord::ModulePhase, UncheckedKeyHashSet<ModuleMapKey, ModuleMapHash>, AbstractModuleRecord::ModulePhase::Defer> m_requestedModules;
     std::tuple<ErrorType, String> m_errorMessage;
 };
 

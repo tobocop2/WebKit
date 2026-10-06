@@ -63,14 +63,30 @@ inline void ComputedStyleBase::setUsesViewportUnits()
     m_nonInheritedFlags.usesViewportUnits = true;
 }
 
-inline void ComputedStyleBase::setUsesContainerUnits()
+inline void ComputedStyleBase::setIsContainerDependent()
 {
-    m_nonInheritedFlags.usesContainerUnits = true;
+    m_nonInheritedFlags.isContainerDependent = true;
 }
 
 inline void ComputedStyleBase::setUsesTreeCountingFunctions()
 {
     m_nonInheritedFlags.useTreeCountingFunctions = true;
+}
+
+inline void ComputedStyleBase::setColorForHighlight(Color&& colorForHighlight)
+{
+    if (m_inheritedRareData->colorForHighlight != colorForHighlight)
+        m_inheritedRareData.access().colorForHighlight = WTF::move(colorForHighlight);
+}
+
+inline void ComputedStyleBase::setUsesCurrentBackgroundColorKeyword()
+{
+    m_nonInheritedFlags.usesCurrentBackgroundColorKeyword = true;
+}
+
+inline void ComputedStyleBase::setCurrentBackgroundColor(WebCore::Color currentBackgroundColor)
+{
+    SET(m_inheritedData, currentBackgroundColor, WTF::move(currentBackgroundColor));
 }
 
 inline void ComputedStyleBase::setInsideLink(InsideLink insideLink)
@@ -108,9 +124,21 @@ inline void ComputedStyleBase::setEffectiveInert(bool effectiveInert)
     SET(m_inheritedRareData, effectiveInert, effectiveInert);
 }
 
+#if ENABLE(SMART_IMAGE_RESIZER)
+inline void ComputedStyleBase::setIsAffectedBySmartImageResizer(bool isAffectedBySmartImageResizer)
+{
+    SET(m_inheritedRareData, isAffectedBySmartImageResizer, isAffectedBySmartImageResizer);
+}
+#endif
+
 inline void ComputedStyleBase::setIsEffectivelyTransparent(bool effectivelyTransparent)
 {
     SET(m_inheritedRareData, effectivelyTransparent, effectivelyTransparent);
+}
+
+inline void ComputedStyleBase::setEffectiveWrapInsideAvoid(bool effectiveWrapInsideAvoid)
+{
+    SET(m_inheritedRareData, effectiveWrapInsideAvoid, effectiveWrapInsideAvoid);
 }
 
 inline void ComputedStyleBase::setEventListenerRegionTypes(OptionSet<EventListenerRegionType> eventListenerTypes)
@@ -188,6 +216,11 @@ inline void ComputedStyleBase::setUsedAppearance(StyleAppearance a)
     SET_NESTED(m_nonInheritedData, miscData, usedAppearance, static_cast<unsigned>(a));
 }
 
+inline void ComputedStyleBase::setUsedUserSelect(UserSelect userSelect)
+{
+    SET(m_inheritedRareData, usedUserSelect, static_cast<unsigned>(userSelect));
+}
+
 inline void ComputedStyleBase::setUsedContentVisibility(ContentVisibility usedContentVisibility)
 {
     SET(m_inheritedRareData, usedContentVisibility, static_cast<unsigned>(usedContentVisibility));
@@ -231,11 +264,6 @@ inline void ComputedStyleBase::setPseudoElementIdentifier(std::optional<PseudoEl
 }
 
 // MARK: - Zoom
-
-inline void ComputedStyleBase::setEvaluationTimeZoomEnabled(bool value)
-{
-    SET(m_inheritedRareData, evaluationTimeZoomEnabled, value);
-}
 
 inline void ComputedStyleBase::setUseSVGZoomRulesForLength(bool value)
 {
@@ -286,6 +314,11 @@ inline ScrollTimelines& ComputedStyleBase::ensureScrollTimelines()
 inline ViewTimelines& ComputedStyleBase::ensureViewTimelines()
 {
     return m_nonInheritedData.access().rareData.access().viewTimelines.access();
+}
+
+inline TimelineTriggers& ComputedStyleBase::ensureTimelineTriggers()
+{
+    return m_nonInheritedData.access().rareData.access().timelineTriggers.access();
 }
 
 inline void ComputedStyleBase::setBackgroundLayers(BackgroundLayers&& layers)

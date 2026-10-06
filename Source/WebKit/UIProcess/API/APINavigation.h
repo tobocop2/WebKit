@@ -52,7 +52,6 @@ class ResourceResponse;
 
 namespace WebKit {
 class BrowsingWarning;
-class FrameProcess;
 class WebBackForwardListFrameItem;
 }
 
@@ -118,7 +117,9 @@ public:
     const WebCore::ResourceRequest& currentRequest() const LIFETIME_BOUND { return m_currentRequest; }
 
     bool currentRequestIsRedirect() const { return m_lastNavigationAction && !m_lastNavigationAction->redirectResponse.isNull(); }
-    bool currentRequestIsCrossSiteRedirect() const;
+
+    bool hasCrossOriginRedirect() const { return m_hasCrossOriginRedirect; }
+    void setHasCrossOriginRedirect() { m_hasCrossOriginRedirect = true; }
 
     WebKit::WebBackForwardListItem* targetItem() const;
     WebKit::WebBackForwardListFrameItem* targetFrameItem() const { return m_targetFrameItem.get(); }
@@ -132,13 +133,13 @@ public:
 
     bool wasUserInitiated() const { return m_lastNavigationAction && !!m_lastNavigationAction->userGestureTokenIdentifier; }
     bool NODELETE isRequestFromClientOrUserInput() const;
+    bool isFromAPIClientRequest() const { return m_requestIsFromClientInput; }
     void NODELETE markRequestAsFromClientInput();
     void markAsFromLoadData() { m_isFromLoadData = true; }
     bool isFromLoadData() const { return m_isFromLoadData; }
 
     bool shouldPerformDownload() const { return m_lastNavigationAction && !m_lastNavigationAction->downloadAttribute.isNull(); }
 
-    bool treatAsSameOriginNavigation() const { return m_lastNavigationAction && m_lastNavigationAction->treatAsSameOriginNavigation; }
     bool hasOpenedFrames() const { return m_lastNavigationAction && m_lastNavigationAction->hasOpenedFrames; }
     bool openedByDOMWithOpener() const { return m_lastNavigationAction && m_lastNavigationAction->openedByDOMWithOpener; }
     bool isInitialFrameSrcLoad() const { return m_lastNavigationAction && m_lastNavigationAction->isInitialFrameSrcLoad; }
@@ -150,6 +151,7 @@ public:
 
     WebCore::LockHistory lockHistory() const { return m_lastNavigationAction ? m_lastNavigationAction->lockHistory : WebCore::LockHistory::No; }
     WebCore::LockBackForwardList lockBackForwardList() const { return m_lastNavigationAction ? m_lastNavigationAction->lockBackForwardList : WebCore::LockBackForwardList::No; }
+    WebCore::NavigationHistoryBehavior navigationHistoryBehavior() const { return m_lastNavigationAction ? m_lastNavigationAction->navigationHistoryBehavior : WebCore::NavigationHistoryBehavior::Auto; }
 
     WTF::String clientRedirectSourceForHistory() const { return m_lastNavigationAction ? m_lastNavigationAction->clientRedirectSourceForHistory : WTF::String(); }
     std::optional<WebCore::OwnerPermissionsPolicyData> ownerPermissionsPolicy() const { return m_lastNavigationAction ? m_lastNavigationAction->ownerPermissionsPolicy : std::nullopt; }
@@ -177,6 +179,11 @@ public:
     void setIsLoadedWithNavigationShared(bool value) { m_isLoadedWithNavigationShared = value; }
     bool isLoadedWithNavigationShared() const { return m_isLoadedWithNavigationShared; }
 
+    // True when goToBackForwardItem actually sent a traversal message to a web process; a per-frame
+    // walk can resolve an item yet send nothing, and the traversal-coalescing queue gates on this.
+    void setBackForwardTraversalWasDispatched(bool value) { m_backForwardTraversalWasDispatched = value; }
+    bool backForwardTraversalWasDispatched() const { return m_backForwardTraversalWasDispatched; }
+
     void setWebsitePolicies(RefPtr<API::WebsitePolicies>&& policies) { m_websitePolicies = WTF::move(policies); }
     API::WebsitePolicies* websitePolicies() { return m_websitePolicies.get(); }
 
@@ -195,8 +202,6 @@ public:
 
     WebCore::ProcessIdentifier processID() const { return m_processID; }
     void setProcessID(WebCore::ProcessIdentifier processID) { m_processID = processID; }
-
-    void setPendingSharedProcess(WebKit::FrameProcess&);
 
     void NODELETE setHasStorageForCurrentSite(bool);
     bool hasStorageForCurrentSite() const { return m_hasStorageForCurrentSite; }
@@ -237,18 +242,19 @@ private:
     Variant<std::monostate, Ref<WebKit::ProcessThrottler::TimedActivity>, Ref<WebKit::ProcessActivityGroup>> m_clientNavigationActivity;
     bool m_userContentExtensionsEnabled : 1 { true };
     bool m_isLoadedWithNavigationShared : 1 { false };
+    bool m_backForwardTraversalWasDispatched : 1 { false };
     bool m_requestIsFromClientInput : 1 { false };
     bool m_isFromLoadData : 1 { false };
     bool m_hadSafeBrowsingWarning : 1 { false };
     bool m_hasStorageForCurrentSite : 1 { false };
     bool m_isEnhancedSecurityLinkForCurrentSite : 1 { false };
+    bool m_hasCrossOriginRedirect : 1 { false };
     RefPtr<API::WebsitePolicies> m_websitePolicies;
     std::optional<OptionSet<WebCore::AdvancedPrivacyProtections>> m_originatorAdvancedPrivacyProtections;
     MonotonicTime m_requestStart { MonotonicTime::now() };
     RefPtr<WebKit::BrowsingWarning> m_safeBrowsingWarning;
     ListHashSet<size_t> m_ongoingSafeBrowsingChecks;
     Vector<Function<void()>> m_safeBrowsingCheckCompletionCallbacks;
-    RefPtr<WebKit::FrameProcess> m_pendingSharedProcess;
     RefPtr<WebKit::FrameState> m_backForwardFrameState;
 };
 

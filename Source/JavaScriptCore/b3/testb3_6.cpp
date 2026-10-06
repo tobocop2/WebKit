@@ -960,6 +960,82 @@ void testCheckSelectAndCSE()
     CHECK_EQ(invoke<int>(*code, false), 666);
 }
 
+void testCheckSelectAndDeadCheckCSE()
+{
+    // Exercises the specializeSelect phase (B3SpecializeSelect.h) together with reduceStrength's pure
+    // CSE.
+    //
+    // When a Check is reached, within selectSpecializationBound, from a Select that has a constant arm,
+    // the phase specializes the Select: it splits the block at the Check, clones the values between the
+    // Select and the Check into a then/else pair of blocks -- substituting the Select's then/else value
+    // in each -- and replaces the originals with Phis at the merge. Void values in that range (such as
+    // an intermediate Check) are removed from the original block and re-emitted in both arms.
+    //
+    // The IR (single block):
+    //
+    //   @cond = arg1
+    //   @sel  = Select(arg0, -42, 35)   ; Select with a constant arm
+    //           Check(@cond)            ; intermediate Check
+    //   @add  = Add(@sel, 42)
+    //           Check(@add)             ; triggering Check (reaches @sel within the bound)
+    //           Check(@cond)            ; later Check on the same condition (CSE)
+    //           Return(@add)
+    //
+    Procedure proc;
+    if (proc.optLevel() < 1)
+        return;
+    BasicBlock* root = proc.addBlock();
+    auto arguments = cCallArgumentValues<int32_t, int32_t>(proc, root);
+
+    // Condition shared by the intermediate and later Checks, so the later Check is a CSE candidate. A
+    // plain argument: each Check is kept (the condition isn't a known constant) and doesn't lead back to
+    // the Select.
+    Value* condition = arguments[1];
+
+    auto appendCheck = [&] (Value* predicate, int32_t exitValue) {
+        CheckValue* check = root->appendNew<CheckValue>(proc, Check, Origin(), predicate);
+        check->setGenerator(
+            [exitValue] (CCallHelpers& jit, const StackmapGenerationParams&) {
+                AllowMacroScratchRegisterUsage allowScratch(jit);
+                jit.move(CCallHelpers::TrustedImm32(exitValue), GPRInfo::returnValueGPR);
+                jit.emitFunctionEpilogue();
+                jit.ret();
+            });
+    };
+
+    // Defined before the Select so the Select -> triggering-Check run stays within
+    // selectSpecializationBound: Select, intermediate Check, Add, triggering Check.
+    auto* constant = root->appendNew<ConstPtrValue>(proc, Origin(), 42);
+
+    // (1) The Select to specialize: at least one data arm is constant.
+    auto* selectValue = root->appendNew<Value>(
+        proc, Select, Origin(),
+        arguments[0],
+        root->appendNew<ConstPtrValue>(proc, Origin(), -42),
+        root->appendNew<ConstPtrValue>(proc, Origin(), 35));
+
+    // (2) An intermediate Check between the Select and the triggering Check. Specialization moves it out
+    //     of this block and clones it into both arms.
+    appendCheck(condition, 1);
+
+    // (3) Add consuming the Select, feeding (4); keeps the Select within bound 3 of the triggering Check.
+    auto* addValue = root->appendNew<Value>(proc, Add, Origin(), selectValue, constant);
+
+    // (4) The Check that triggers specialization: it reaches the Select within selectSpecializationBound.
+    appendCheck(addValue, 2);
+
+    // (5) A later Check on the SAME condition as (2), so pure CSE relates the two across the specialized
+    //     region.
+    appendCheck(condition, 3);
+
+    root->appendNewControlValue(proc, Return, Origin(), addValue);
+
+    // After specialization the merged value is unchanged: select(true, -42, 35) + 42 == 0, with no Check
+    // firing for these inputs.
+    auto code = compileProc(proc);
+    CHECK_EQ(invoke<intptr_t>(*code, 1, 0), 0);
+}
+
 double NODELETE b3Pow(double x, int y)
 {
     if (y < 0 || y > 1000)
@@ -1493,8 +1569,6 @@ void testPatchpointDoubleRegs()
 
 void testSpillDefSmallerThanUse()
 {
-    if constexpr (is32Bit())
-        return;
 
     Procedure proc;
     BasicBlock* root = proc.addBlock();
@@ -1513,13 +1587,11 @@ void testSpillDefSmallerThanUse()
     clobberSet.exclude(RegisterSet::reservedHardwareRegisters());
     clobberSet.remove(GPRInfo::returnValueGPR); // Force the return value for aliasing below.
     forceSpill->clobberLate(clobberSet);
-#if !CPU(ARM_THUMB2)
     forceSpill->setGenerator(
         [&] (CCallHelpers& jit, const StackmapGenerationParams& params) {
             AllowMacroScratchRegisterUsage allowScratch(jit);
             jit.xor64(params[0].gpr(), params[0].gpr());
         });
-#endif
 
     // On x86, Sub admit an address for any operand. If it uses the stack, the top bits must be zero.
     Value* result = root->appendNew<Value>(proc, Sub, Origin(), forceSpill, arg64);
@@ -1531,8 +1603,6 @@ void testSpillDefSmallerThanUse()
 
 void testSpillUseLargerThanDef()
 {
-    if constexpr (is32Bit())
-        return;
     Procedure proc;
     BasicBlock* root = proc.addBlock();
     BasicBlock* thenCase = proc.addBlock();
@@ -1567,7 +1637,6 @@ void testSpillUseLargerThanDef()
 
     PatchpointValue* forceSpill = tail->appendNew<PatchpointValue>(proc, Void, Origin());
     forceSpill->clobberLate(clobberSet);
-#if !CPU(ARM_THUMB2)
     forceSpill->setGenerator(
         [&] (CCallHelpers& jit, const StackmapGenerationParams&) {
             AllowMacroScratchRegisterUsage allowScratch(jit);
@@ -1575,7 +1644,6 @@ void testSpillUseLargerThanDef()
                 jit.move(CCallHelpers::TrustedImm64(0xffffffffffffffff), reg.gpr());
             });
         });
-#endif
 
     Value* phi = tail->appendNew<Value>(proc, Phi, Int64, Origin());
     thenResult->setPhi(phi);
@@ -2392,9 +2460,9 @@ void testBranchBitAndImmFusion(
     // The first basic block must end in a BranchTest64(resCond, tmp, bitImm).
     Air::Inst terminal = proc.code()[0]->last();
     CHECK_EQ(terminal.kind.opcode, expectedOpcode);
-    CHECK_EQ(terminal.args[0].kind(), Air::Arg::ResCond);
-    CHECK_EQ(terminal.args[1].kind(), firstKind);
-    CHECK(terminal.args[2].kind() == Air::Arg::BitImm || terminal.args[2].kind() == Air::Arg::BitImm64);
+    CHECK_EQ(terminal.args()[0].kind(), Air::Arg::ResCond);
+    CHECK_EQ(terminal.args()[1].kind(), firstKind);
+    CHECK(terminal.args()[2].kind() == Air::Arg::BitImm || terminal.args()[2].kind() == Air::Arg::BitImm64);
 }
 
 void testTerminalPatchpointThatNeedsToBeSpilled()

@@ -22,6 +22,7 @@
 #include "config.h"
 #include "RenderTheme.h"
 
+#include "BitmapImage.h"
 #include "BorderShape.h"
 #include "ButtonPart.h"
 #include "CSSContrastColorResolver.h"
@@ -113,9 +114,9 @@ using namespace HTMLNames;
 RenderTheme::RenderTheme() = default;
 RenderTheme::~RenderTheme() = default;
 
-float RenderTheme::usedZoomForComputedStyle(const Style::ComputedStyle& renderStyle) const
+float RenderTheme::usedZoomForComputedStyle(const Style::ComputedStyle&) const
 {
-    return renderStyle.evaluationTimeZoomEnabled() ? 1.0f : renderStyle.usedZoom();
+    return 1.0f;
 }
 
 StyleAppearance RenderTheme::adjustAppearanceForElement(Style::ComputedStyle& style, const Style::ComputedStyle& parentStyle, const Element* element, StyleAppearance autoAppearance) const
@@ -234,13 +235,12 @@ static bool NODELETE isAppearanceAllowedForAllElements(StyleAppearance appearanc
     return false;
 }
 
-static bool devolvableWidgetsEnabledAndSupported(const Element* element)
+static bool devolvableWidgetsSupported()
 {
-    bool devolvableWidgetsEnabled = element->document().settings().devolvableWidgetsEnabled();
 #if PLATFORM(COCOA)
-    return devolvableWidgetsEnabled && WTF::linkedOnOrAfterSDKWithBehavior(SDKAlignedBehavior::DevolvableWidgets);
+    return WTF::linkedOnOrAfterSDKWithBehavior(SDKAlignedBehavior::DevolvableWidgets);
 #else
-    return devolvableWidgetsEnabled;
+    return true;
 #endif
 }
 
@@ -290,7 +290,7 @@ void RenderTheme::adjustStyle(Style::ComputedStyle& style, const Style::Computed
     else if (style.display() == Style::DisplayType::BlockFlowListItem || style.display() == Style::DisplayType::BlockTable)
         style.setDisplayMaintainingOriginalDisplay(Style::DisplayType::BlockFlow);
 
-    bool widgetMayDevolve = devolvableWidgetsEnabledAndSupported(element);
+    bool widgetMayDevolve = devolvableWidgetsSupported();
     bool widgetHasNativeAppearanceDisabled = widgetMayDevolve && element->isDevolvableWidget() && style.nativeAppearanceDisabled() && !isAppearanceAllowedForAllElements(appearance);
     bool hasAppearanceFromUAStyle = element && hasAppearanceForElementTypeFromUAStyle(*element);
 
@@ -522,7 +522,7 @@ static void updateApplePayButtonPartForRenderer(ApplePayButtonPart& applePayButt
     CheckedRef style = renderer.style();
 
     auto platformLocale = [&] -> String {
-        auto locale = style->computedLocale();
+        auto locale = style->usedLocale();
         if (locale.isAuto())
             return defaultLanguage(ShouldMinimizeLanguages::No);
         return Style::toPlatform(locale);
@@ -837,7 +837,7 @@ ControlStyle RenderTheme::extractControlStyleForRenderer(const RenderElement& re
     CheckedRef style = renderer->style();
     return {
         extractControlStyleStatesForRendererInternal(*renderer),
-        style->computedFontSize(),
+        style->usedFontSize(),
         style->usedZoom(),
         style->usedAccentColor(renderObject.styleColorOptions()),
         style->visitedDependentColorApplyingColorFilter(),
@@ -1500,6 +1500,8 @@ void RenderTheme::adjustButtonOrCheckboxOrColorWellOrInnerSpinButtonOrRadioStyle
     if (auto controlFont = this->controlFont(appearance, fontCascade.get(), style.usedZoom())) {
         // If overriding the specified font with the theme font, also override the line height with the standard line height.
         style.setLineHeight(Style::ComputedStyle::initialLineHeight());
+        style.setTextAutosizingAdjustedLineHeight(Style::ComputedStyle::initialLineHeight());
+
         style.setFontDescription(WTF::move(controlFont.value()));
     }
 
@@ -1642,16 +1644,16 @@ void RenderTheme::paintSliderTicks(const RenderElement& renderer, const PaintInf
 
 void RenderTheme::paintPlatformResizer(const RenderLayerModelObject& renderer, GraphicsContext& context, const LayoutRect& resizerCornerRect)
 {
-    RefPtr<Image> resizeCornerImage;
+    RefPtr<BitmapImage> resizeCornerImage;
     FloatSize cornerResizerSize;
     Ref document = renderer.document();
     if (document->deviceScaleFactor() >= 2) {
-        static NeverDestroyed<Image*> resizeCornerImageHiRes(&ImageAdapter::loadPlatformResource("textAreaResizeCorner@2x").leakRef());
+        static NeverDestroyed<BitmapImage*> resizeCornerImageHiRes(&ImageAdapter::loadPlatformResource("textAreaResizeCorner@2x").leakRef());
         resizeCornerImage = resizeCornerImageHiRes;
         cornerResizerSize = resizeCornerImage->size();
         cornerResizerSize.scale(0.5f);
     } else {
-        static NeverDestroyed<Image*> resizeCornerImageLoRes(&ImageAdapter::loadPlatformResource("textAreaResizeCorner").leakRef());
+        static NeverDestroyed<BitmapImage*> resizeCornerImageLoRes(&ImageAdapter::loadPlatformResource("textAreaResizeCorner").leakRef());
         resizeCornerImage = resizeCornerImageLoRes;
         cornerResizerSize = resizeCornerImage->size();
     }
@@ -1661,14 +1663,14 @@ void RenderTheme::paintPlatformResizer(const RenderLayerModelObject& renderer, G
         context.translate(resizerCornerRect.x() + cornerResizerSize.width(), resizerCornerRect.y() + resizerCornerRect.height() - cornerResizerSize.height());
         context.scale(FloatSize(-1.0, 1.0));
         if (resizeCornerImage)
-            context.drawImage(*resizeCornerImage, FloatRect(FloatPoint(), cornerResizerSize));
+            context.drawBitmapImage(*resizeCornerImage, FloatRect { FloatPoint { }, cornerResizerSize });
         return;
     }
 
     if (!resizeCornerImage)
         return;
     FloatRect imageRect = snapRectToDevicePixels(LayoutRect(resizerCornerRect.maxXMaxYCorner() - cornerResizerSize, cornerResizerSize), document->deviceScaleFactor());
-    context.drawImage(*resizeCornerImage, imageRect);
+    context.drawBitmapImage(*resizeCornerImage, imageRect);
 }
 
 void RenderTheme::paintPlatformResizerFrame(const RenderLayerModelObject&, GraphicsContext& context, const LayoutRect& resizerAbsRect)
@@ -1870,10 +1872,6 @@ Color RenderTheme::systemColor(CSSValueID cssValueId, OptionSet<StyleColorOption
 
     // Non-standard addition.
     case CSSValueActivebuttontext:
-        return Color::black;
-
-    // Non-standard addition.
-    case CSSValueText:
         return Color::black;
 
     // Non-standard addition.

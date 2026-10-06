@@ -242,7 +242,7 @@ extension WebGPU.CommandEncoder {
 
         commandBuffer?.label = CxxBridging.convertWTFStringToNSString(descriptor.label)
 
-        #if arch(x86_64) && (os(macOS) || targetEnvironment(macCatalyst))
+        #if arch(x86_64) && (WTF_PLATFORM_MAC || WTF_PLATFORM_MACCATALYST)
         if (m_managedBuffers?.count ?? 0) != 0 || (m_managedTextures?.count ?? 0) != 0 {
             let blitCommandEncoder = commandBuffer?.makeBlitCommandEncoder()
 
@@ -268,7 +268,7 @@ extension WebGPU.CommandEncoder {
 
             blitCommandEncoder?.endEncoding()
         }
-        #endif // arch(x86_64) && (os(macOS) || targetEnvironment(macCatalyst))
+        #endif // arch(x86_64) && (WTF_PLATFORM_MAC || WTF_PLATFORM_MACCATALYST)
 
         let result = createCommandBuffer(commandBuffer, m_device.ptr(), m_sharedEvent, m_sharedEventSignalValue)
         m_sharedEvent = nil
@@ -304,6 +304,13 @@ extension WebGPU.CommandEncoder {
         _ blitCommandEncoder: (any MTLBlitCommandEncoder)?
     ) {
         if blitCommandEncoder == nil || texture.previouslyCleared(UInt32(mipLevel), UInt32(slice)) {
+            return
+        }
+
+        // A transient texture is memoryless, so it cannot be the destination of a blit. Its contents
+        // never exist outside of the render pass which produces them, and every render pass using it
+        // has to clear it, so there is nothing to lazily initialize here.
+        if (texture.usage() & WGPUTextureUsage_Transient) != 0 {
             return
         }
 
@@ -603,11 +610,11 @@ extension WebGPU.CommandEncoder {
             return errorString("destination buffer is not valid")
         }
 
-        if source.usage() & WGPUBufferUsage_CopySrc.rawValue == 0 {
+        if source.usage() & WGPUBufferUsage_CopySrc == 0 {
             return errorString("source usage does not have COPY_SRC")
         }
 
-        if destination.usage() & WGPUBufferUsage_CopyDst.rawValue == 0 {
+        if destination.usage() & WGPUBufferUsage_CopyDst == 0 {
             return errorString("destination usage does not have COPY_DST")
         }
 
@@ -696,7 +703,7 @@ extension WebGPU.CommandEncoder {
             return errorString(error)
         }
 
-        if sourceTexture.usage() & WGPUTextureUsage_CopySrc.rawValue == 0 {
+        if sourceTexture.usage() & WGPUTextureUsage_CopySrc == 0 {
             return errorString("source texture usage does not contain CopySrc")
         }
 
@@ -704,7 +711,7 @@ extension WebGPU.CommandEncoder {
             return errorString(error)
         }
 
-        if destinationTexture.usage() & WGPUTextureUsage_CopyDst.rawValue == 0 {
+        if destinationTexture.usage() & WGPUTextureUsage_CopyDst == 0 {
             return errorString("destination texture usage does not contain CopyDst")
         }
 
@@ -790,7 +797,7 @@ extension WebGPU.CommandEncoder {
             return errorString(error)
         }
 
-        if sourceTexture.usage() & WGPUTextureUsage_CopySrc.rawValue == 0 {
+        if sourceTexture.usage() & WGPUTextureUsage_CopySrc == 0 {
             return errorString("sourceTexture usage does not contain CopySrc")
         }
 
@@ -816,7 +823,7 @@ extension WebGPU.CommandEncoder {
             return errorString(error)
         }
 
-        if WebGPU.fromAPI(destination.buffer).usage() & WGPUBufferUsage_CopyDst.rawValue == 0 {
+        if WebGPU.fromAPI(destination.buffer).usage() & WGPUBufferUsage_CopyDst == 0 {
             return errorString("destination buffer usage does not contain CopyDst")
         }
 
@@ -877,7 +884,7 @@ extension WebGPU.CommandEncoder {
             return errorString(error)
         }
 
-        if sourceBuffer.usage() & WGPUBufferUsage_CopySrc.rawValue == 0 {
+        if sourceBuffer.usage() & WGPUBufferUsage_CopySrc == 0 {
             return errorString("source usage does not contain CopySrc")
         }
 
@@ -889,7 +896,7 @@ extension WebGPU.CommandEncoder {
             return errorString(error)
         }
 
-        if destinationTexture.usage() & WGPUTextureUsage_CopyDst.rawValue == 0 {
+        if destinationTexture.usage() & WGPUTextureUsage_CopyDst == 0 {
             return errorString("destination usage does not contain CopyDst")
         }
 
@@ -952,18 +959,12 @@ extension WebGPU.CommandEncoder {
         let collection = CollectionOfOne(descriptor)
         let descriptorSpan = collection.span
         if let timestampWrites = wgpuGetRenderPassDescriptorTimestampWrites(descriptorSpan)?[0] {
-            return errorValidatingTimestampWrites(
-                timestampWrites: WGPUComputePassTimestampWrites(
-                    querySet: timestampWrites.querySet,
-                    beginningOfPassWriteIndex: timestampWrites.beginningOfPassWriteIndex,
-                    endOfPassWriteIndex: timestampWrites.endOfPassWriteIndex
-                )
-            )
+            return errorValidatingTimestampWrites(timestampWrites: timestampWrites)
         }
         return nil
     }
 
-    private func errorValidatingTimestampWrites(timestampWrites: WGPUComputePassTimestampWrites) -> String? {
+    private func errorValidatingTimestampWrites(timestampWrites: WGPUPassTimestampWrites) -> String? {
         if !m_device.ptr().hasFeature(WGPUFeatureName_TimestampQuery) {
             return "device does not have timestamp query feature"
         }
@@ -1043,7 +1044,10 @@ extension WebGPU.CommandEncoder {
 
         guard prepareTheEncoderState() else {
             self.generateInvalidEncoderStateError()
-            return WebGPU.RenderPassEncoder.createInvalid(self, m_device.ptr(), "encoder state is not valid")
+            // https://gpuweb.github.io/gpuweb/#dom-gpurenderpassencoder-end
+            // A pass begun while the command encoder was already locked by another pass never took
+            // the encoder over. Ending it is a validation error the page can catch, not a no-op.
+            return WebGPU.RenderPassEncoder.createInvalidWithEncoderStateNotOpen(self, m_device.ptr(), "encoder state is not valid")
         }
 
         if let error = errorValidatingRenderPassDescriptor(descriptor: descriptor) {
@@ -1157,7 +1161,7 @@ extension WebGPU.CommandEncoder {
 
                 let textureIsDestroyed = texture.isDestroyed()
                 if !textureIsDestroyed {
-                    if (texture.usage() & WGPUTextureUsage_RenderAttachment.rawValue) == 0
+                    if (texture.usage() & WGPUTextureUsage_RenderAttachment) == 0
                         || !WebGPU.Texture.isColorRenderableFormat(textureFormat, m_device.ptr())
                     {
                         return WebGPU.RenderPassEncoder.createInvalid(self, m_device.ptr(), "color attachment is not renderable")
@@ -1180,7 +1184,7 @@ extension WebGPU.CommandEncoder {
                 mtlAttachment.level = 0
                 mtlAttachment.slice = 0
                 var depthSliceOrArrayLayer: UInt64 = 0
-                // FIMXE: (rdar://170907318) This should be changed to `if let` when possible.
+                // FIXME: (rdar://170907318) This should be changed to `if let` when possible.
                 if var depthSlice = Optional(fromCxx: attachment.depthSlice) {
                     if !texture.is3DTexture() {
                         return WebGPU.RenderPassEncoder.createInvalid(self, m_device.ptr(), "depthSlice specified on 2D texture")
@@ -1242,7 +1246,7 @@ extension WebGPU.CommandEncoder {
                     }
                     resolveTarget.setCommandEncoder(self)
                     let resolveTexture = resolveTarget.texture()
-                    // FIMXE: (rdar://170907318) This should be changed to `guard let` when possible.
+                    // FIXME: (rdar://170907318) This should be changed to `guard let` when possible.
                     guard var resolveTexture, var mtlTexture else {
                         return WebGPU.RenderPassEncoder.createInvalid(self, m_device.ptr(), "resolveTexture/mtlTexture is nil")
                     }
@@ -1272,17 +1276,17 @@ extension WebGPU.CommandEncoder {
                     compositorTextureSlice = compositorTexture.parentRelativeSlice()
                 }
 
-                // FIMXE: (rdar://170907318) This should be changed to `if let` when possible.
+                // FIXME: (rdar://170907318) This should be changed to `if let` when possible.
                 if var textureToClear {
                     let textureWithResolve = TextureAndClearColor(texture: textureToClear)
                     attachmentsToClear[i as NSNumber] = textureWithResolve
                     texture.setPreviouslyCleared()
-                    // FIMXE: (rdar://170907318) This should be changed to `if let` when possible.
+                    // FIXME: (rdar://170907318) This should be changed to `if let` when possible.
                     if var resolveTarget = attachment.resolveTarget {
                         // FIXME: rdar://138042799 remove default argument.
                         WebGPU.fromAPI(resolveTarget).setPreviouslyCleared(0, 0)
                     }
-                    // FIMXE: (rdar://170907318) This should be changed to `if let` when possible.
+                    // FIXME: (rdar://170907318) This should be changed to `if let` when possible.
                     if var resolveTexture = attachment.resolveTexture {
                         WebGPU.fromAPI(resolveTexture).setPreviouslyCleared()
                     }
@@ -1323,13 +1327,20 @@ extension WebGPU.CommandEncoder {
                         "depth stencil texture has more than one array layer or mip level"
                     )
                 }
+            }
 
-                if !WebGPU.Texture.isDepthStencilRenderableFormat(
-                    textureView.format(),
-                    m_device.ptr()
-                ) || !WebGPU.isRenderableTextureView(textureView, attachment.depthLoadOp, attachment.depthStoreOp) {
-                    return WebGPU.RenderPassEncoder.createInvalid(self, m_device.ptr(), "depth stencil texture is not renderable")
-                }
+            if !WebGPU.isRenderableDepthStencilTextureView(
+                textureView,
+                m_device.ptr(),
+                isDestroyed,
+                hasDepthComponent,
+                attachment.depthLoadOp,
+                attachment.depthStoreOp,
+                hasStencilComponent,
+                attachment.stencilLoadOp,
+                attachment.stencilStoreOp
+            ) {
+                return WebGPU.RenderPassEncoder.createInvalid(self, m_device.ptr(), "depth stencil texture is not renderable")
             }
 
             depthReadOnly = attachment.depthReadOnly != 0
@@ -1378,9 +1389,13 @@ extension WebGPU.CommandEncoder {
 
             if zeroColorTargets {
                 if isDestroyed {
-                    return WebGPU.RenderPassEncoder.createInvalid(self, m_device.ptr(), "no color targets and depth-stencil texture is destroyed")
+                    return WebGPU.RenderPassEncoder.createInvalid(
+                        self,
+                        m_device.ptr(),
+                        "no color targets and depth-stencil texture is destroyed"
+                    )
                 }
-                // FIMXE: (rdar://170907318) This should be changed to `guard let` when possible.
+                // FIXME: (rdar://170907318) This should be changed to `guard let` when possible.
                 guard var metalDepthStencilTexture, metalDepthStencilTexture.sampleCount > 0 else {
                     return WebGPU.RenderPassEncoder.createInvalid(self, m_device.ptr(), "no color targets and depth-stencil texture is nil")
                 }
@@ -1631,7 +1646,11 @@ extension WebGPU.CommandEncoder {
         }
 
         destinationBytesPerRow = roundUpToMultipleOfNonPowerOfTwoCheckedUInt32UnsignedLong(blockSize, destinationBytesPerRow)
-        if textureDimension == WGPUTextureDimension_3D && copySize.depthOrArrayLayers <= 1 && copySize.height <= 1 {
+        let blockHeight = WebGPU.Texture.texelBlockHeight(aspectSpecificFormat)
+        guard blockHeight != 0 else {
+            return
+        }
+        if textureDimension == WGPUTextureDimension_3D && copySize.depthOrArrayLayers <= 1 && copySize.height <= blockHeight {
             destinationBytesPerRow = 0
         }
 
@@ -1663,17 +1682,17 @@ extension WebGPU.CommandEncoder {
                 guard !didOverflow else {
                     return
                 }
-                for y in 0..<copySize.height {
+                for y in stride(from: 0, to: copySize.height, by: Int(blockHeight)) {
                     var yPlusOriginY = source.origin.y
                     (yPlusOriginY, didOverflow) = yPlusOriginY.addingReportingOverflow(y)
                     guard !didOverflow else {
                         return
                     }
-                    var yTimesDestinationBytesPerRow = y
+                    var blockRowTimesDestinationBytesPerRow = y / blockHeight
                     guard destinationBytesPerRow <= UInt32.max else {
                         return
                     }
-                    (yTimesDestinationBytesPerRow, didOverflow) = yTimesDestinationBytesPerRow.multipliedReportingOverflow(
+                    (blockRowTimesDestinationBytesPerRow, didOverflow) = blockRowTimesDestinationBytesPerRow.multipliedReportingOverflow(
                         by: UInt32(destinationBytesPerRow)
                     )
                     guard !didOverflow else {
@@ -1690,7 +1709,7 @@ extension WebGPU.CommandEncoder {
                     guard !didOverflow else {
                         return
                     }
-                    (tripleSum, didOverflow) = tripleSum.addingReportingOverflow(UInt64(yTimesDestinationBytesPerRow))
+                    (tripleSum, didOverflow) = tripleSum.addingReportingOverflow(UInt64(blockRowTimesDestinationBytesPerRow))
                     guard !didOverflow else {
                         return
                     }
@@ -1707,7 +1726,7 @@ extension WebGPU.CommandEncoder {
                         destination: newDestination,
                         copySize: WGPUExtent3D(
                             width: copySize.width,
-                            height: 1,
+                            height: blockHeight,
                             depthOrArrayLayers: 1
                         )
                     )
@@ -1984,7 +2003,11 @@ extension WebGPU.CommandEncoder {
         }
         let maxSourceBytesPerRow =
             textureDimension == WGPUTextureDimension_3D ? (2048 * blockSize.value()) : sourceBytesPerRow
-        if textureDimension == WGPUTextureDimension_3D && copySize.depthOrArrayLayers <= 1 && copySize.height <= 1 {
+        let blockHeight = WebGPU.Texture.texelBlockHeight(aspectSpecificFormat)
+        guard blockHeight != 0 else {
+            return
+        }
+        if textureDimension == WGPUTextureDimension_3D && copySize.depthOrArrayLayers <= 1 && copySize.height <= blockHeight {
             sourceBytesPerRow = 0
         }
         if sourceBytesPerRow > maxSourceBytesPerRow {
@@ -2005,14 +2028,16 @@ extension WebGPU.CommandEncoder {
                 guard let sourceBytesPerRowU32 = UInt32(exactly: sourceBytesPerRow) else {
                     return
                 }
-                for y in 0..<copySize.height {
-                    var yTimesSourceBytesPerRow = y
-                    (yTimesSourceBytesPerRow, didOverflow) = yTimesSourceBytesPerRow.multipliedReportingOverflow(by: sourceBytesPerRowU32)
+                for y in stride(from: 0, to: copySize.height, by: Int(blockHeight)) {
+                    var blockRowTimesSourceBytesPerRow = y / blockHeight
+                    (blockRowTimesSourceBytesPerRow, didOverflow) = blockRowTimesSourceBytesPerRow.multipliedReportingOverflow(
+                        by: sourceBytesPerRowU32
+                    )
                     guard !didOverflow else {
                         return
                     }
                     var tripleSum = UInt64(zTimesSourceBytesPerImage)
-                    (tripleSum, didOverflow) = tripleSum.addingReportingOverflow(UInt64(yTimesSourceBytesPerRow))
+                    (tripleSum, didOverflow) = tripleSum.addingReportingOverflow(UInt64(blockRowTimesSourceBytesPerRow))
                     guard !didOverflow else {
                         return
                     }
@@ -2046,7 +2071,7 @@ extension WebGPU.CommandEncoder {
                     copyBufferToTexture(
                         source: newSource,
                         destination: newDestination,
-                        copySize: WGPUExtent3D(width: copySize.width, height: 1, depthOrArrayLayers: 1),
+                        copySize: WGPUExtent3D(width: copySize.width, height: blockHeight, depthOrArrayLayers: 1),
                     )
                 }
             }
@@ -2328,7 +2353,7 @@ extension WebGPU.CommandEncoder {
         if !destination.isDestroyed() && !destination.isValid() {
             return false
         }
-        if (destination.usage() & WGPUBufferUsage_QueryResolve.rawValue) == 0 {
+        if (destination.usage() & WGPUBufferUsage_QueryResolve) == 0 {
             return false
         }
 
@@ -2552,7 +2577,10 @@ extension WebGPU.CommandEncoder {
 
         guard prepareTheEncoderState() else {
             self.generateInvalidEncoderStateError()
-            return WebGPU.ComputePassEncoder.createInvalid(self, m_device.ptr(), "encoder state is invalid")
+            // https://gpuweb.github.io/gpuweb/#dom-gpucomputepassencoder-end
+            // A pass begun while the command encoder was already locked by another pass never took
+            // the encoder over. Ending it is a validation error the page can catch, not a no-op.
+            return WebGPU.ComputePassEncoder.createInvalidWithEncoderStateNotOpen(self, m_device.ptr(), "encoder state is invalid")
         }
 
         if let error = self.errorValidatingComputePassDescriptor(descriptor: descriptor) {

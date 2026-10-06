@@ -36,6 +36,7 @@
 #include "RemoteWorkerInitializationData.h"
 #include "RemoteWorkerLibWebRTCProvider.h"
 #include "ServiceWorkerFetchTaskMessages.h"
+#include "SharedBufferReference.h"
 #include "WebBadgeClient.h"
 #include "WebBroadcastChannelRegistry.h"
 #include "WebCacheStorageProvider.h"
@@ -64,6 +65,7 @@
 #include <WebCore/MessageWithMessagePorts.h>
 #include <WebCore/NotificationData.h>
 #include <WebCore/PageConfiguration.h>
+#include <WebCore/PendingStreamState.h>
 #include <WebCore/RemoteFrameClient.h>
 #include <WebCore/ScriptExecutionContextIdentifier.h>
 #include <WebCore/SerializedScriptValue.h>
@@ -196,7 +198,7 @@ void WebSWContextManagerConnection::installServiceWorker(ServiceWorkerContextDat
         if (WebProcess::singleton().isLockdownModeEnabled())
             WebPage::adjustSettingsForLockdownMode(page->settings(), m_preferencesStore ? &m_preferencesStore.value() : nullptr);
 
-        page->setupForRemoteWorker(contextData.scriptURL, contextData.registration.key.topOrigin(), contextData.referrerPolicy, advancedPrivacyProtections);
+        page->setupForRemoteWorker(contextData.scriptURL, contextData.registration.key.topOrigin(), contextData.referrerPolicy, advancedPrivacyProtections, contextData.globalPrivacyControlEnabled);
 
         std::unique_ptr<WebCore::NotificationClient> notificationClient;
 #if ENABLE(NOTIFICATIONS)
@@ -325,15 +327,40 @@ void WebSWContextManagerConnection::startFetch(SWServerConnectionIdentifier serv
         m_ongoingNavigationFetchTasks.add({ serverConnectionIdentifier, fetchIdentifier }, Ref { client });
 
     request.setHTTPBody(formData.takeData());
+    if (RefPtr body = request.httpBody(); body && body->isPendingStream()) {
+        Ref pendingStreamState = WebCore::PendingStreamState::create();
+        pendingStreamState->setServiceWorkerFetchIdentifier(fetchIdentifier);
+        pendingStreamState->setQueueDrainedHandler([connection = m_connectionToNetworkProcess, fetchIdentifier] {
+            connection->send(Messages::WebSWServerToContextConnection::PendingStreamUploadNeedData { fetchIdentifier }, 0);
+        });
+        body->setPendingStreamState(WTF::move(pendingStreamState));
+    }
     serviceWorkerThreadProxy->startFetch(serverConnectionIdentifier, fetchIdentifier, WTF::move(client), WTF::move(request), WTF::move(referrer), WTF::move(options), isServiceWorkerNavigationPreloadEnabled, WTF::move(clientIdentifier), WTF::move(resultingClientIdentifier));
 }
 
 void WebSWContextManagerConnection::postMessageToServiceWorker(ServiceWorkerIdentifier serviceWorkerIdentifier, MessageWithMessagePorts&& message, ServiceWorkerOrClientData&& sourceData)
 {
+    postMessageToServiceWorkerInternal(serviceWorkerIdentifier, WTF::move(message), WTF::move(sourceData), { });
+}
+
+void WebSWContextManagerConnection::postMessageToServiceWorkerAndNotifyWhenDispatched(ServiceWorkerIdentifier serviceWorkerIdentifier, MessageWithMessagePorts&& message, ServiceWorkerOrClientData&& sourceData, CompletionHandler<void()>&& completionHandler)
+{
     assertIsCurrent(m_queue.get());
 
-    if (auto serviceWorkerThreadProxy = SWContextManager::singleton().serviceWorkerThreadProxyFromBackgroundThread(serviceWorkerIdentifier))
-        serviceWorkerThreadProxy->fireMessageEvent(WTF::move(message), WTF::move(sourceData));
+    postMessageToServiceWorkerInternal(serviceWorkerIdentifier, WTF::move(message), WTF::move(sourceData), CompletionHandlerCallingScope { CompletionHandler<void()> { [queue = m_queue, completionHandler = WTF::move(completionHandler)]() mutable {
+        queue->dispatch(WTF::move(completionHandler));
+    }, CompletionHandlerCallThread::AnyThread } });
+}
+
+void WebSWContextManagerConnection::postMessageToServiceWorkerInternal(ServiceWorkerIdentifier serviceWorkerIdentifier, MessageWithMessagePorts&& message, ServiceWorkerOrClientData&& sourceData, CompletionHandlerCallingScope&& messageDispatched)
+{
+    assertIsCurrent(m_queue.get());
+
+    auto serviceWorkerThreadProxy = SWContextManager::singleton().serviceWorkerThreadProxyFromBackgroundThread(serviceWorkerIdentifier);
+    if (!serviceWorkerThreadProxy)
+        return;
+
+    serviceWorkerThreadProxy->fireMessageEvent(WTF::move(message), WTF::move(sourceData), WTF::move(messageDispatched));
 }
 
 void WebSWContextManagerConnection::fireInstallEvent(ServiceWorkerIdentifier identifier)
@@ -496,7 +523,14 @@ void WebSWContextManagerConnection::postMessageToServiceWorkerClient(const Scrip
     for (auto& port : message.transferredPorts)
         WebMessagePortChannelProvider::singleton().messagePortSentToRemote(port.first);
 
-    m_connectionToNetworkProcess->send(Messages::WebSWServerToContextConnection::PostMessageToServiceWorkerClient(destinationIdentifier, message, sourceIdentifier, sourceOrigin), 0);
+    Vector<URL> blobURLs;
+    if (auto& serializedScriptValue = message.message) {
+        blobURLs = serializedScriptValue->blobURLs().map([](auto& blobURL) {
+            return URL { blobURL };
+        });
+    }
+
+    m_connectionToNetworkProcess->send(Messages::WebSWServerToContextConnection::PostMessageToServiceWorkerClient(destinationIdentifier, message, sourceIdentifier, sourceOrigin, WTF::move(blobURLs)), 0);
 }
 
 void WebSWContextManagerConnection::didFinishInstall(std::optional<ServiceWorkerJobDataIdentifier> jobDataIdentifier, ServiceWorkerIdentifier serviceWorkerIdentifier, bool wasSuccessful)
@@ -643,6 +677,65 @@ void WebSWContextManagerConnection::removeNavigationFetch(WebCore::SWServerConne
         assertIsCurrent(protectedThis->m_queue.get());
         protectedThis->m_ongoingNavigationFetchTasks.remove({ serverConnectionIdentifier, fetchIdentifier });
     });
+}
+
+void WebSWContextManagerConnection::startPendingStreamUploadForwarding(WebCore::PendingStreamState& state)
+{
+    auto fetchIdentifier = state.serviceWorkerFetchIdentifier();
+    ASSERT(fetchIdentifier);
+    if (!fetchIdentifier) {
+        state.errorStream(-1);
+        return;
+    }
+
+    m_queue->dispatch([protectedThis = Ref { *this }, state = Ref { state }, fetchIdentifier = *fetchIdentifier]() mutable {
+        assertIsCurrent(protectedThis->m_queue.get());
+        protectedThis->m_requestPendingStreamStates.add(fetchIdentifier, WTF::move(state));
+        protectedThis->m_connectionToNetworkProcess->send(Messages::WebSWServerToContextConnection::StartPendingStreamUploadForwarding { fetchIdentifier }, 0);
+    });
+}
+
+void WebSWContextManagerConnection::cancelPendingStreamUploadForwarding(WebCore::PendingStreamState& state)
+{
+    auto fetchIdentifier = state.serviceWorkerFetchIdentifier();
+    if (!fetchIdentifier)
+        return;
+
+    m_queue->dispatch([protectedThis = Ref { *this }, fetchIdentifier = *fetchIdentifier] {
+        assertIsCurrent(protectedThis->m_queue.get());
+        if (!protectedThis->m_requestPendingStreamStates.remove(fetchIdentifier))
+            return;
+        protectedThis->m_connectionToNetworkProcess->send(Messages::WebSWServerToContextConnection::CancelPendingStreamUploadForwarding { fetchIdentifier }, 0);
+    });
+}
+
+void WebSWContextManagerConnection::forwardPendingStreamUploadData(WebCore::FetchIdentifier fetchIdentifier, IPC::SharedBufferReference&& chunk)
+{
+    assertIsCurrent(m_queue.get());
+
+    RefPtr state = m_requestPendingStreamStates.get(fetchIdentifier);
+    if (!state)
+        return;
+    RefPtr buffer = chunk.unsafeBuffer();
+    if (!buffer)
+        return;
+    state->appendData(buffer.releaseNonNull());
+}
+
+void WebSWContextManagerConnection::forwardPendingStreamUploadEnd(WebCore::FetchIdentifier fetchIdentifier)
+{
+    assertIsCurrent(m_queue.get());
+
+    if (RefPtr state = m_requestPendingStreamStates.take(fetchIdentifier))
+        state->endStream();
+}
+
+void WebSWContextManagerConnection::forwardPendingStreamUploadError(WebCore::FetchIdentifier fetchIdentifier)
+{
+    assertIsCurrent(m_queue.get());
+
+    if (RefPtr state = m_requestPendingStreamStates.take(fetchIdentifier))
+        state->errorStream(-1);
 }
 
 #if ENABLE(REMOTE_INSPECTOR) && PLATFORM(COCOA)

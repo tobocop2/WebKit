@@ -34,6 +34,7 @@
 #include <wtf/Function.h>
 #include <wtf/Lock.h>
 #include <wtf/LoggerHelper.h>
+#include <wtf/NativePromise.h>
 #include <wtf/RefCounted.h>
 #include <wtf/ThreadSafeWeakPtr.h>
 
@@ -167,6 +168,7 @@ protected:
 
     // MediaPlayerPrivatePrivateInterface overrides.
     void load(const String& url) override;
+    void load(const URL&, const LoadOptions&) override;
 #if ENABLE(MEDIA_SOURCE)
     void load(const URL&, const LoadOptions&, MediaSourcePrivateClient&) override;
 #endif
@@ -189,8 +191,8 @@ protected:
     void setViewportVisibility(ViewportVisibility) final;
     MediaTime duration() const override;
     MediaTime currentTime() const override = 0;
-    void seekToTarget(const SeekTarget&) final;
-    bool seeking() const final;
+    Ref<MediaTimePromise> seekToTarget(const SeekTarget&) final;
+    bool seeking() const;
     bool paused() const override;
     void setVolume(float) override = 0;
     bool hasClosedCaptions() const override { return m_cachedHasCaptions; }
@@ -201,7 +203,7 @@ protected:
     const PlatformTimeRanges& buffered() const override;
     bool didLoadingProgress() const override;
     void paint(GraphicsContext&, const FloatRect&) override = 0;
-    DestinationColorSpace colorSpace() override = 0;
+    ColorSpace colorSpace() override = 0;
     void paintCurrentFrameInContext(GraphicsContext&, const FloatRect&) override = 0;
     void setPreload(MediaPlayer::Preload) override;
     PlatformLayer* platformLayer() const override { return 0; }
@@ -350,6 +352,7 @@ protected:
     RefPtr<SecurityOrigin> m_resolvedOrigin;
 
     MediaPlayer::Preload m_preload;
+    std::optional<MediaTimePromise::AutoRejectProducer> m_seekPromise;
 
 #if !RELEASE_LOG_DISABLED
     const Ref<const Logger> m_logger;
@@ -378,6 +381,11 @@ protected:
     bool m_seeking;
     bool m_needsRenderingModeChanged { false };
     ViewportVisibility m_viewportVisibility { ViewportVisibility::NotVisible };
+    bool m_disableTeardownOnVisibilityChange { false };
+
+private:
+    void seekInternal(const SeekTarget&);
+    void resolveSeekPromiseIfNeeded();
 };
 
 String convertEnumerationToString(MediaPlayerPrivateAVFoundation::MediaRenderingMode);

@@ -38,9 +38,9 @@ namespace WebCore::WebGPU {
 
 static String adapterName(WGPUAdapter adapter)
 {
-    WGPUAdapterProperties properties;
-    wgpuAdapterGetProperties(adapter, &properties);
-    return String::fromLatin1(properties.name);
+    WGPUAdapterInfo info;
+    wgpuAdapterGetInfo(adapter, &info);
+    return String::fromLatin1(info.name);
 }
 
 static Ref<SupportedFeatures> supportedFeatures(const Vector<WGPUFeatureName>& features)
@@ -119,15 +119,29 @@ static Ref<SupportedLimits> supportedLimits(WGPUAdapter adapter)
 
 static bool isFallbackAdapter(WGPUAdapter adapter)
 {
-    WGPUAdapterProperties properties;
-    wgpuAdapterGetProperties(adapter, &properties);
-    return properties.adapterType == WGPUAdapterType_CPU;
+    WGPUAdapterInfo info;
+    wgpuAdapterGetInfo(adapter, &info);
+    return info.adapterType == WGPUAdapterType_CPU;
+}
+
+static uint32_t subgroupMinSize(WGPUAdapter adapter)
+{
+    WGPUAdapterInfo info;
+    wgpuAdapterGetInfo(adapter, &info);
+    return info.subgroupMinSize;
+}
+
+static uint32_t subgroupMaxSize(WGPUAdapter adapter)
+{
+    WGPUAdapterInfo info;
+    wgpuAdapterGetInfo(adapter, &info);
+    return info.subgroupMaxSize;
 }
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(AdapterImpl);
 
 AdapterImpl::AdapterImpl(WebGPUPtr<WGPUAdapter>&& adapter, ConvertToBackingContext& convertToBackingContext)
-    : Adapter(adapterName(adapter.get()), supportedFeatures(adapter.get()), supportedLimits(adapter.get()), WebGPU::isFallbackAdapter(adapter.get()))
+    : Adapter(adapterName(adapter.get()), supportedFeatures(adapter.get()), supportedLimits(adapter.get()), WebGPU::isFallbackAdapter(adapter.get()), WebGPU::subgroupMinSize(adapter.get()), WebGPU::subgroupMaxSize(adapter.get()))
     , m_backing(WTF::move(adapter))
     , m_convertToBackingContext(convertToBackingContext)
 {
@@ -180,11 +194,14 @@ static void requestDeviceCallback(WGPURequestDeviceStatus status, WGPUDevice dev
 
 void AdapterImpl::requestDevice(const DeviceDescriptor& descriptor, CompletionHandler<void(RefPtr<Device>&&)>&& callback)
 {
-    auto label = descriptor.label.utf8();
+    auto label = toBackingStringView(descriptor.label);
 
     auto features = descriptor.requiredFeatures.map([&convertToBackingContext = m_convertToBackingContext.get()](auto featureName) {
         return convertToBackingContext.convertToBacking(featureName);
     });
+
+    if (features.contains(WGPUFeatureName_TextureFormatsTier2) && !features.contains(WGPUFeatureName_TextureFormatsTier1))
+        features.append(WGPUFeatureName_TextureFormatsTier1);
 
     if (features.contains(WGPUFeatureName_TextureFormatsTier1) && !features.contains(WGPUFeatureName_RG11B10UfloatRenderable))
         features.append(WGPUFeatureName_RG11B10UfloatRenderable);
@@ -258,15 +275,40 @@ void AdapterImpl::requestDevice(const DeviceDescriptor& descriptor, CompletionHa
 #undef SET_MAX_VALUE
     }
 
+    // https://gpuweb.github.io/gpuweb/#limits
+    // The combined maxStorage{Buffers,Textures}PerShaderStage limits and their per-stage counterparts
+    // auto-upgrade each other, so a page that only knows one spelling still gets the capacity it asked
+    // for: naming a per-stage limit raises the combined limit to match, and naming only the combined
+    // limit fills in the per-stage limits it implies.
+    const auto& wasRequested = [&](ASCIILiteral name) {
+        return descriptor.requiredLimits.containsIf([&](auto& pair) {
+            return pair.key == name;
+        });
+    };
+
+    if (wasRequested("maxStorageBuffersInVertexStage"_s) || wasRequested("maxStorageBuffersInFragmentStage"_s))
+        limits.maxStorageBuffersPerShaderStage = std::max({ limits.maxStorageBuffersPerShaderStage, limits.maxStorageBuffersInVertexStage, limits.maxStorageBuffersInFragmentStage });
+    else if (wasRequested("maxStorageBuffersPerShaderStage"_s)) {
+        limits.maxStorageBuffersInVertexStage = std::min(limits.maxStorageBuffersPerShaderStage, supportedLimits.maxStorageBuffersInVertexStage());
+        limits.maxStorageBuffersInFragmentStage = std::min(limits.maxStorageBuffersPerShaderStage, supportedLimits.maxStorageBuffersInFragmentStage());
+    }
+
+    if (wasRequested("maxStorageTexturesInVertexStage"_s) || wasRequested("maxStorageTexturesInFragmentStage"_s))
+        limits.maxStorageTexturesPerShaderStage = std::max({ limits.maxStorageTexturesPerShaderStage, limits.maxStorageTexturesInVertexStage, limits.maxStorageTexturesInFragmentStage });
+    else if (wasRequested("maxStorageTexturesPerShaderStage"_s)) {
+        limits.maxStorageTexturesInVertexStage = std::min(limits.maxStorageTexturesPerShaderStage, supportedLimits.maxStorageTexturesInVertexStage());
+        limits.maxStorageTexturesInFragmentStage = std::min(limits.maxStorageTexturesPerShaderStage, supportedLimits.maxStorageTexturesInFragmentStage());
+    }
+
     WGPURequiredLimits requiredLimits { .limits = WTF::move(limits) };
 
     WGPUDeviceDescriptor backingDescriptor {
-        .label = label.data(),
+        .label = label,
         .requiredFeatureCount = features.size(),
         .requiredFeatures = features.size() ? features.span().data() : nullptr,
         .requiredLimits = &requiredLimits,
         .defaultQueue = {
-            .label = "queue"
+            .label = toBackingStringView("queue"_s)
         },
         .deviceLostCallback = nullptr,
         .deviceLostUserdata = nullptr,
@@ -310,7 +352,14 @@ void AdapterImpl::requestDevice(const DeviceDescriptor& descriptor, CompletionHa
 
     auto requestedFeatures = supportedFeatures(features);
     auto blockPtr = makeBlockPtr([protectedThis = protect(*this), convertToBackingContext = m_convertToBackingContext.copyRef(), callback = WTF::move(callback), requestedLimits, requestedFeatures](WGPURequestDeviceStatus status, WGPUDevice device, const char*) mutable {
-        callback(DeviceImpl::create(adoptWebGPU(device), status == WGPURequestDeviceStatus_Success ? WTF::move(requestedFeatures) : SupportedFeatures::create({ }), WTF::move(requestedLimits), convertToBackingContext));
+        auto adoptedDevice = adoptWebGPU(device);
+        // A null device is how the caller learns the request was rejected; an adapter that has
+        // already handed out a device reports itself this way.
+        if (status != WGPURequestDeviceStatus_Success) {
+            callback(nullptr);
+            return;
+        }
+        callback(DeviceImpl::create(WTF::move(adoptedDevice), WTF::move(requestedFeatures), WTF::move(requestedLimits), convertToBackingContext));
     });
     wgpuAdapterRequestDevice(m_backing.get(), &backingDescriptor, &requestDeviceCallback, Block_copy(blockPtr.get())); // Block_copy is matched with Block_release above in requestDeviceCallback().
 }

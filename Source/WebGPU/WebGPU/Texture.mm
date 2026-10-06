@@ -1643,17 +1643,20 @@ bool Texture::hasStorageBindingCapability(WGPUTextureFormat format, const Device
 {
     // https://gpuweb.github.io/gpuweb/#plain-color-formats
     switch (format) {
+    // These formats always support read-only and write-only storage access;
+    // texture-formats-tier2 additionally grants read-write storage access.
     case WGPUTextureFormat_RGBA8Unorm:
-    case WGPUTextureFormat_RGBA8Snorm:
     case WGPUTextureFormat_RGBA8Uint:
     case WGPUTextureFormat_RGBA8Sint:
     case WGPUTextureFormat_RGBA16Uint:
     case WGPUTextureFormat_RGBA16Sint:
     case WGPUTextureFormat_RGBA16Float:
-    case WGPUTextureFormat_RG32Float:
     case WGPUTextureFormat_RGBA32Float:
     case WGPUTextureFormat_RGBA32Uint:
     case WGPUTextureFormat_RGBA32Sint:
+        return (!access || *access != WGPUStorageTextureAccess_ReadWrite) || device.hasFeature(WGPUFeatureName_TextureFormatsTier2);
+    case WGPUTextureFormat_RGBA8Snorm:
+    case WGPUTextureFormat_RG32Float:
     case WGPUTextureFormat_RG32Uint:
     case WGPUTextureFormat_RG32Sint:
         return !access || *access != WGPUStorageTextureAccess_ReadWrite;
@@ -1663,17 +1666,20 @@ bool Texture::hasStorageBindingCapability(WGPUTextureFormat format, const Device
     case WGPUTextureFormat_R32Uint:
     case WGPUTextureFormat_R32Sint:
         return true;
+    // These formats support storage access only with texture-formats-tier1;
+    // texture-formats-tier2 additionally grants read-write storage access.
     case WGPUTextureFormat_R8Unorm:
-    case WGPUTextureFormat_R8Snorm:
     case WGPUTextureFormat_R8Uint:
     case WGPUTextureFormat_R8Sint:
+    case WGPUTextureFormat_R16Float:
+    case WGPUTextureFormat_R16Uint:
+    case WGPUTextureFormat_R16Sint:
+        return ((!access || *access != WGPUStorageTextureAccess_ReadWrite) || device.hasFeature(WGPUFeatureName_TextureFormatsTier2)) && device.hasFeature(WGPUFeatureName_TextureFormatsTier1);
+    case WGPUTextureFormat_R8Snorm:
     case WGPUTextureFormat_RG8Unorm:
     case WGPUTextureFormat_RG8Snorm:
     case WGPUTextureFormat_RG8Uint:
     case WGPUTextureFormat_RG8Sint:
-    case WGPUTextureFormat_R16Float:
-    case WGPUTextureFormat_R16Uint:
-    case WGPUTextureFormat_R16Sint:
     case WGPUTextureFormat_R16Unorm:
     case WGPUTextureFormat_R16Snorm:
     case WGPUTextureFormat_RG16Uint:
@@ -1915,6 +1921,9 @@ NSString *Device::errorValidatingTextureCreation(const WGPUTextureDescriptor& de
     if (!descriptor.usage)
         return @"createTexture: descriptor.usage is zero";
 
+    if (descriptor.usage & WGPUTextureUsage_Invalid)
+        return @"createTexture: descriptor.usage contains a usage bit that is not defined";
+
     if (!descriptor.size.width || !descriptor.size.height || !descriptor.size.depthOrArrayLayers)
         return @"createTexture: descriptor.size.width/height/depth is zero";
 
@@ -2045,7 +2054,7 @@ NSString *Device::errorValidatingTextureCreation(const WGPUTextureDescriptor& de
     return nil;
 }
 
-MTLTextureUsage Texture::usage(WGPUTextureUsageFlags usage, WGPUTextureFormat format)
+MTLTextureUsage Texture::usage(WGPUTextureUsage usage, WGPUTextureFormat format)
 {
     MTLTextureUsage result = MTLTextureUsageUnknown;
     if (usage & WGPUTextureUsage_TextureBinding)
@@ -2903,7 +2912,7 @@ std::optional<MTLPixelFormat> Texture::stencilOnlyAspectMetalFormat(WGPUTextureF
     }
 }
 
-static MTLStorageMode NODELETE storageMode(bool deviceHasUnifiedMemory, bool supportsNonPrivateDepthStencilTextures, WGPUTextureUsageFlags usage)
+static MTLStorageMode NODELETE storageMode(bool deviceHasUnifiedMemory, bool supportsNonPrivateDepthStencilTextures, WGPUTextureUsage usage)
 {
     if (usage & WGPUTextureUsage_Transient)
         return MTLStorageModeMemoryless;
@@ -3038,6 +3047,10 @@ std::optional<WGPUTextureViewDescriptor> Texture::resolveTextureViewDescriptorDe
 
     WGPUTextureViewDescriptor resolved = descriptor;
 
+    // A zero usage means the view inherits every usage of the texture it is a view of.
+    if (!resolved.usage)
+        resolved.usage = m_usage;
+
     if (resolved.format == WGPUTextureFormat_Undefined) {
         if (auto format = resolveTextureFormat(m_format, descriptor.aspect))
             resolved.format = *format;
@@ -3158,6 +3171,17 @@ NSString* Texture::errorValidatingTextureViewCreation(const WGPUTextureViewDescr
         if (descriptor.format != resolveTextureFormat(m_format, descriptor.aspect))
             return ERROR_STRING(@"aspect == All and (format != resolveTextureFormat(format, aspect))");
     }
+
+    // The view's usage narrows the texture's, and each usage it keeps has to be supported by the
+    // view's own format rather than by the format of the texture it is a view of.
+    if (descriptor.usage & ~m_usage)
+        return ERROR_STRING([NSString stringWithFormat:@"view usage(%llu) is not a subset of the texture's usage(%llu)", descriptor.usage, m_usage]);
+
+    if ((descriptor.usage & WGPUTextureUsage_StorageBinding) && !hasStorageBindingCapability(descriptor.format, m_device, WGPUStorageTextureAccess_WriteOnly))
+        return ERROR_STRING(@"view usage contains storage binding and the view's format does not support it");
+
+    if ((descriptor.usage & WGPUTextureUsage_RenderAttachment) && !isDepthOrStencilFormat(descriptor.format) && !isColorRenderableFormat(descriptor.format, m_device))
+        return ERROR_STRING(@"view usage contains render attachment and the view's format is not color renderable");
 
     if (!descriptor.mipLevelCount)
         return ERROR_STRING(@"!mipLevelCount");
@@ -3288,7 +3312,7 @@ Ref<TextureView> Texture::createView(const WGPUTextureViewDescriptor& inputDescr
     }
 
     if (inputDescriptor.usage && (~usage() & inputDescriptor.usage)) {
-        device->generateAValidationError([NSString stringWithFormat:@"GPUTexture.createView: when the view's usage(%u) is specified it must be a subset of the Texture's usage(%u)", inputDescriptor.usage, usage()]);
+        device->generateAValidationError([NSString stringWithFormat:@"GPUTexture.createView: when the view's usage(%llu) is specified it must be a subset of the Texture's usage(%llu)", inputDescriptor.usage, usage()]);
         return TextureView::createInvalid(*this, device.get());
     }
 
@@ -3356,8 +3380,16 @@ Ref<TextureView> Texture::createView(const WGPUTextureViewDescriptor& inputDescr
 
 void Texture::recreateIfNeeded()
 {
-    if (m_canvasBacking)
-        m_destroyed = false;
+    if (!m_canvasBacking)
+        return;
+
+    m_destroyed = false;
+    // Every one of these is the canvas handing this backing out for a new frame, either directly or
+    // through the undestroy the Web process sends in place of the round trip it elides once the
+    // render buffers wrap around. A frame starts as transparent black rather than holding whatever
+    // the frame that last used this backing left behind, so forget having cleared it and let the
+    // next use initialize it again.
+    setPreviouslyCleared(0, 0, false);
 }
 
 void Texture::makeCanvasBacking()
@@ -3376,9 +3408,30 @@ bool Texture::waitForCommandBufferCompletion()
     return result;
 }
 
+void Texture::recordGPUExecutionWindow(double startTime, double endTime) const
+{
+    double duration = endTime - startTime;
+    if (duration <= 0)
+        return;
+    Locker locker { m_gpuFrameCostLock };
+    m_gpuFrameCostSeconds = std::max(m_gpuFrameCostSeconds, duration);
+}
+
+Seconds Texture::gpuFrameCost() const
+{
+    Locker locker { m_gpuFrameCostLock };
+    return m_gpuFrameCostSeconds > 0 ? Seconds { m_gpuFrameCostSeconds } : 0_s;
+}
+
+void Texture::resetGPUFrameCost() const
+{
+    Locker locker { m_gpuFrameCostLock };
+    m_gpuFrameCostSeconds = 0;
+}
+
 void Texture::setCommandEncoder(CommandEncoder& commandEncoder) const
 {
-    CommandEncoder::trackEncoder(commandEncoder, m_commandEncoders);
+    commandEncoder.trackEncoderForTexture(*this, m_commandEncoders);
     commandEncoder.addTexture(*this);
     if (!m_canvasBacking && isDestroyed())
         commandEncoder.makeSubmitInvalid();
@@ -4164,7 +4217,7 @@ void Texture::updateCompletionEvent(const std::pair<id<MTLSharedEvent>, uint64_t
 
 #pragma mark WGPU Stubs
 
-void NODELETE wgpuTextureReference(WGPUTexture texture)
+void NODELETE wgpuTextureAddRef(WGPUTexture texture)
 {
     WebGPU::fromAPI(texture).ref();
 }
@@ -4184,12 +4237,12 @@ void wgpuTextureDestroy(WGPUTexture texture)
     protect(WebGPU::fromAPI(texture))->destroy();
 }
 
-void NODELETE wgpuTextureUndestroy(WGPUTexture texture)
+void wgpuTextureUndestroy(WGPUTexture texture)
 {
-    WebGPU::fromAPI(texture).recreateIfNeeded();
+    protect(WebGPU::fromAPI(texture))->recreateIfNeeded();
 }
 
-void wgpuTextureSetLabel(WGPUTexture texture, const char* label)
+void wgpuTextureSetLabel(WGPUTexture texture, WGPUStringView label)
 {
     protect(WebGPU::fromAPI(texture))->setLabel(WebGPU::fromAPI(label));
 }
@@ -4229,7 +4282,7 @@ uint32_t wgpuTextureGetSampleCount(WGPUTexture texture)
     return protect(WebGPU::fromAPI(texture))->sampleCount();
 }
 
-WGPUTextureUsageFlags wgpuTextureGetUsage(WGPUTexture texture)
+WGPUTextureUsage wgpuTextureGetUsage(WGPUTexture texture)
 {
     return protect(WebGPU::fromAPI(texture))->usage();
 }

@@ -178,6 +178,9 @@ void RemoteLayerTreeDrawingAreaProxy::remotePageProcessDidTerminate(WebCore::Pro
 
     if (CheckedPtr scrollingCoordinator = page() ? page()->scrollingCoordinatorProxy() : nullptr) {
         scrollingCoordinator->willCommitLayerAndScrollingTrees();
+#if ENABLE(THREADED_ANIMATIONS)
+        scrollingCoordinator->removeTimelines(processIdentifier);
+#endif
         m_remoteLayerTreeHost->remotePageProcessDidTerminate(processIdentifier);
         scrollingCoordinator->didCommitLayerAndScrollingTrees();
     }
@@ -237,9 +240,8 @@ void RemoteLayerTreeDrawingAreaProxy::sendUpdateGeometry()
 
     m_isWaitingForDidUpdateGeometry = true;
     sendWithAsyncReply(Messages::DrawingArea::UpdateGeometry(size(), false /* flushSynchronously */, MachSendRight()), [weakThis = WeakPtr { this }] {
-        if (!weakThis)
-            return;
-        weakThis->didUpdateGeometry();
+        if (RefPtr protectedThis = weakThis)
+            protectedThis->didUpdateGeometry();
     });
 }
 
@@ -380,8 +382,12 @@ void RemoteLayerTreeDrawingAreaProxy::commitLayerTree(IPC::Connection& connectio
         return;
 
     if (bundle.editorState) {
-        if (page->updateEditorState(connection, EditorState { *bundle.editorState }, WebPageProxy::ShouldMergeVisualEditorState::Yes))
+        if (page->updateEditorState(connection, EditorState { *bundle.editorState }, WebPageProxy::ShouldMergeVisualEditorState::Yes)) {
             page->dispatchDidUpdateEditorState();
+#if ENABLE(WRITING_TOOLS)
+            page->updateWritingToolsAvailability();
+#endif // ENABLE(WRITING_TOOLS)
+        }
     }
 
     if (bundle.mainFrameData) {

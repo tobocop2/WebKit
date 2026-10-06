@@ -221,7 +221,7 @@ public:
     float pageZoomFactor() const { return m_pageZoomFactor; }
     float textZoomFactor() const { return m_textZoomFactor; }
 
-    float usedZoomForChild(const Frame&) const final;
+    float frameScaleFactorForChild(const Frame&) const final;
 
     void deviceOrPageScaleFactorChanged();
 
@@ -244,6 +244,8 @@ public:
     WEBCORE_EXPORT RefPtr<Node> nodeRespondingToDoubleClickEvent(const FloatPoint& viewportLocation, FloatPoint& adjustedViewportLocation);
 
     static bool nodeWillRespondToMouseEvents(Node&);
+
+    WEBCORE_EXPORT RefPtr<LocalDOMWindow> windowWithDoubleClickEventListener() const;
 #endif // PLATFORM(COCOA)
 
 #if PLATFORM(IOS_FAMILY)
@@ -327,6 +329,7 @@ public:
     void selfOnlyDeref();
 
     void documentURLOrOriginDidChange();
+    bool dispatchLoadEventToRemoteParent();
     void dispatchLoadEventToParent();
 
     void storageAccessExceptionReceivedForDomain(const RegistrableDomain&);
@@ -338,6 +341,7 @@ public:
     OptionSet<AdvancedPrivacyProtections> advancedPrivacyProtections() const final;
     bool allowPrivacyProxy() const final;
     AutoplayPolicy autoplayPolicy() const final;
+    ColorSchemePreference colorSchemePreference() const final;
 
     WEBCORE_EXPORT SandboxFlags NODELETE effectiveSandboxFlags() const;
     SandboxFlags sandboxFlagsFromSandboxAttributeNotCSP() { return m_sandboxFlags; }

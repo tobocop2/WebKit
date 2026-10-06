@@ -28,11 +28,11 @@
 #if ENABLE(MEDIA_SOURCE)
 
 #include <WebCore/FourCC.h>
+#include <WebCore/ISOBMFFTrackInfoParser.h>
 #include <WebCore/PlatformMediaError.h>
 #include <WebCore/SourceBufferParser.h>
 #include <optional>
 #include <span>
-#include <wtf/Expected.h>
 #include <wtf/Function.h>
 #include <wtf/Ref.h>
 #include <wtf/TZoneMalloc.h>
@@ -55,10 +55,11 @@ class ISOBMFFPreParser {
 public:
     using AppendFlags = SourceBufferParser::AppendFlags;
     using ForwardDataCallback = Function<void(Ref<const SharedBuffer>&&, AppendFlags)>;
+    using TrackInfoCallback = Function<void(Vector<ISOBMFFTrackInfoParser::TrackEditInfo>&&)>;
 
-    explicit ISOBMFFPreParser(ForwardDataCallback&&);
+    explicit ISOBMFFPreParser(ForwardDataCallback&&, TrackInfoCallback&& = { });
 
-    Expected<void, PlatformMediaError> appendData(Ref<const SharedBuffer>&&, AppendFlags = AppendFlags::None);
+    std::expected<void, PlatformMediaError> appendData(Ref<const SharedBuffer>&&, AppendFlags = AppendFlags::None);
 
     // Resets the segment parser loop state. Does NOT clear
     // m_firstInitializationSegmentReceived per the MSE spec
@@ -85,11 +86,14 @@ private:
     static bool isMediaSegmentStartBox(FourCC);
 
     ForwardDataCallback m_forwardDataCallback;
+    TrackInfoCallback m_trackInfoCallback;
     State m_state { State::WaitingForSegment };
     bool m_firstInitializationSegmentReceived { false };
     bool m_pendingInitializationSegmentForChangeType { false };
+    bool m_capturingMoovBody { false };
     Vector<uint8_t, 16> m_pendingHeaderBytes;
     uint64_t m_remainingBytesInCurrentBox { 0 };
+    Vector<uint8_t> m_moovBuffer;
 };
 
 } // namespace WebCore

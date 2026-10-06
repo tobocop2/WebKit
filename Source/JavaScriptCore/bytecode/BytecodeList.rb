@@ -46,6 +46,7 @@ types [
     :JSScope,
     :JSType,
     :JSValue,
+    :LazyCallLinkInfo,
     :ResultType,
     :OperandTypes,
     :PrivateFieldPutKind,
@@ -61,7 +62,7 @@ types [
     :ToThisStatus,
     :TypeLocation,
     :WasmBoundLabel,
-    :WatchpointSet,
+    :InlineWatchpointSet,
     :WriteBarrierStructureID,
 
     :ValueProfileAndVirtualRegisterBuffer,
@@ -142,7 +143,7 @@ op :iterator_next,
         valueValueProfile: unsigned,
     },
     metadata: {
-        callLinkInfo: DataOnlyCallLinkInfo,
+        callLinkInfo: LazyCallLinkInfo,
         doneModeMetadata: GetByIdModeMetadata,
         valueModeMetadata: GetByIdModeMetadata,
         iterableProfile: ArrayProfile,
@@ -216,9 +217,32 @@ op :iterator_open,
         nextValueProfile: unsigned,
     },
     metadata: {
-        callLinkInfo: DataOnlyCallLinkInfo,
+        callLinkInfo: LazyCallLinkInfo,
         modeMetadata: GetByIdModeMetadata,
         arrayProfile: ArrayProfile,
+        iterationMetadata: IterationModeMetadata,
+    },
+    checkpoints: {
+        symbolCall: nil,
+        getNext: nil,
+    }
+
+# iterator = symbolIterator.@call(iterable); next = iterator.next. Mirrors op_iterator_open; the fast
+# path skips the call for a genuine async generator, leaving the driver sentinel in next.
+op :async_iterator_open,
+    args: {
+        iterator: VirtualRegister,
+        next: VirtualRegister,
+        symbolIterator: VirtualRegister,
+        iterable: VirtualRegister,
+        stackOffset: unsigned,
+        iterableValueProfile: unsigned,
+        iteratorValueProfile: unsigned,
+        nextValueProfile: unsigned,
+    },
+    metadata: {
+        callLinkInfo: LazyCallLinkInfo,
+        modeMetadata: GetByIdModeMetadata,
         iterationMetadata: IterationModeMetadata,
     },
     checkpoints: {
@@ -268,6 +292,19 @@ op :check_private_brand,
         brand: WriteBarrier[JSCell],
     }
 
+# A RegExp literal that is the receiver of a call to its own test or exec method, as in /x/.test(string), without the g or y flag.
+# Every evaluation of a literal makes a new object, but this one is only ever seen by that builtin, which neither writes to it
+# nor lets it out: while that is so (the realm's watchpoints say) one object per site does. See RegExpObject::isSharedLiteral().
+op :new_reg_exp_shared,
+    args: {
+        dst: VirtualRegister,
+        regexp: VirtualRegister,
+        forTest: bool,
+    },
+    metadata: {
+        cachedObject: WriteBarrier[JSCell],
+    }
+
 op :put_by_id,
     args: {
         base: VirtualRegister,
@@ -291,7 +328,7 @@ op :construct,
         valueProfile: unsigned,
     },
     metadata: {
-        callLinkInfo: DataOnlyCallLinkInfo,
+        callLinkInfo: LazyCallLinkInfo,
     }
 
 op :super_construct,
@@ -303,7 +340,7 @@ op :super_construct,
         valueProfile: unsigned,
     },
     metadata: {
-        callLinkInfo: DataOnlyCallLinkInfo,
+        callLinkInfo: LazyCallLinkInfo,
         cachedCallee: WriteBarrier[JSCell],
     }
 
@@ -315,8 +352,7 @@ op :tail_call,
         argv: unsigned,
     },
     metadata: {
-        callLinkInfo: DataOnlyCallLinkInfo,
-        arrayProfile: ArrayProfile,
+        callLinkInfo: LazyCallLinkInfo,
     }
 
 op :call_direct_eval,
@@ -331,7 +367,7 @@ op :call_direct_eval,
         valueProfile: unsigned,
     },
     metadata: {
-        callLinkInfo: DataOnlyCallLinkInfo,
+        callLinkInfo: LazyCallLinkInfo,
     }
 
 op_group :CreateInternalFieldObjectOp,
@@ -363,6 +399,7 @@ op :catch,
     },
     metadata: {
         buffer: ValueProfileAndVirtualRegisterBuffer.*,
+        hasExecutedWithoutBuffer: bool, # Options::useLazyCatchLiveness(): executed before its buffer was created; CodeBlock::ensureCatchLivenessIsComputedForExecutedCatches()
     }
 
 op :new_array_with_size,
@@ -448,8 +485,7 @@ op :call,
         valueProfile: unsigned,
     },
     metadata: {
-        callLinkInfo: DataOnlyCallLinkInfo,
-        arrayProfile: ArrayProfile,
+        callLinkInfo: LazyCallLinkInfo,
     }
 
 op :call_ignore_result,
@@ -459,9 +495,33 @@ op :call_ignore_result,
         argv: unsigned,
     },
     metadata: {
-        callLinkInfo: DataOnlyCallLinkInfo,
-        arrayProfile: ArrayProfile,
+        callLinkInfo: LazyCallLinkInfo,
     }
+
+# dst = next.call(iterator [, value]), or -- if next is the fast async generator driver sentinel --
+# enqueue value onto the producer instead (dst unused; the result is awaited via a separate op_yield).
+# The resume value (yield* passes the received value; for-await leaves hasValue false, so next() is
+# called with just `this`) is call argument index 1: like op_call's argc/argv model, there's no separate
+# VirtualRegister field for it -- its register is derived from stackOffset via
+# virtualRegisterForArgumentIncludingThis(1, -stackOffset) whenever hasValue is set. This keeps every
+# arg field a plain unsigned/bool, so an absent resume value never forces this bytecode to Wide32
+# encoding. Unlike op_iterator_next there are no getDone/getValue checkpoints: the intervening await
+# makes .done/.value separate get_by_id bytecodes after suspension.
+op :async_iterator_next,
+    args: {
+        dst: VirtualRegister,
+        next: VirtualRegister,
+        iterator: VirtualRegister,
+        driver: VirtualRegister,
+        hasValue: bool,
+        stackOffset: unsigned,
+        valueProfile: unsigned,
+    },
+    metadata: {
+        callLinkInfo: LazyCallLinkInfo,
+        iterationMetadata: IterationModeMetadata,
+    }
+
 
 op :resolve_scope,
     args: {
@@ -480,8 +540,8 @@ op :resolve_scope,
         },
         _1: { # offset 6
              # written during linking
-             lexicalEnvironment: WriteBarrierBase[JSCell], # lexicalEnvironment && type == ModuleVar
-             symbolTable: WriteBarrierBase[SymbolTable], # lexicalEnvironment && type != ModuleVar
+             symbolTable: WriteBarrierBase[SymbolTable], # lexicalEnvironment (ClosureVar)
+             moduleImportSlot: unsigned, # ModuleVar: the import slot, as a variable index in the importing module environment
 
              constantScope: WriteBarrierBase[JSScope],
 
@@ -503,10 +563,7 @@ op :get_from_scope,
     },
     metadata: {
         getPutInfo: GetPutInfo,
-        _: {
-            watchpointSet: WatchpointSet.*,
-            structureID: WriteBarrierStructureID,
-        },
+        structureID: WriteBarrierStructureID,
         operand: uintptr_t,
     },
     metadata_initializers: {
@@ -527,7 +584,7 @@ op :put_to_scope,
         getPutInfo: GetPutInfo,
         _: {
             structureID: WriteBarrierStructureID,
-            watchpointSet: WatchpointSet.*,
+            watchpointSet: InlineWatchpointSet.*,
         },
         operand: uintptr_t,
     },
@@ -1352,6 +1409,18 @@ op :typeof,
         value: VirtualRegister,
     }
 
+# Precedes the IteratorClose sequence of an iterator made by op_iterator_open. When op_iterator_open found an Array it may
+# not have made an iterator object: iterator is then a marker cell, next the index and iterable the Array. Jumps to targetLabel,
+# over the IteratorClose sequence, when iterator is that marker and IteratorClose cannot be observed (nothing to do); otherwise
+# falls through, after replacing a marker by the Array Iterator object it stands for.
+op :iterator_close_check,
+    args: {
+        iterator: VirtualRegister,
+        next: VirtualRegister,
+        iterable: VirtualRegister,
+        targetLabel: BoundLabel,
+    }
+
 op :is_cell_with_type,
     args: {
         dst: VirtualRegister,
@@ -1413,6 +1482,7 @@ op :llint_native_construct_trampoline
 op :llint_internal_function_call_trampoline
 op :llint_internal_function_construct_trampoline
 op :llint_default_call_trampoline
+op :llint_unlinked_call_trampoline
 op :llint_virtual_call_trampoline
 op :llint_virtual_construct_trampoline
 op :llint_virtual_tail_call_trampoline
@@ -1434,6 +1504,7 @@ op :op_call_varargs_return_location
 op :op_construct_varargs_return_location
 op :op_super_construct_varargs_return_location
 op :op_get_by_id_return_location
+op :op_async_iterator_open_return_location
 op :op_get_by_id_direct_return_location
 op :op_get_length_return_location
 op :op_get_by_val_return_location
@@ -1448,6 +1519,7 @@ op :op_enumerator_put_by_val_return_location
 op :op_enumerator_in_by_val_return_location
 op :op_iterator_open_return_location
 op :op_iterator_next_return_location
+op :op_async_iterator_next_return_location
 op :op_call_direct_eval_slow_return_location
 op :js_to_wasm_wrapper_entry
 op :wasm_to_wasm_ipint_wrapper_entry
@@ -1470,6 +1542,8 @@ op :js_trampoline_op_construct_varargs
 op :js_trampoline_op_super_construct_varargs
 op :js_trampoline_op_iterator_next
 op :js_trampoline_op_iterator_open
+op :js_trampoline_op_async_iterator_open
+op :js_trampoline_op_async_iterator_next
 op :js_trampoline_op_call_direct_eval_slow
 op :js_trampoline_llint_function_for_call_arity_check_untag
 op :js_trampoline_llint_function_for_call_arity_check_tag
@@ -1519,5 +1593,11 @@ op :llint_cloop_did_return_from_js_28
 op :llint_cloop_did_return_from_js_29
 op :llint_cloop_did_return_from_js_30
 op :llint_cloop_did_return_from_js_31
+op :llint_cloop_did_return_from_js_32
+op :llint_cloop_did_return_from_js_33
+op :llint_cloop_did_return_from_js_34
+op :llint_cloop_did_return_from_js_35
+op :llint_cloop_did_return_from_js_36
+op :llint_cloop_did_return_from_js_37
 
 end_section :CLoopReturnHelpers

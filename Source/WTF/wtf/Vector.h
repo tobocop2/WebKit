@@ -65,7 +65,7 @@ struct VectorCopier {
     template<typename U, std::size_t Extent>
     static void uninitializedCopy(std::span<const U, Extent> src, std::span<T> dst)
     {
-        if constexpr (std::is_trivial_v<T> && std::same_as<T, U>)
+        if constexpr (std::is_trivially_copyable_v<T> && std::is_trivially_default_constructible_v<T> && std::same_as<T, U>)
             memcpySpan(dst, src);
         else {
             for (size_t i = 0; i < src.size(); ++i)
@@ -221,6 +221,7 @@ public:
     bool allocateBuffer(size_t newCapacity)
     {
         static_assert(action == FailureAction::Crash || action == FailureAction::Report);
+        crashIfBorrowed();
         ASSERT(newCapacity);
         if (!isValidCapacityForVector<T>(newCapacity)) {
             if constexpr (action == FailureAction::Crash)
@@ -244,7 +245,6 @@ public:
     }
 
     ALWAYS_INLINE void allocateBuffer(size_t newCapacity) { allocateBuffer<FailureAction::Crash>(newCapacity); }
-    ALWAYS_INLINE bool tryAllocateBuffer(size_t newCapacity) { return allocateBuffer<FailureAction::Report>(newCapacity); }
 
     bool shouldReallocateBuffer(size_t newCapacity) const
     {
@@ -253,6 +253,7 @@ public:
 
     void reallocateBuffer(size_t newCapacity)
     {
+        crashIfBorrowed();
         ASSERT(shouldReallocateBuffer(newCapacity));
         if (newCapacity > std::numeric_limits<size_t>::max() / sizeof(T))
             CRASH();
@@ -263,6 +264,7 @@ public:
 
     void deallocateBuffer(T* bufferToDeallocate)
     {
+        crashIfBorrowed();
         if (!bufferToDeallocate)
             return;
         
@@ -284,6 +286,7 @@ public:
 
     MallocSpan<T, Malloc> releaseBuffer()
     {
+        crashIfBorrowed();
         m_capacity = 0;
         return adoptMallocSpan<T, Malloc>(unsafeMakeSpan(std::exchange(m_buffer, nullptr), std::exchange(m_size, 0)));
     }
@@ -307,6 +310,7 @@ protected:
 
     ~VectorBufferBase()
     {
+        crashIfBorrowed();
         // FIXME: It would be nice to find a way to ASSERT that m_buffer hasn't leaked here.
     }
 
@@ -370,6 +374,8 @@ public:
     
     void swap(VectorBuffer<T, 0, Malloc>& other, size_t, size_t)
     {
+        crashIfBorrowed();
+        other.crashIfBorrowed();
         std::swap(m_buffer, other.m_buffer);
         Base::swapCapacity(other);
     }
@@ -384,7 +390,6 @@ public:
 #endif
 
     using Base::allocateBuffer;
-    using Base::tryAllocateBuffer;
     using Base::shouldReallocateBuffer;
     using Base::reallocateBuffer;
     using Base::deallocateBuffer;
@@ -403,6 +408,7 @@ protected:
 
     VectorBuffer(VectorBuffer<T, 0, Malloc>&& other)
     {
+        other.crashIfBorrowed();
         m_buffer = std::exchange(other.m_buffer, nullptr);
         m_capacity = other.exchangeCapacity(0);
         m_size = std::exchange(other.m_size, 0);
@@ -410,6 +416,8 @@ protected:
 
     void adopt(VectorBuffer&& other)
     {
+        crashIfBorrowed();
+        other.crashIfBorrowed();
         deallocateBuffer(buffer());
         m_buffer = std::exchange(other.m_buffer, nullptr);
         m_capacity = other.exchangeCapacity(0);
@@ -448,6 +456,7 @@ public:
     template<FailureAction action>
     bool allocateBuffer(size_t newCapacity)
     {
+        crashIfBorrowed();
         // FIXME: This should ASSERT(!m_buffer) to catch misuse/leaks. https://bugs.webkit.org/show_bug.cgi?id=250801
         if (newCapacity > inlineCapacity)
             return Base::template allocateBuffer<action>(newCapacity);
@@ -457,10 +466,10 @@ public:
     }
 
     ALWAYS_INLINE void allocateBuffer(size_t newCapacity) { allocateBuffer<FailureAction::Crash>(newCapacity); }
-    ALWAYS_INLINE bool tryAllocateBuffer(size_t newCapacity) { return allocateBuffer<FailureAction::Report>(newCapacity); }
 
     void deallocateBuffer(T* bufferToDeallocate)
     {
+        crashIfBorrowed();
         if (bufferToDeallocate == inlineBuffer())
             return;
         Base::deallocateBuffer(bufferToDeallocate);
@@ -480,6 +489,8 @@ public:
 
     void swap(VectorBuffer& other, size_t mySize, size_t otherSize)
     {
+        crashIfBorrowed();
+        other.crashIfBorrowed();
         if (buffer() == inlineBuffer() && other.buffer() == other.inlineBuffer()) {
             swapInlineBuffer(other, mySize, otherSize);
             Base::swapCapacity(other);
@@ -543,6 +554,7 @@ protected:
     VectorBuffer(VectorBuffer&& other)
         : Base(inlineBuffer(), inlineCapacity, 0)
     {
+        other.crashIfBorrowed();
         if (other.buffer() == other.inlineBuffer())
             VectorTypeOperations<T>::move(other.inlineBuffer(), other.inlineBuffer() + other.m_size, inlineBuffer());
         else {
@@ -554,6 +566,8 @@ protected:
 
     void adopt(VectorBuffer&& other)
     {
+        crashIfBorrowed();
+        other.crashIfBorrowed();
         if (buffer() != inlineBuffer()) {
             deallocateBuffer(buffer());
             m_buffer = inlineBuffer();
@@ -768,8 +782,8 @@ public:
     static constexpr ptrdiff_t bufferMemoryOffset() { return Base::bufferMemoryOffset(); }
     [[nodiscard]] size_t capacity() const { return Base::capacity(); }
     [[nodiscard]] bool isEmpty() const { return !size(); }
-    [[nodiscard]] std::span<const T> span() const LIFETIME_BOUND { return { data(), size() }; }
-    [[nodiscard]] std::span<T> mutableSpan() LIFETIME_BOUND { return { data(), size() }; }
+    [[nodiscard]] std::span<const T> span() const LIFETIME_BOUND { return std::span<const T>(data(), size()); }
+    [[nodiscard]] std::span<T> mutableSpan() LIFETIME_BOUND { return std::span<T>(data(), size()); }
 
     Vector<T> subvector(size_t offset, size_t length = std::dynamic_extent) const
     {
@@ -885,6 +899,7 @@ public:
 
     void removeAt(size_t position);
     void removeAt(size_t position, size_t length);
+    void moveTo(size_t oldPosition, size_t newPosition);
     bool removeFirst(const auto&);
     template<SmartPtr U = T, typename V> requires std::same_as<U, T> && std::derived_from<V, typename GetPtrHelper<U>::UnderlyingType>
     bool removeFirst(V*);
@@ -1002,7 +1017,6 @@ private:
     using Base::swap;
     using Base::allocateBuffer;
     using Base::deallocateBuffer;
-    using Base::tryAllocateBuffer;
     using Base::shouldReallocateBuffer;
     using Base::reallocateBuffer;
     using Base::restoreInlineBufferIfNeeded;
@@ -1010,7 +1024,7 @@ private:
 #if ASAN_ENABLED
     using Base::endOfBuffer;
 #endif
-} SWIFT_ESCAPABLE_IF(T);
+} SWIFT_ESCAPABLE_IF(T) SWIFT_COPYABLE_IF(T);
 
 template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
 Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>::Vector(const Vector& other)
@@ -1722,6 +1736,26 @@ inline void Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>::rem
 }
 
 template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
+inline void Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>::moveTo(size_t oldPosition, size_t newPosition)
+{
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(oldPosition < size());
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(newPosition < size());
+
+    if (oldPosition == newPosition)
+        return;
+
+    // Lift the element out, shift only the range between the two positions into the gap, then drop it back.
+    T* data = mutableSpan().data();
+    T element = WTF::move(data[oldPosition]);
+    TypeOperations::destruct(data + oldPosition, data + oldPosition + 1);
+    if (oldPosition < newPosition)
+        TypeOperations::moveOverlapping(data + oldPosition + 1, data + newPosition + 1, data + oldPosition);
+    else
+        TypeOperations::moveOverlapping(data + newPosition, data + oldPosition, data + newPosition + 1);
+    new (NotNull, data + newPosition) T(WTF::move(element));
+}
+
+template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
 inline bool Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>::removeFirst(const auto& value)
 {
     return removeFirstMatching([&value] (const T& current) {
@@ -1806,8 +1840,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
 inline void Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>::reverse()
 {
-    for (size_t i = 0; i < m_size / 2; ++i)
-        std::swap(at(i), at(m_size - 1 - i));
+    std::ranges::reverse(*this);
 }
 
 template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
@@ -2127,7 +2160,7 @@ inline Vector<typename CopyOrMoveToVectorResult<Collection>::Type> moveToVector(
     return moveToVectorOf<typename CopyOrMoveToVectorResult<Collection>::Type>(collection);
 }
 
-template<typename T, size_t inlineCapacity = 0> static bool insertInUniquedSortedVector(Vector<T, inlineCapacity>& vector, const T& value)
+template<typename T, size_t inlineCapacity = 0> bool insertInUniquedSortedVector(Vector<T, inlineCapacity>& vector, const T& value)
 {
     auto it = std::ranges::lower_bound(vector, value);
     if (it != vector.end() && *it == value) [[unlikely]]

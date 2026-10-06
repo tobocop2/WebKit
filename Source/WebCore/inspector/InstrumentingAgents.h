@@ -32,6 +32,7 @@
 #pragma once
 
 #include <JavaScriptCore/InspectorEnvironment.h>
+#include <wtf/CheckedPtr.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/RefCountedAndCanMakeWeakPtr.h>
 #include <wtf/TZoneMalloc.h>
@@ -61,6 +62,7 @@ class InspectorTimelineAgent;
 class InspectorWorkerAgent;
 class FrameCSSAgent;
 class FrameDOMAgent;
+class FrameDOMStorageAgent;
 class FrameDebuggerAgent;
 class FrameRuntimeAgent;
 class PageCanvasAgent;
@@ -84,6 +86,7 @@ class WebHeapAgent;
 #define DEFINE_INSPECTOR_AGENT_DOMDebugger(macro, Getter, Setter) DEFINE_INSPECTOR_AGENT(macro, InspectorDOMDebuggerAgent, DOMDebuggerAgent, Getter, Setter)
 #define DEFINE_INSPECTOR_AGENT_DOMDebugger_Page(macro, Getter, Setter) DEFINE_INSPECTOR_AGENT(macro, PageDOMDebuggerAgent, PageDOMDebuggerAgent, Getter, Setter)
 #define DEFINE_INSPECTOR_AGENT_DOMStorage(macro, Getter, Setter) DEFINE_INSPECTOR_AGENT(macro, InspectorDOMStorageAgent, DOMStorageAgent, Getter, Setter)
+#define DEFINE_INSPECTOR_AGENT_DOMStorage_Frame(macro, Getter, Setter) DEFINE_INSPECTOR_AGENT(macro, FrameDOMStorageAgent, FrameDOMStorageAgent, Getter, Setter)
 #define DEFINE_INSPECTOR_AGENT_Debugger_Web(macro, Getter, Setter) DEFINE_INSPECTOR_AGENT(macro, WebDebuggerAgent, WebDebuggerAgent, Getter, Setter)
 #define DEFINE_INSPECTOR_AGENT_Debugger_Frame(macro, Getter, Setter) DEFINE_INSPECTOR_AGENT(macro, FrameDebuggerAgent, FrameDebuggerAgent, Getter, Setter)
 #define DEFINE_INSPECTOR_AGENT_Debugger_Page(macro, Getter, Setter) DEFINE_INSPECTOR_AGENT(macro, PageDebuggerAgent, PageDebuggerAgent, Getter, Setter)
@@ -124,6 +127,7 @@ class WebHeapAgent;
     DEFINE_INSPECTOR_AGENT(macro, WebConsoleAgent, ConsoleAgent, web, Web) \
     DEFINE_PERSISTENT_INSPECTOR_AGENT(macro, Animation) \
     DEFINE_PERSISTENT_INSPECTOR_AGENT(macro, CPUProfiler) \
+    DEFINE_PERSISTENT_INSPECTOR_AGENT(macro, CSS) \
     DEFINE_PERSISTENT_INSPECTOR_AGENT(macro, DOM) \
     DEFINE_PERSISTENT_INSPECTOR_AGENT(macro, DOM_Frame) \
     DEFINE_PERSISTENT_INSPECTOR_AGENT(macro, Heap_Web) \
@@ -142,6 +146,7 @@ class WebHeapAgent;
     DEFINE_ENABLED_INSPECTOR_AGENT(macro, DOMDebugger) \
     DEFINE_ENABLED_INSPECTOR_AGENT(macro, DOMDebugger_Page) \
     DEFINE_ENABLED_INSPECTOR_AGENT(macro, DOMStorage) \
+    DEFINE_ENABLED_INSPECTOR_AGENT(macro, DOMStorage_Frame) \
     DEFINE_ENABLED_INSPECTOR_AGENT(macro, Heap_Page) \
     DEFINE_ENABLED_INSPECTOR_AGENT(macro, LayerTree) \
     DEFINE_ENABLED_INSPECTOR_AGENT(macro, Memory) \
@@ -161,11 +166,11 @@ class WEBCORE_EXPORT InstrumentingAgents : public WTF::RefCountedAndCanMakeWeakP
     WTF_MAKE_NONCOPYABLE(InstrumentingAgents);
     WTF_MAKE_TZONE_ALLOCATED(InstrumentingAgents);
 public:
-    static Ref<InstrumentingAgents> NODELETE create(Inspector::InspectorEnvironment&);
+    static Ref<InstrumentingAgents> create(Inspector::InspectorEnvironment&);
     static Ref<InstrumentingAgents> create(Inspector::InspectorEnvironment&, InstrumentingAgents& fallbackAgents);
 
-    ~InstrumentingAgents() = default;
-    void NODELETE reset();
+    ~InstrumentingAgents();
+    void reset();
 
     bool developerExtrasEnabled() const;
 
@@ -183,7 +188,7 @@ private:
     const WeakPtr<InstrumentingAgents> m_fallbackAgents;
 
 #define DECLARE_MEMBER_VARIABLE_FOR_INSPECTOR_AGENT(Class, Name, Getter, Setter) \
-    Class* m_##Getter##Name { nullptr }; \
+    CheckedPtr<Class> m_##Getter##Name; \
 
 FOR_EACH_INSPECTOR_AGENT(DECLARE_MEMBER_VARIABLE_FOR_INSPECTOR_AGENT)
 #undef DECLARE_MEMBER_VARIABLE_FOR_INSPECTOR_AGENT

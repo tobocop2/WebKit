@@ -34,6 +34,7 @@
 #include "VM.h"
 #include "JITStubRoutineSet.h"
 #include "JSCellInlines.h"
+#include "PropertyInlineCacheClearingWatchpoint.h"
 #include "SharedJITStubSet.h"
 #include <wtf/RefPtr.h>
 
@@ -163,12 +164,19 @@ void PolymorphicAccessJITStubRoutine::addedToSharedJITStubSet()
     m_isInSharedJITStubSet = true;
 }
 
-bool PolymorphicAccessJITStubRoutine::visitWeakImpl(VM& vm)
+bool PolymorphicAccessJITStubRoutine::reconcileWeakReferencesAtGCEndImpl(VM& vm)
 {
     bool isValid = true;
     for (StructureID weakReference : m_weakStructures)
         isValid &= vm.heap.isMarked(weakReference.decode());
-    isValid &= Base::visitWeakImpl(vm);
+    // These watchpoints stay armed for as long as the routine lives and dereference their key when they fire.
+    for (auto* watchpoint : m_watchpoints) {
+        isValid &= WTF::switchOn(*watchpoint, [&](auto& watchpoint) {
+            const ObjectPropertyCondition& key = watchpoint.key();
+            return !key || key.isStillLive(vm);
+        });
+    }
+    isValid &= Base::reconcileWeakReferencesAtGCEndImpl(vm);
     return isValid;
 }
 
@@ -203,13 +211,13 @@ void MarkingGCAwareJITStubRoutine::markRequiredObjectsImpl(SlotVisitor& visitor)
     markRequiredObjectsInternalImpl(visitor);
 }
 
-bool MarkingGCAwareJITStubRoutine::visitWeakImpl(VM& vm)
+bool MarkingGCAwareJITStubRoutine::reconcileWeakReferencesAtGCEndImpl(VM& vm)
 {
     for (auto& callLinkInfo : m_callLinkInfos) {
         if (callLinkInfo)
-            callLinkInfo->visitWeak(vm);
+            callLinkInfo->reconcileWeakReferencesAtGCEnd(vm);
     }
-    return Base::visitWeakImpl(vm);
+    return Base::reconcileWeakReferencesAtGCEndImpl(vm);
 }
 
 CallLinkInfo* MarkingGCAwareJITStubRoutine::callLinkInfoAtImpl(const ConcurrentJSLocker&, unsigned index)

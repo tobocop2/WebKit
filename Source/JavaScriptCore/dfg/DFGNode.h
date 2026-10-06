@@ -35,6 +35,7 @@
 #include "DFGArithMode.h"
 #include "DFGArrayMode.h"
 #include "DFGCommon.h"
+#include "DFGDataViewData.h"
 #include "DFGEpoch.h"
 #include "DFGLazyJSValue.h"
 #include "DFGMultiGetByOffsetData.h"
@@ -82,6 +83,13 @@ class ExecutionCounter;
 }
 
 class Snippet;
+
+#if USE(BUN_JSC_ADDITIONS)
+class JSFFIFunction;
+namespace FFI {
+class Signature;
+} // namespace FFI
+#endif
 
 namespace DFG {
 
@@ -142,27 +150,18 @@ static_assert(sizeof(IndexingType) <= sizeof(unsigned));
 static_assert(sizeof(NewArrayBufferData) == sizeof(uint64_t));
 
 struct NewArrayWithSpeciesData {
-    unsigned arrayMode { 0 };
-    unsigned indexingMode { 0 };
-
-    uint64_t asQuadWord() const { return std::bit_cast<uint64_t>(*this); }
-};
-static_assert(sizeof(IndexingType) <= sizeof(unsigned));
-static_assert(sizeof(ArrayMode) <= sizeof(unsigned));
-
-struct DataViewData {
     union {
         struct {
-            uint8_t byteSize;
-            bool isSigned;
-            bool isResizable;
-            bool isFloatingPoint; // Used for the DataViewSet node.
-            TriState isLittleEndian;
+            unsigned arrayMode;
+            uint8_t indexingMode;
+            uint8_t vectorLengthHint;
         };
         uint64_t asQuadWord;
     };
 };
-static_assert(sizeof(DataViewData) == sizeof(uint64_t));
+static_assert(sizeof(IndexingType) <= sizeof(uint8_t));
+static_assert(sizeof(ArrayMode) <= sizeof(unsigned));
+static_assert(sizeof(NewArrayWithSpeciesData) == sizeof(uint64_t));
 
 struct BranchTarget {
     BranchTarget() = default;
@@ -337,7 +336,7 @@ public:
     Node(const Node&) = default;
 
     Node(NodeType op, NodeOrigin nodeOrigin, const AdjacencyList& children)
-        : origin(nodeOrigin)
+        : origin(WTF::move(nodeOrigin))
         , children(children)
         , m_virtualRegister(VirtualRegister())
         , m_refCount(1)
@@ -350,7 +349,7 @@ public:
     
     // Construct a node with up to 3 children, no immediate value.
     Node(NodeType op, NodeOrigin nodeOrigin, Edge child1 = Edge(), Edge child2 = Edge(), Edge child3 = Edge())
-        : origin(nodeOrigin)
+        : origin(WTF::move(nodeOrigin))
         , children(AdjacencyList::Fixed, child1, child2, child3)
         , m_virtualRegister(VirtualRegister())
         , m_refCount(1)
@@ -364,7 +363,7 @@ public:
 
     // Construct a node with up to 3 children, no immediate value.
     Node(NodeFlags result, NodeType op, NodeOrigin nodeOrigin, Edge child1 = Edge(), Edge child2 = Edge(), Edge child3 = Edge())
-        : origin(nodeOrigin)
+        : origin(WTF::move(nodeOrigin))
         , children(AdjacencyList::Fixed, child1, child2, child3)
         , m_virtualRegister(VirtualRegister())
         , m_refCount(1)
@@ -379,7 +378,7 @@ public:
 
     // Construct a node with up to 3 children and an immediate value.
     Node(NodeType op, NodeOrigin nodeOrigin, OpInfo imm, Edge child1 = Edge(), Edge child2 = Edge(), Edge child3 = Edge())
-        : origin(nodeOrigin)
+        : origin(WTF::move(nodeOrigin))
         , children(AdjacencyList::Fixed, child1, child2, child3)
         , m_virtualRegister(VirtualRegister())
         , m_refCount(1)
@@ -394,7 +393,7 @@ public:
 
     // Construct a node with up to 3 children and an immediate value.
     Node(NodeFlags result, NodeType op, NodeOrigin nodeOrigin, OpInfo imm, Edge child1 = Edge(), Edge child2 = Edge(), Edge child3 = Edge())
-        : origin(nodeOrigin)
+        : origin(WTF::move(nodeOrigin))
         , children(AdjacencyList::Fixed, child1, child2, child3)
         , m_virtualRegister(VirtualRegister())
         , m_refCount(1)
@@ -410,7 +409,7 @@ public:
 
     // Construct a node with up to 3 children and two immediate values.
     Node(NodeType op, NodeOrigin nodeOrigin, OpInfo imm1, OpInfo imm2, Edge child1 = Edge(), Edge child2 = Edge(), Edge child3 = Edge())
-        : origin(nodeOrigin)
+        : origin(WTF::move(nodeOrigin))
         , children(AdjacencyList::Fixed, child1, child2, child3)
         , m_virtualRegister(VirtualRegister())
         , m_refCount(1)
@@ -426,7 +425,7 @@ public:
     
     // Construct a node with a variable number of children and two immediate values.
     Node(VarArgTag, NodeType op, NodeOrigin nodeOrigin, OpInfo imm1, OpInfo imm2, unsigned firstChild, unsigned numChildren)
-        : origin(nodeOrigin)
+        : origin(WTF::move(nodeOrigin))
         , children(AdjacencyList::Variable, firstChild, numChildren)
         , m_virtualRegister(VirtualRegister())
         , m_refCount(1)
@@ -947,6 +946,12 @@ public:
         return m_opInfo.as<bool>();
     }
 
+    void setResolvedValueKnownNonThenable()
+    {
+        ASSERT(op() == NewResolvedPromise);
+        m_opInfo = static_cast<uint32_t>(true);
+    }
+
     void NODELETE convertToNewArrayBuffer(FrozenValue* immutableButterfly);
     void NODELETE convertToNewArrayWithSize();
     void NODELETE convertToNewArrayWithButterfly(Graph&, Node* butterfly);
@@ -958,9 +963,17 @@ public:
 
     void NODELETE convertToCallWasm(FrozenValue*);
 
+#if USE(BUN_JSC_ADDITIONS)
+    void NODELETE convertToCallFFI(FrozenValue*);
+
+    JSFFIFunction* ffiFunction();
+    FFI::Signature& ffiSignature();
+#endif
+
     void NODELETE convertToCallDOM(Graph&);
 
     void NODELETE convertToRegExpExecNonGlobalOrStickyWithoutChecks(FrozenValue* regExp);
+    void NODELETE convertToRegExpExecStickyWithoutChecks(FrozenValue* regExp);
     void NODELETE convertToRegExpMatchFastGlobalWithoutChecks(FrozenValue* regExp);
     void NODELETE convertToRegExpMatchFast(Node* globalObjectNode);
     void NODELETE convertToRegExpSearch(Node* globalObjectNode);
@@ -979,6 +992,7 @@ public:
     void convertToDefineAccessorProperty(Graph&, Edge base, Edge property, Edge getter, Edge setter, Edge attributes);
     void convertToObjectDefinePropertyFromFields(Graph&, Edge target, Edge key, Edge enumerable, Edge configurable, Edge value, Edge writable, Edge getter, Edge setter);
     void convertToPutByIdDirect(Graph&, Edge base, Edge value, CacheableIdentifier, ECMAMode);
+    void convertToEnumeratorHasOwnProperty(Graph&, Edge base, Edge propertyName, Edge index, Edge mode, Edge enumerator, ArrayMode, unsigned enumeratorMetadata);
 
     void convertToSetRegExpObjectLastIndex()
     {
@@ -1043,11 +1057,6 @@ public:
         return isConstant() && constant()->value().isBoolean();
     }
      
-    bool asBoolean()
-    {
-        return constant()->value().asBoolean();
-    }
-
     bool isUndefinedOrNullConstant()
     {
         return isConstant() && constant()->value().isUndefinedOrNull();
@@ -1240,7 +1249,6 @@ public:
     bool hasCacheableIdentifier()
     {
         switch (op()) {
-        case TryGetById:
         case GetById:
         case GetByIdFlush:
         case GetByIdMegamorphic:
@@ -1270,7 +1278,6 @@ public:
     {
         ASSERT(hasCacheableIdentifier());
         switch (op()) {
-        case TryGetById:
         case GetById:
         case GetByIdFlush:
         case GetByIdWithThis:
@@ -1319,7 +1326,6 @@ public:
     bool hasGetByIdData() const
     {
         switch (op()) {
-        case TryGetById:
         case GetById:
         case GetByIdFlush:
         case GetByIdWithThis:
@@ -1489,18 +1495,30 @@ public:
         case NewArray:
         case NewArrayBuffer:
         case PhantomNewArrayBuffer:
+        case NewArrayWithSize:
+        case NewButterflyWithSize:
+        case PhantomNewButterflyWithSize:
+        case NewArrayWithSpecies:
             return true;
         default:
             return false;
         }
     }
-    
+
     unsigned vectorLengthHint()
     {
         ASSERT(hasVectorLengthHint());
-        if (op() == NewArray)
+        switch (op()) {
+        case NewArray:
+        case NewArrayWithSize:
+        case NewButterflyWithSize:
+        case PhantomNewButterflyWithSize:
             return m_opInfo2.as<unsigned>();
-        return newArrayBufferData().vectorLengthHint;
+        case NewArrayWithSpecies:
+            return newArrayWithSpeciesData().vectorLengthHint;
+        default:
+            return newArrayBufferData().vectorLengthHint;
+        }
     }
 
     bool hasIndexingType()
@@ -1604,7 +1622,7 @@ public:
     
     bool hasScopeOffset()
     {
-        return op() == GetClosureVar || op() == PutClosureVar;
+        return op() == GetClosureVar || op() == GetLazyClosureVar || op() == PutClosureVar;
     }
 
     ScopeOffset scopeOffset()
@@ -1696,10 +1714,11 @@ public:
         return op() == IsCellWithType;
     }
 
-    JSType queriedType()
+    JSTypeRange queriedType()
     {
+        ASSERT(hasQueriedType());
         static_assert(std::same_as<uint8_t, std::underlying_type_t<JSType>>);
-        return static_cast<JSType>(m_opInfo.as<uint32_t>());
+        return JSTypeRange::fromRawValue(m_opInfo.as<uint32_t>());
     }
 
     bool hasSpeculatedTypeForQuery()
@@ -1709,7 +1728,7 @@ public:
 
     std::optional<SpeculatedType> speculatedTypeForQuery()
     {
-        return speculationFromJSType(queriedType());
+        return speculationFromJSTypeRange(queriedType());
     }
 
     bool hasStructureFlags()
@@ -1960,12 +1979,25 @@ public:
         return m_opInfo.as<Yarr::Flags>();
     }
 
+    bool hasUTC()
+    {
+        return op() == DateGetStorage;
+    }
+
+    bool isUTC()
+    {
+        ASSERT(hasUTC());
+        return m_opInfo.as<bool>();
+    }
+
     bool hasIntrinsic()
     {
         switch (op()) {
         case CPUIntrinsic:
         case DateGetTime:
         case DateGetInt32OrNaN:
+        case StringTrim:
+        case StrCat:
             return true;
         default:
             return false;
@@ -2107,7 +2139,6 @@ public:
         case GetByIdDirect:
         case GetByIdDirectFlush:
         case GetPrototypeOf:
-        case TryGetById:
         case EnumeratorGetByVal:
         case GetByVal:
         case GetByValMegamorphic:
@@ -2130,10 +2161,12 @@ public:
         case TailCallForwardVarargsInlinedCaller:
         case CallWasm:
         case TailCallInlinedCallerWasm:
+        case CallFFI:
         case CallCustomAccessorGetter:
         case GetByOffset:
         case MultiGetByOffset:
         case GetClosureVar:
+        case GetLazyClosureVar:
         case GetInternalField:
         case GetFromArguments:
         case GetArgument:
@@ -2144,6 +2177,7 @@ public:
         case ArraySplice:
         case RegExpExec:
         case RegExpExecNonGlobalOrSticky:
+        case RegExpExecSticky:
         case RegExpTest:
         case RegExpTestInline:
         case RegExpMatchFast:
@@ -2186,6 +2220,7 @@ public:
         case DataViewGetInt:
         case DataViewGetFloat:
         case DateGetInt32OrNaN:
+        case DateGetMilliseconds:
         case NewArrayWithSpecies:
             return true;
         default:
@@ -2247,7 +2282,9 @@ public:
         case DirectTailCallInlinedCaller:
         case CallWasm:
         case TailCallInlinedCallerWasm:
+        case CallFFI:
         case RegExpExecNonGlobalOrSticky:
+        case RegExpExecSticky:
         case RegExpMatchFastGlobal:
         case RegExpTestInline:
             return true;
@@ -2296,10 +2333,10 @@ public:
         return op() == NotifyWrite;
     }
     
-    WatchpointSet* watchpointSet()
+    InlineWatchpointSet* watchpointSet()
     {
         ASSERT(hasWatchpointSet());
-        return m_opInfo.as<WatchpointSet*>();
+        return m_opInfo.as<InlineWatchpointSet*>();
     }
     
     bool hasStoragePointer()
@@ -2345,6 +2382,9 @@ public:
         case ArrayIncludes:
         case ArrayIndexOf:
         case ArrayJoin:
+        case BufferReadInt:
+        case BufferReadFloat:
+        case BufferWrite:
             return true;
         default:
             break;
@@ -2359,12 +2399,15 @@ public:
         case EnumeratorGetByVal:
         case GetByVal:
         case GetByValMegamorphic:
+        case BufferReadInt:
+        case BufferReadFloat:
             return 2;
         case EnumeratorPutByVal:
         case PutByValDirect:
         case PutByVal:
         case PutByValDirectResolved:
         case PutByValMegamorphic:
+        case BufferWrite:
             return 3;
         case AtomicsAdd:
         case AtomicsAnd:
@@ -2776,6 +2819,9 @@ public:
         case ArraySortCompact:
         case ArraySortCommit:
         case GetCellButterflySlot:
+        case BufferReadInt:
+        case BufferReadFloat:
+        case BufferWrite:
             return true;
         default:
             return false;
@@ -2812,7 +2858,7 @@ public:
         case NewArrayWithSpecies: {
             auto data = newArrayWithSpeciesData();
             data.arrayMode = arrayMode.asWord();
-            m_opInfo = data.asQuadWord();
+            m_opInfo = data.asQuadWord;
             return true;
         }
         case MultiGetByVal:
@@ -3003,6 +3049,12 @@ public:
         return std::bit_cast<DataViewData>(m_opInfo.as<uint64_t>());
     }
 
+    DataViewData bufferAccessData()
+    {
+        ASSERT(op() == BufferReadInt || op() == BufferReadFloat || op() == BufferWrite);
+        return std::bit_cast<DataViewData>(m_opInfo2.as<uint64_t>());
+    }
+
     bool shouldGenerate()
     {
         return m_refCount;
@@ -3013,6 +3065,17 @@ public:
     bool isSemanticallySkippable()
     {
         return op() == CountExecution || op() == InvalidationPoint;
+    }
+
+    // An InvalidationPoint emitted for op_check_traps under signal-based VM traps (!Options::usePollingTraps()).
+    // Besides being an invalidation point it is the only place in its loop where the VMTraps SignalSender can
+    // install a breakpoint to interrupt optimized code, so CSE must not fold it into a dominating one: an
+    // effect-free loop that follows another loop would otherwise compile to a bare backward jump that no
+    // termination request (worker terminate(), watchdog) can ever break into.
+    bool isVMTrapsBreakpointSite()
+    {
+        ASSERT(op() == InvalidationPoint);
+        return m_opInfo.as<bool>();
     }
 
     unsigned refCount()
@@ -3197,12 +3260,12 @@ public:
         // However, we only emit such an add if both inputs can be Int52, and Int32
         // can trivially become Int52.
         //
-        return enableInt52() && isInt32OrInt52Speculation(prediction());
+        return isInt32OrInt52Speculation(prediction());
     }
 
     bool shouldSpeculateInt52OrOther()
     {
-        return enableInt52() && isInt32OrInt52OrOtherSpeculation(prediction());
+        return isInt32OrInt52OrOtherSpeculation(prediction());
     }
 
     bool shouldSpeculateDouble()
@@ -3506,7 +3569,7 @@ public:
     
     static bool shouldSpeculateInt52(Node* op1, Node* op2)
     {
-        return enableInt52() && op1->shouldSpeculateInt52() && op2->shouldSpeculateInt52();
+        return op1->shouldSpeculateInt52() && op2->shouldSpeculateInt52();
     }
     
     static bool shouldSpeculateNumber(Node* op1, Node* op2)
@@ -4114,13 +4177,13 @@ struct NodeComparator {
 };
 
 template<typename T>
-CString nodeListDump(const T& nodeList)
+UTF8CString nodeListDump(const T& nodeList)
 {
     return sortedListDump(nodeList, NodeComparator());
 }
 
 template<typename T>
-CString nodeMapDump(const T& nodeMap, DumpContext* context = nullptr)
+UTF8CString nodeMapDump(const T& nodeMap, DumpContext* context = nullptr)
 {
     Vector<typename T::KeyType> keys;
     for (
@@ -4132,11 +4195,11 @@ CString nodeMapDump(const T& nodeMap, DumpContext* context = nullptr)
     CommaPrinter comma;
     for(unsigned i = 0; i < keys.size(); ++i)
         out.print(comma, keys[i], "=>"_s, inContext(nodeMap.get(keys[i]), context));
-    return out.toCString();
+    return out.toUTF8CString();
 }
 
 template<typename T>
-CString nodeValuePairListDump(const T& nodeValuePairList, DumpContext* context = nullptr)
+UTF8CString nodeValuePairListDump(const T& nodeValuePairList, DumpContext* context = nullptr)
 {
     T sortedList = nodeValuePairList;
     std::ranges::sort(sortedList, [](const auto& a, const auto& b) {
@@ -4147,7 +4210,7 @@ CString nodeValuePairListDump(const T& nodeValuePairList, DumpContext* context =
     CommaPrinter comma;
     for (const auto& pair : sortedList)
         out.print(comma, pair.node, "=>"_s, inContext(pair.value, context));
-    return out.toCString();
+    return out.toUTF8CString();
 }
 
 } } // namespace JSC::DFG

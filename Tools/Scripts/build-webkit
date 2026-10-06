@@ -55,6 +55,9 @@ setConfiguration();
 
 if (shouldBuildForCrossTarget()) {
     print("Enabling cross-build for target machine: '". getCrossTargetName() . "'\n");
+    # This has to be done before entering into the cross-toolchain environment, because its
+    # setup script uses the value of CC and CXX to select the compiler from the toolchain.
+    determineDefaultCompiler();
     my @command = (File::Spec->catfile(sourceDir(), "Tools", "Scripts", "build-webkit"));
     runInCrossTargetEnvironment(@command);
 }
@@ -62,6 +65,11 @@ maybeUseContainerSDKRootDir();
 
 my $originalWorkingDirectory = getcwd();
 chdirWebKit();
+
+# The settings given here become the defaults for every later command, so that
+# they resolve the build that was made last.
+recordBuildSettings();
+recordBuildSystemXcodeConfiguration();
 
 my $showHelp = 0;
 my $verbose = 0;
@@ -82,6 +90,7 @@ my $startTime = time();
 my $archs32bit = 0;
 my $useCCache = -1;
 my $exportCompileCommands = 0;
+my $swiftBrowser;
 
 my @features = getFeatureOptionList();
 
@@ -112,6 +121,17 @@ Usage: $programName [options] [options to pass to build system]
   --generate-project-only           Only generate project files
   --debug                           Compile with Debug configuration
   --release                         Compile with Release configuration
+  --cmake                           Build with CMake
+  --xcode                           Build with Xcode
+  --asan                            Compile with the clang address sanitizer
+  --tsan                            Compile with the clang thread sanitizer
+  --force-optimization-level=<level>, --force-opt=<level>
+                                    Optimization level: O3, O2, O1, O0, Os, Ofast, Og, or none
+
+  The configuration, build system, sanitizers and optimization level given above
+  are remembered, so that later commands act on this build without being given
+  them again. Use set-webkit-configuration to change them without building.
+
   --sdk=<sdk>                       Use a specific Xcode SDK (Apple platforms only)
   --architecture=<architecture>     Compile for a specific architecture (or architectures)
   --ios-device                      Use "iphoneos.internal" SDK if installed, else "iphoneos" SDK (iOS only)
@@ -147,6 +167,7 @@ Usage: $programName [options] [options to pass to build system]
 
   --only-webkit                     Build only the WebKit project
   --only=<scheme>                   Build only the given scheme, instead of the entire project (Xcode builds only)
+  --[no-]swiftbrowser               Build SwiftBrowser, which is on by default (Mac CMake builds only)
 
   --skip-library-update             Skip the check to see if windows libraries are up to date
 
@@ -173,6 +194,7 @@ my %options = (
     'no-experimental-features' => \$noExperimentalFeatures,
     'lto-mode=s' => \$ltoMode,
     'use-ccache!' => \$useCCache,
+    'swiftbrowser!' => \$swiftBrowser,
     'export-compile-commands' => \$exportCompileCommands
 );
 
@@ -297,6 +319,10 @@ if (isCMakeBuild() && !isAnyWindows() && !isWin()) {
         $noExperimentalFeatures = 1;
     }
 
+    # This has to happen before removeCMakeCache() below, because it sets CC and CXX,
+    # and a change on those variables forces a reconfiguration of the build directory.
+    determineDefaultCompiler(@cmakeArgs);
+
     # We remove CMakeCache to avoid the bots reusing cached flags when
     # we enable new features. This forces a reconfiguration.
     my @featureArgs = cmakeArgsFromFeatures(@features, !$noExperimentalFeatures);
@@ -317,6 +343,8 @@ if (isCMakeBuild() && !isAnyWindows() && !isWin()) {
             push @cmakeArgs, VIDEO_DECODING_LIMIT;
         }
     }
+
+    push @cmakeArgs, "-DENABLE_SWIFTBROWSER=" . ($swiftBrowser ? "ON" : "OFF") if defined $swiftBrowser;
 
     buildCMakeProjectOrExit($clean, $prefixPath, $makeArgs, @featureArgs, @cmakeArgs);
 }

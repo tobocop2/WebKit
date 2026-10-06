@@ -20,6 +20,8 @@
 #include "config.h"
 #include "StringRecursionChecker.h"
 
+#if USE(BUN_JSC_ADDITIONS)
+
 #include "JSCJSValueInlines.h"
 #include "JSGlobalObject.h"
 
@@ -38,3 +40,5 @@ JSValue StringRecursionChecker::emptyString()
 }
 
 }
+
+#endif // USE(BUN_JSC_ADDITIONS)

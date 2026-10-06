@@ -104,14 +104,29 @@ inline bool ComputedStyleBase::usesViewportUnits() const
     return m_nonInheritedFlags.usesViewportUnits;
 }
 
-inline bool ComputedStyleBase::usesContainerUnits() const
+inline bool ComputedStyleBase::isContainerDependent() const
 {
-    return m_nonInheritedFlags.usesContainerUnits;
+    return m_nonInheritedFlags.isContainerDependent;
 }
 
 inline bool ComputedStyleBase::useTreeCountingFunctions() const
 {
     return m_nonInheritedFlags.useTreeCountingFunctions;
+}
+
+inline const Color& ComputedStyleBase::colorForHighlight() const
+{
+    return m_inheritedRareData->colorForHighlight;
+}
+
+inline bool ComputedStyleBase::usesCurrentBackgroundColorKeyword() const
+{
+    return m_nonInheritedFlags.usesCurrentBackgroundColorKeyword;
+}
+
+inline const WebCore::Color& ComputedStyleBase::currentBackgroundColor() const
+{
+    return m_inheritedData->currentBackgroundColor;
 }
 
 inline InsideLink ComputedStyleBase::insideLink() const
@@ -154,6 +169,11 @@ inline bool ComputedStyleBase::isEffectivelyTransparent() const
     return m_inheritedRareData->effectivelyTransparent;
 }
 
+inline bool ComputedStyleBase::effectiveWrapInsideAvoid() const
+{
+    return m_inheritedRareData->effectiveWrapInsideAvoid;
+}
+
 inline bool ComputedStyleBase::insideDefaultButton() const
 {
     return m_inheritedRareData->insideDefaultButton;
@@ -168,6 +188,13 @@ inline bool ComputedStyleBase::isInSubtreeWithBlendMode() const
 {
     return m_inheritedRareData->isInSubtreeWithBlendMode;
 }
+
+#if ENABLE(SMART_IMAGE_RESIZER)
+inline bool ComputedStyleBase::isAffectedBySmartImageResizer() const
+{
+    return m_inheritedRareData->isAffectedBySmartImageResizer;
+}
+#endif
 
 inline bool ComputedStyleBase::isForceHidden() const
 {
@@ -239,6 +266,11 @@ inline ContentVisibility ComputedStyleBase::usedContentVisibility() const
     return static_cast<ContentVisibility>(m_inheritedRareData->usedContentVisibility);
 }
 
+inline UserSelect ComputedStyleBase::usedUserSelectIgnoringEffectivelyInert() const
+{
+    return static_cast<UserSelect>(m_inheritedRareData->usedUserSelect);
+}
+
 inline TouchAction ComputedStyleBase::usedTouchAction() const
 {
     return m_inheritedRareData->usedTouchAction;
@@ -263,6 +295,11 @@ inline std::optional<PseudoElementType> ComputedStyleBase::pseudoElementType() c
     return m_nonInheritedFlags.pseudoElementType ? std::make_optional(static_cast<PseudoElementType>(m_nonInheritedFlags.pseudoElementType - 1)) : std::nullopt;
 }
 
+inline bool ComputedStyleBase::isListMarkerStyle() const
+{
+    return pseudoElementType() == PseudoElementType::Marker;
+}
+
 inline std::optional<PseudoElementType> pseudoElementType(const ComputedStyleBase& style)
 {
     return style.pseudoElementType();
@@ -271,6 +308,11 @@ inline std::optional<PseudoElementType> pseudoElementType(const ComputedStyleBas
 inline const AtomString& ComputedStyleBase::pseudoElementNameArgument() const
 {
     return m_nonInheritedData->rareData->pseudoElementNameArgument;
+}
+
+inline EnumSet<PseudoElementType> ComputedStyleBase::highlightPseudoElementTypes() const
+{
+    return EnumSet<PseudoElementType>::fromRaw(m_nonInheritedFlags.pseudoBits) & allHighlightPseudoElementTypes;
 }
 
 inline bool ComputedStyleBase::hasPseudoStyle(PseudoElementType pseudo) const
@@ -297,11 +339,6 @@ inline const CustomPropertyData& ComputedStyleBase::nonInheritedCustomProperties
 
 // MARK: - Zoom
 
-inline bool ComputedStyleBase::evaluationTimeZoomEnabled() const
-{
-    return m_inheritedRareData->evaluationTimeZoomEnabled;
-}
-
 inline bool ComputedStyleBase::useSVGZoomRulesForLength() const
 {
     return m_nonInheritedData->rareData->useSVGZoomRulesForLength;
@@ -326,10 +363,7 @@ inline ZoomFactor ComputedStyleBase::usedZoomForLength() const
     if (useSVGZoomRulesForLength())
         return unzoomed;
 
-    if (evaluationTimeZoomEnabled())
-        return ZoomFactor(usedZoom());
-
-    return unzoomed;
+    return ZoomFactor(usedZoom());
 }
 
 // MARK: - Fonts
@@ -339,9 +373,9 @@ inline const FontCascade& ComputedStyleBase::fontCascade() const
     return m_inheritedData->fontData->fontCascade;
 }
 
-inline WebkitLocale ComputedStyleBase::computedLocale() const
+inline WebkitLocale ComputedStyleBase::usedLocale() const
 {
-    return fontDescription().computedLocale();
+    return fontDescription().usedLocale();
 }
 
 inline float ComputedStyleBase::usedLetterSpacing() const
@@ -389,6 +423,11 @@ inline const ScrollTimelines& ComputedStyleBase::scrollTimelines() const
 inline const ViewTimelines& ComputedStyleBase::viewTimelines() const
 {
     return m_nonInheritedData->rareData->viewTimelines;
+}
+
+inline const TimelineTriggers& ComputedStyleBase::timelineTriggers() const
+{
+    return m_nonInheritedData->rareData->timelineTriggers;
 }
 
 inline const Animations& ComputedStyleBase::animations() const

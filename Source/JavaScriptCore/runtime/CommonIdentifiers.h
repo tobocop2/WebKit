@@ -40,7 +40,6 @@
     macro(DisplayNames) \
     macro(Error) \
     macro(EvalError) \
-    macro(FinalizationRegistry) \
     macro(Function) \
     macro(Infinity) \
     macro(Intl) \
@@ -66,7 +65,6 @@
     macro(String) \
     macro(Symbol) \
     macro(Temporal) \
-    macro(WeakRef) \
     macro(__defineGetter__) \
     macro(__defineSetter__) \
     macro(__lookupGetter__) \
@@ -102,6 +100,7 @@
     macro(compilations) \
     macro(compile) \
     macro(configurable) \
+    macro(construct) \
     macro(constructor) \
     macro(count) \
     macro(counters) \
@@ -462,7 +461,6 @@ namespace JSC {
 #define JSC_IDENTIFIER_DECLARE_PRIVATE_WELL_KNOWN_SYMBOL_GLOBAL(name) const Identifier name##Symbol;
         JSC_COMMON_PRIVATE_IDENTIFIERS_EACH_WELL_KNOWN_SYMBOL(JSC_IDENTIFIER_DECLARE_PRIVATE_WELL_KNOWN_SYMBOL_GLOBAL)
 #undef JSC_IDENTIFIER_DECLARE_PRIVATE_WELL_KNOWN_SYMBOL_GLOBAL
-        const Identifier intlLegacyConstructedSymbol;
 
 #define JSC_IDENTIFIER_DECLARE_PRIVATE_FIELD_GLOBAL(name) const Identifier name##PrivateField;
         JSC_COMMON_IDENTIFIERS_EACH_PRIVATE_FIELD(JSC_IDENTIFIER_DECLARE_PRIVATE_FIELD_GLOBAL)

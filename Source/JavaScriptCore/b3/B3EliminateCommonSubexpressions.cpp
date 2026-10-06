@@ -78,18 +78,6 @@ using MemoryMatches = Vector<MemoryValue*, 1>;
 using WasmStructMatches = Vector<WasmStructFieldValue*, 1>;
 using WasmArrayMatches = Vector<WasmArrayElementValue*, 1>;
 
-// Only these node kinds can ever become a key in CSE::m_sets (they are the
-// dominating matches: MemoryValue / WasmStructFieldValue / WasmArrayElementValue).
-// Used to skip the per-value m_sets hash lookup in finalize() and to assert at
-// the add site.
-inline bool canHaveSets(Value* value)
-{
-    Opcode opcode = value->opcode();
-    return isMemoryAccess(opcode)
-        || opcode == WasmStructGet || opcode == WasmStructSet
-        || opcode == WasmArrayGet || opcode == WasmArraySet;
-}
-
 class MemoryValueMap {
 public:
     MemoryValueMap() { }
@@ -364,8 +352,10 @@ public:
 
                 if (memory)
                     data.memoryValuesAtTail.add(memory);
-                if (wasmStructField)
+                if (wasmStructField) {
                     data.wasmStructValuesAtTail.add(wasmStructField);
+                    noteStructKeyFilter(wasmStructField);
+                }
                 if (wasmArrayElem)
                     data.wasmArrayValuesAtTail.add(wasmArrayElem);
 
@@ -444,7 +434,7 @@ private:
             if (m_blocksWithSets.contains(block)) {
                 for (unsigned valueIndex = 0; valueIndex < block->size(); ++valueIndex) {
                     Value* value = block->at(valueIndex);
-                    if (!canHaveSets(value))
+                    if (!m_matched.contains(value))
                         continue;
                     auto iter = m_sets.find(value);
                     if (iter == m_sets.end())
@@ -917,16 +907,6 @@ private:
         return true;
     }
 
-    template<typename Filter>
-    void handleMemoryValue(Value* ptr, HeapRange range, const Filter& filter)
-    {
-        handleMemoryValue(
-            ptr, range, filter,
-            [] (MemoryValue*, Vector<Value*>&) -> Value* {
-                return nullptr;
-            });
-    }
-
     template<typename Filter, typename Replace>
     void handleMemoryValue(
         Value* ptr, HeapRange range, const Filter& filter, const Replace& replace)
@@ -977,9 +957,9 @@ private:
         m_value->replaceWithIdentity(placeholder);
 
         for (MemoryValue* match : matches) {
-            ASSERT(canHaveSets(match));
             m_blocksWithSets.add(match->owner);
             auto& extras = m_sets.add(match, Vector<Value*>()).iterator->value;
+            m_matched.add(match);
             Value* value = replace(match, extras);
             if (!value) {
                 if (match->isStore())
@@ -1122,6 +1102,23 @@ private:
         if (replaceWasmStructValue(matches, structGet))
             return;
         m_data.wasmStructValuesAtTail.add(structGet);
+        noteStructKeyFilter(structGet);
+    }
+
+    void noteStructKeyFilter(WasmStructFieldValue* value)
+    {
+        auto& holders = m_structKeyFilters.add(WasmStructFieldKey(value->child(0), value->fieldHeapKey()), StructKeyFilters { }).iterator->value;
+        if (!holders.count)
+            holders.first = value;
+        ++holders.count;
+    }
+
+    bool isOnlyHolderOfStructKey(const WasmStructFieldKey& key) const
+    {
+        auto iter = m_structKeyFilters.find(key);
+        if (iter == m_structKeyFilters.end())
+            return true;
+        return iter->value.count == 1 && iter->value.first == m_value;
     }
 
     template<typename Filter>
@@ -1141,6 +1138,11 @@ private:
         // Check if current block has clobbering writes
         if (readsMutability != Mutability::Immutable && m_data.writes.overlaps(range)) {
             dataLogLnIf(B3EliminateCommonSubexpressionsInternal::verbose, "    Giving up because of writes.");
+            return { };
+        }
+
+        if (isOnlyHolderOfStructKey(WasmStructFieldKey(structPtr, fieldHeapKey))) {
+            dataLogLnIf(B3EliminateCommonSubexpressionsInternal::verbose, "    Giving up because nothing else holds this key.");
             return { };
         }
 
@@ -1251,9 +1253,9 @@ private:
         m_value->replaceWithIdentity(placeholder);
 
         for (auto* match : matches) {
-            ASSERT(canHaveSets(match));
             m_blocksWithSets.add(match->owner);
-            Vector<Value*>& extras = m_sets.add(match, Vector<Value*>()).iterator->value;
+            auto& extras = m_sets.add(match, Vector<Value*>()).iterator->value;
+            m_matched.add(match);
             auto* value = replace(match, extras);
             ASSERT(value);
             m_ssa->newDef(var, match->owner, value);
@@ -1309,6 +1311,7 @@ private:
         }
 
         m_data.wasmStructValuesAtTail.add(structSet);
+        noteStructKeyFilter(structSet);
     }
 
     bool findWasmStructSetAfterClobber(Value* structPtr, HeapRange range, uint64_t fieldHeapKey)
@@ -1475,9 +1478,9 @@ private:
         m_value->replaceWithIdentity(placeholder);
 
         for (auto* match : matches) {
-            ASSERT(canHaveSets(match));
             m_blocksWithSets.add(match->owner);
-            Vector<Value*>& extras = m_sets.add(match, Vector<Value*>()).iterator->value;
+            auto& extras = m_sets.add(match, Vector<Value*>()).iterator->value;
+            m_matched.add(match);
             auto* value = replace(match, extras);
             ASSERT(value);
             m_ssa->newDef(var, match->owner, value);
@@ -1591,8 +1594,20 @@ private:
     // Match -> extra fixup values (e.g. BitAnd masks for packed Wasm types),
     // flushed at match site during finalize().
     UncheckedKeyHashMap<Value*, Vector<Value*>> m_sets;
+    IndexSet<Value*> m_matched;
     // Blocks that own at least one m_sets key, so finalize() can skip whole blocks.
     IndexSet<BasicBlock*> m_blocksWithSets;
+
+    // Every value ever entered into some block's wasmStructValuesAtTail, tallied by field key.
+    // findWasmStructValue can only succeed by matching a value other than the one it is called
+    // for, so a key whose sole holder is that value makes its whole predecessor walk futile.
+    // Entries are never removed, which keeps the test conservative once clobber() prunes a
+    // block's map, and an overcount only means a walk we could have skipped still happens.
+    struct StructKeyFilters {
+        Value* first { nullptr };
+        unsigned count { 0 };
+    };
+    UncheckedKeyHashMap<WasmStructFieldKey, StructKeyFilters> m_structKeyFilters;
 
     InsertionSet m_insertionSet;
 

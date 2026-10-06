@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Apple Inc. All rights reserved.
+ * Copyright (C) 2015-2026 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -28,8 +28,8 @@
 #include <wtf/Platform.h>
 #if ENABLE(ATTACHMENT_ELEMENT)
 
+#include <WebCore/BitmapImage.h>
 #include <WebCore/HTMLElement.h>
-#include <WebCore/Image.h>
 
 namespace WebCore {
 
@@ -64,7 +64,7 @@ public:
 
     WEBCORE_EXPORT void updateAttributes(std::optional<uint64_t>&& newFileSize, const AtomString& newContentType, const AtomString& newFilename);
     WEBCORE_EXPORT void updateAssociatedElementWithData(const String& contentType, Ref<FragmentedSharedBuffer>&& data);
-    WEBCORE_EXPORT void updateIconForNarrowLayout(const RefPtr<Image>& icon, const WebCore::FloatSize&);
+    WEBCORE_EXPORT void updateIconForNarrowLayout(const RefPtr<BitmapImage>& icon, const WebCore::FloatSize&);
     WEBCORE_EXPORT void updateIconForWideLayout(Vector<uint8_t>&&);
 
     NeedsPostConnectionSteps insertionSteps(InsertionType, ContainerNode&) final;
@@ -81,7 +81,7 @@ public:
     const AtomString& NODELETE attachmentSubtitleForDisplay() const;
     WEBCORE_EXPORT String NODELETE attachmentType() const;
     String NODELETE attachmentPath() const;
-    RefPtr<Image> icon() const { return m_icon; }
+    RefPtr<BitmapImage> icon() const { return m_icon; }
     void requestIconIfNeededWithSize(const FloatSize&);
     void requestWideLayoutIconIfNeeded();
     FloatSize iconSize() const { return m_iconSize; }
@@ -138,11 +138,10 @@ private:
 #endif
 
     enum class Implementation: uint8_t { NarrowLayout, WideLayout };
-    Implementation m_implementation { Implementation::NarrowLayout };
 
     RefPtr<File> m_file;
     String m_uniqueIdentifier;
-    RefPtr<Image> m_icon;
+    RefPtr<BitmapImage> m_icon;
     FloatSize m_iconSize;
 
     Vector<uint8_t> m_iconForWideLayout;
@@ -159,6 +158,7 @@ private:
     RefPtr<HTMLElement> m_saveButton;
     mutable RefPtr<DOMRectReadOnly> m_saveButtonClientRect;
 
+    Implementation m_implementation { Implementation::NarrowLayout };
     bool m_needsIconRequest { true };
 
 #if ENABLE(SERVICE_CONTROLS)

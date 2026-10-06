@@ -201,6 +201,7 @@ ExitMode mayExitImpl(Graph& graph, Node* node, StateType& state)
     case NewAsyncFunction:
     case NewAsyncGeneratorFunction:
     case NewBoundFunction:
+    case GetLazyClosureVar:
     case NewStringObject:
     case NewInternalFieldObject:
     case NewPromise:
@@ -217,10 +218,13 @@ ExitMode mayExitImpl(Graph& graph, Node* node, StateType& state)
     case ToNumber:
     case ToNumeric:
     case ToObject:
+    case OpenAsyncFromSyncIterator:
     case RegExpExecNonGlobalOrSticky:
+    case RegExpExecSticky:
     case RegExpMatchFastGlobal:
     case CallWasm:
     case TailCallInlinedCallerWasm:
+    case CallFFI:
     case CallCustomAccessorGetter:
     case CallCustomAccessorSetter:
     case AllocatePropertyStorage:

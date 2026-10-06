@@ -42,6 +42,7 @@
 #include "CSSPropertyParserConsumer+Primitives.h"
 #include "CSSPropertyParserState.h"
 #include "CSSPropertyParsing.h"
+#include "CSSTransformListValue.h"
 #include "CSSValueList.h"
 #include "CSSValuePool.h"
 #include "StyleBuilderState.h"
@@ -313,11 +314,11 @@ RefPtr<CSSValue> consumeRotate(CSSParserTokenRange& range, CSS::PropertyParserSt
         return nullptr;
 
     auto knownToBeZero = [](std::optional<bool> value) -> bool {
-        return !value ? false : *value == true;
+        return value && *value;
     };
 
     auto knownToBeNotZero = [](std::optional<bool> value) -> bool {
-        return !value ? false : *value == false;
+        return value && !*value;
     };
 
     if (list.size() == 3) {
@@ -410,7 +411,7 @@ RefPtr<CSSValue> consumeScale(CSSParserTokenRange& range, CSS::PropertyParserSta
     return CSSValueList::createSpaceSeparated(x.releaseNonNull());
 }
 
-std::optional<Style::Transform> parseTransformRaw(const String& string, const CSSParserContext& context)
+std::optional<Style::Transform> parseTransformRaw(StringView string, const CSSParserContext& context, const Document& document)
 {
     auto tokenizer = CSSTokenizer(string);
     auto range = tokenizer.tokenRange();
@@ -418,7 +419,7 @@ std::optional<Style::Transform> parseTransformRaw(const String& string, const CS
     // Handle leading whitespace.
     range.consumeWhitespace();
 
-    auto state = CSS::PropertyParserState { .context = context };
+    auto state = CSS::PropertyParserState { .context = context, .absoluteLengthUnitsOnly = true };
     auto parsedValue = CSSPropertyParsing::consumeTransform(range, state);
     if (!parsedValue)
         return { };
@@ -430,13 +431,61 @@ std::optional<Style::Transform> parseTransformRaw(const String& string, const CS
         return { };
 
     auto dummyStyle = Style::ComputedStyle::create();
-    auto dummyState = Style::BuilderState::create(dummyStyle);
+    auto dummyState = Style::BuilderState::create(dummyStyle, Style::BuilderContext { document });
 
-    if (!parsedValue->canResolveDependenciesWithConversionData(dummyState->cssToLengthConversionData()))
-        return { };
+    ASSERT(parsedValue->computedStyleDependencies().isAbsolute());
 
     return Style::toStyleFromCSSValue<Style::Transform>(*CheckedPtr { dummyState.ptr() }, *parsedValue);
 }
+
+#if ENABLE(SPATIAL_PORTAL)
+
+static void flattenTransformListValues(CSSValueListBuilder& builder, CSSValue& transformList)
+{
+    builder.appendVector(downcast<CSSTransformListValue>(transformList).copyValues());
+}
+
+RefPtr<CSSValue> consumePortalTransform(CSSParserTokenRange& range, CSS::PropertyParserState& state)
+{
+    // <'portal-transform'> = none | auto | auto? <transform-list> | <transform-list> auto <transform-list>?
+    // https://webkit.github.io/explainers/css-spatial/Overview.html#stage-transform
+
+    if (range.peek().id() == CSSValueNone)
+        return consumeIdent(range);
+
+    RefPtr leadingAuto = consumeIdent<CSSValueAuto>(range);
+    RefPtr firstList = CSSPropertyParsing::consumeTransformList(range, state);
+
+    if (leadingAuto) {
+        // `auto` | `auto <transform-list>`
+        if (!firstList)
+            return leadingAuto;
+
+        CSSValueListBuilder builder;
+        builder.append(leadingAuto.releaseNonNull());
+        flattenTransformListValues(builder, *firstList);
+        return CSSValueList::createSpaceSeparated(WTF::move(builder));
+    }
+
+    if (!firstList)
+        return nullptr;
+
+    RefPtr trailingAuto = consumeIdent<CSSValueAuto>(range);
+    if (!trailingAuto)
+        return firstList; // `<transform-list>`
+
+    // `<transform-list> auto` | `<transform-list> auto <transform-list>`
+    CSSValueListBuilder builder;
+    flattenTransformListValues(builder, *firstList);
+    builder.append(trailingAuto.releaseNonNull());
+
+    if (RefPtr secondList = CSSPropertyParsing::consumeTransformList(range, state))
+        flattenTransformListValues(builder, *secondList);
+
+    return CSSValueList::createSpaceSeparated(WTF::move(builder));
+}
+
+#endif // ENABLE(SPATIAL_PORTAL)
 
 } // namespace CSSPropertyParserHelpers
 } // namespace WebCore

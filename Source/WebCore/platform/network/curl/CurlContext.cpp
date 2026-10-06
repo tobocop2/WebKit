@@ -347,7 +347,7 @@ void CurlHandle::enableSSL()
     curl_easy_setopt(m_handle, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
 #else
     if (auto* path = std::get_if<String>(&sslHandle.getCACertInfo()))
-        setCACertPath(path->utf8().data());
+        setCACertPath(path->utf8().legacyCStringPointer());
     else if (auto data = std::get_if<CertificateInfo::Certificate>(&sslHandle.getCACertInfo()))
         setCACertBlob(const_cast<uint8_t*>(data->span().data()), data->size());
 #endif
@@ -406,8 +406,7 @@ void CurlHandle::setURL(const URL& url, LocalhostAlias localhostAlias)
             curlUrl.setQuery(String());
     }
 
-    // url is in ASCII so latin1() will only convert it to char* without character translation.
-    curl_easy_setopt(m_handle, CURLOPT_URL, curlUrl.string().latin1().data());
+    curl_easy_setopt(m_handle, CURLOPT_URL, curlUrl.string().utf8().legacyCStringPointer());
 
     if (url.protocolIs("https"_s))
         enableSSL();
@@ -453,13 +452,23 @@ void CurlHandle::appendRequestHeader(const String& name, const String& value)
 
 void CurlHandle::removeRequestHeader(const String& name)
 {
-    // Add a header with no content, the internally used header will get disabled. 
+    // Add a header with no content, the internally used header will get disabled.
     auto header = makeString(name, ':');
     appendRequestHeader(WTF::move(header));
 }
 
 void CurlHandle::appendRequestHeader(const String& header)
 {
+    if (startsWithLettersIgnoringASCIICase(header, "proxy-"_s)) {
+        bool needToEnable = m_proxyRequestHeaders.isEmpty();
+
+        m_proxyRequestHeaders.append(header);
+
+        if (needToEnable)
+            enableProxyRequestHeaders();
+        return;
+    }
+
     bool needToEnable = m_requestHeaders.isEmpty();
 
     m_requestHeaders.append(header);
@@ -475,6 +484,15 @@ void CurlHandle::enableRequestHeaders()
 
     const struct curl_slist* headers = m_requestHeaders.head();
     curl_easy_setopt(m_handle, CURLOPT_HTTPHEADER, headers);
+}
+
+void CurlHandle::enableProxyRequestHeaders()
+{
+    if (m_proxyRequestHeaders.isEmpty())
+        return;
+
+    const struct curl_slist* headers = m_proxyRequestHeaders.head();
+    curl_easy_setopt(m_handle, CURLOPT_PROXYHEADER, headers);
 }
 
 void CurlHandle::enableHttp()
@@ -534,13 +552,7 @@ void CurlHandle::enableAcceptEncoding()
 
 void CurlHandle::enableAllowedProtocols()
 {
-#if ENABLE(FTPDIR)
-    auto allowedProtocols = "file,ftp,ftps,http,https";
-#else
-    auto allowedProtocols = "file,http,https";
-#endif
-
-    curl_easy_setopt(m_handle, CURLOPT_PROTOCOLS_STR, allowedProtocols);
+    curl_easy_setopt(m_handle, CURLOPT_PROTOCOLS_STR, "file,http,https");
 }
 
 void CurlHandle::enableAltSvc()
@@ -555,14 +567,14 @@ void CurlHandle::enableAltSvc()
     altSvcCtrl |= CurlContext::singleton().isHttp2Enabled() ? CURLALTSVC_H2 : 0;
     altSvcCtrl |= CurlContext::singleton().isHttp3Enabled() ? CURLALTSVC_H3 : 0;
 
-    curl_easy_setopt(m_handle, CURLOPT_ALTSVC, CurlContext::singleton().alternativeServicesStorageFile().utf8().data());
+    curl_easy_setopt(m_handle, CURLOPT_ALTSVC, CurlContext::singleton().alternativeServicesStorageFile().utf8().legacyCStringPointer());
     curl_easy_setopt(m_handle, CURLOPT_ALTSVC_CTRL, altSvcCtrl);
 }
 
 void CurlHandle::setHttpAuthUserPass(const String& user, const String& password, long authType)
 {
-    curl_easy_setopt(m_handle, CURLOPT_USERNAME, user.utf8().data());
-    curl_easy_setopt(m_handle, CURLOPT_PASSWORD, password.utf8().data());
+    curl_easy_setopt(m_handle, CURLOPT_USERNAME, user.utf8().legacyCStringPointer());
+    curl_easy_setopt(m_handle, CURLOPT_PASSWORD, password.utf8().legacyCStringPointer());
     curl_easy_setopt(m_handle, CURLOPT_HTTPAUTH, authType);
 }
 
@@ -613,9 +625,9 @@ void CurlHandle::enableProxyIfExists()
     case CurlProxySettings::Mode::Default :
         // For the proxy set by environment variable
         if (!proxy.user().isEmpty())
-            curl_easy_setopt(m_handle, CURLOPT_PROXYUSERNAME, proxy.user().utf8().data());
+            curl_easy_setopt(m_handle, CURLOPT_PROXYUSERNAME, proxy.user().utf8().legacyCStringPointer());
         if (!proxy.password().isEmpty())
-            curl_easy_setopt(m_handle, CURLOPT_PROXYPASSWORD, proxy.password().utf8().data());
+            curl_easy_setopt(m_handle, CURLOPT_PROXYPASSWORD, proxy.password().utf8().legacyCStringPointer());
         curl_easy_setopt(m_handle, CURLOPT_PROXYAUTH, proxy.authMethod());
         break;
     case CurlProxySettings::Mode::NoProxy :
@@ -623,8 +635,8 @@ void CurlHandle::enableProxyIfExists()
         curl_easy_setopt(m_handle, CURLOPT_PROXY, "");
         break;
     case CurlProxySettings::Mode::Custom :
-        curl_easy_setopt(m_handle, CURLOPT_PROXY, proxy.url().utf8().data());
-        curl_easy_setopt(m_handle, CURLOPT_NOPROXY, proxy.ignoreHosts().utf8().data());
+        curl_easy_setopt(m_handle, CURLOPT_PROXY, proxy.url().utf8().legacyCStringPointer());
+        curl_easy_setopt(m_handle, CURLOPT_NOPROXY, proxy.ignoreHosts().utf8().legacyCStringPointer());
         curl_easy_setopt(m_handle, CURLOPT_PROXYAUTH, proxy.authMethod());
         break;
     }
@@ -951,7 +963,7 @@ void CurlHandle::enableStdErrIfUsed()
 
 #endif
 
-Expected<curl_socket_t, CURLcode> CurlHandle::getActiveSocket()
+std::expected<curl_socket_t, CURLcode> CurlHandle::getActiveSocket()
 {
     curl_socket_t socket;
 

@@ -38,7 +38,7 @@
 #import "WebExtensionTabIdentifier.h"
 #import "WebExtensionUtilities.h"
 #import "WebExtensionWindowIdentifier.h"
-#import "WebProcess/Extensions/API/Cocoa/WebExtensionAPIKeys.h"
+#import "WebProcess/Extensions/API/WebExtensionAPIKeys.h"
 #import "_WKResourceLoadInfo.h"
 #import <wtf/text/MakeString.h>
 
@@ -51,7 +51,7 @@ _WKWebExtensionWebRequestResourceType NODELETE toWebExtensionWebRequestResourceT
 {
     switch (resourceLoadInfo.type) {
     case ResourceLoadInfo::Type::Document:
-        return resourceLoadInfo.parentFrameID ? _WKWebExtensionWebRequestResourceTypeMainFrame : _WKWebExtensionWebRequestResourceTypeSubframe;
+        return resourceLoadInfo.parentFrameID ? _WKWebExtensionWebRequestResourceTypeSubframe : _WKWebExtensionWebRequestResourceTypeMainFrame;
     case ResourceLoadInfo::Type::Stylesheet:
         return _WKWebExtensionWebRequestResourceTypeStylesheet;
     case ResourceLoadInfo::Type::Script:

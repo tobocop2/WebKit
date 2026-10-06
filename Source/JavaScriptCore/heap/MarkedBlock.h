@@ -162,12 +162,20 @@ public:
         void unsweepWithNoNewlyAllocated();
         
         inline void shrink();
-            
+        // Return interior OS pages that hold no live cell to the OS (after a sweep-only sweep); re-commit them
+        // before the block is handed to an allocator or freed. No-op when an OS page is not smaller than a block.
+        void decommitUnusedPages(bool isFirstSweepSinceFullCollection);
+        void recommitPages();
+        unsigned numberOfDecommittedPages() const { return std::popcount(m_decommittedPages); }
+
         // While allocating from a free list, MarkedBlock temporarily has bogus
         // cell liveness data. To restore accurate cell liveness data, call one
         // of these functions:
         void didConsumeFreeList(); // Call this once you've allocated all the items in the free list.
-        void stopAllocating(const FreeList&);
+        // ForGood is the heap-teardown path, where the caller sweeps every block immediately
+        // afterwards and so has no use for the newly-allocated bitmap this would otherwise compute.
+        enum class StopAllocatingMode : bool { Resumable, ForGood };
+        void stopAllocating(const FreeList&, StopAllocatingMode = StopAllocatingMode::Resumable);
         void resumeAllocating(FreeList&); // Call this if you canonicalized a block for some non-collection related purpose.
             
         size_t cellSize();
@@ -233,6 +241,9 @@ public:
         NewlyAllocatedMode newlyAllocatedMode();
         MarksMode marksMode();
         
+        static void poisonDecommittedPages(void*, size_t);
+        void unpoisonDecommittedPages();
+
         template<bool, EmptyMode, SweepMode, SweepDestructionMode, ScribbleMode, NewlyAllocatedMode, MarksMode, typename DestroyFunc>
         void specializedSweep(FreeList*, EmptyMode, SweepMode, SweepDestructionMode, ScribbleMode, NewlyAllocatedMode, MarksMode, const DestroyFunc&);
         
@@ -241,13 +252,17 @@ public:
             
         CellAttributes m_attributes;
         bool m_isFreeListed { false };
+        uint16_t m_decommittedPages { 0 }; // bit i set: OS page i of the block is decommitted
+        uint16_t m_zeroPagesDuringSweep { 0 }; // The pages that were decommitted, and so all zero, when the sweep in progress began.
+        HeapVersion m_markingVersionAtLastSweep; // A full collection is what moves MarkedSpace::markingVersion() on.
         unsigned m_index { std::numeric_limits<unsigned>::max() };
 
         AlignedMemoryAllocator* m_alignedMemoryAllocator { nullptr };
         BlockDirectory* m_directory { nullptr };
-        WeakSet m_weakSet;
-        
         MarkedBlock* const m_block { nullptr };
+
+        // WeakSet is rarely accessed so keep it after the other members.
+        WeakSet m_weakSet;
     };
 
 private:    
@@ -606,15 +621,14 @@ inline bool MarkedBlock::isMarkedRaw(const void* p)
     return header().m_marks.get(atomNumber(p));
 }
 
-// Defined in MarkedBlock.cpp with NEVER_INLINE to prevent LTO from breaking compiler barriers
-// inline bool MarkedBlock::isMarked(HeapVersion markingVersion, const void* p)
-// {
-//     HeapVersion version;
-//     Dependency dependency = Dependency::loadAndFence(&header().m_markingVersion, version);
-//     if (version != markingVersion) [[unlikely]]
-//         return false;
-//     return header().m_marks.concurrentGet(atomNumber(p), dependency);
-// }
+inline bool MarkedBlock::isMarked(HeapVersion markingVersion, const void* p)
+{
+    HeapVersion version;
+    Dependency dependency = Dependency::loadAndFence(&header().m_markingVersion, version);
+    if (version != markingVersion) [[unlikely]]
+        return false;
+    return header().m_marks.concurrentGet(atomNumber(p), dependency);
+}
 
 inline bool MarkedBlock::isMarked(const void* p, Dependency dependency)
 {

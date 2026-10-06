@@ -35,14 +35,7 @@
 #include <wtf/ThreadSafeWeakPtr.h>
 #include <wtf/text/CStringView.h>
 
-#if USE(GSTREAMER_GL)
-#include "GraphicsTypesGL.h"
-#endif
-
-namespace WTF {
-class MediaTime;
-class URL;
-}
+typedef struct _GstGLMemory GstGLMemory;
 
 namespace WebCore {
 
@@ -108,11 +101,7 @@ void deinitializeGStreamer();
 
 unsigned getGstPlayFlag(ASCIILiteral nick);
 uint64_t toGstUnsigned64Time(const WTF::MediaTime&);
-
-inline GstClockTime toGstClockTime(const WTF::MediaTime& mediaTime)
-{
-    return static_cast<GstClockTime>(toGstUnsigned64Time(mediaTime));
-}
+GstClockTime toGstClockTime(const WTF::MediaTime&);
 
 GstClockTime toGstClockTime(const Seconds&);
 WTF::MediaTime fromGstClockTime(GstClockTime);
@@ -251,16 +240,27 @@ public:
     bool operator!() const { return !m_frame.buffer; }
 
 #if USE(GSTREAMER_GL)
-    GLuint textureID(int) const;
+    unsigned textureID(uint32_t) const;
+    IntSize textureSize(uint32_t) const;
+    unsigned textureFormat(uint32_t) const;
+    void setNeedsCPUSync(bool needsCPUSync) { m_needsCPUSync = needsCPUSync; }
+    void waitForCPUSyncIfNeeded() const;
 #endif
 
     unsigned componentPlane(int) const;
     unsigned componentPlaneOffset(int) const;
 
 private:
+#if USE(GSTREAMER_GL)
+    GstGLMemory* glMemory(uint32_t) const;
+#endif
+
     GstVideoFrame m_frame;
     GstVideoAlignment m_alignment;
     std::array<size_t, GST_VIDEO_MAX_PLANES> m_planeSizes { };
+#if USE(GSTREAMER_GL)
+    bool m_needsCPUSync { false };
+#endif
 };
 
 class GstMappedAudioBuffer {
@@ -324,14 +324,14 @@ GstClockTime webkitGstInitTime();
 PlatformVideoColorSpace videoColorSpaceFromCaps(const GstCaps*);
 PlatformVideoColorSpace videoColorSpaceFromInfo(const GstVideoInfo&);
 void fillVideoInfoColorimetryFromColorSpace(GstVideoInfo*, const PlatformVideoColorSpace&);
+GstVideoColorimetry colorimetryFromColorSpace(const PlatformVideoColorSpace&);
 
 void configureAudioDecoderForHarnessing(const GRefPtr<GstElement>&);
 void configureVideoDecoderForHarnessing(const GRefPtr<GstElement>&);
 
 void configureMediaStreamAudioDecoder(GstElement*);
 
-String configureMediaStreamVideoDecoder(GstElement*);
-void configureVideoRTPDepayloader(GstElement*);
+void configureMediaStreamVideoDecoder(GstElement*);
 
 bool gstObjectHasProperty(GstObject*, ASCIILiteral name);
 bool gstObjectHasProperty(GstElement*, ASCIILiteral name);
@@ -340,6 +340,7 @@ bool gstObjectHasProperty(GstPad*, ASCIILiteral name);
 bool gstElementMatchesFactoryAndHasProperty(GstElement*, ASCIILiteral factoryNamePattern, ASCIILiteral propertyName);
 
 GRefPtr<GstBuffer> wrapSpanData(const std::span<const uint8_t>&);
+GRefPtr<GstBuffer> wrapSharedBuffer(Ref<SharedBuffer>&&);
 
 std::optional<unsigned> gstGetAutoplugSelectResult(ASCIILiteral);
 
@@ -457,6 +458,8 @@ private:
     WTF::ThreadSafeWeakPtr<T> m_owner;
     PadProbeCallback m_callback;
 };
+
+bool enableMSEAdditionalPipelineDumps();
 
 } // namespace WebCore
 

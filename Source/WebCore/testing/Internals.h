@@ -91,7 +91,6 @@ class FetchRequest;
 class FetchResponse;
 class FileSystemHandle;
 class File;
-class GCObservation;
 class HTMLAnchorElement;
 class HTMLAttachmentElement;
 class HTMLCanvasElement;
@@ -156,6 +155,7 @@ class XMLHttpRequest;
 struct VideoConfiguration;
 
 enum class DocumentMarkerType : uint32_t;
+enum class IPAddressSpace : uint8_t;
 
 #if ENABLE(ENCRYPTED_MEDIA)
 class MediaKeys;
@@ -165,10 +165,6 @@ class MediaKeySession;
 #if ENABLE(VIDEO)
 class TextTrackCueGeneric;
 class VTTCue;
-#endif
-
-#if ENABLE(WEB_RTC)
-class RTCRtpSFrameTransform;
 #endif
 
 #if ENABLE(WEBXR)
@@ -248,6 +244,7 @@ public:
 
     bool isPreloaded(const String& url);
     bool isLoadingFromMemoryCache(const String& url);
+    ExceptionOr<bool> frameNetworkingContextIsValid() const;
     String fetchResponseSource(FetchResponse&);
     String xhrResponseSource(XMLHttpRequest&);
     bool NODELETE isSharingStyleSheetContents(HTMLLinkElement&, HTMLLinkElement&);
@@ -271,6 +268,7 @@ public:
 
     unsigned imageFrameIndex(HTMLImageElement&);
     unsigned imageFrameCount(HTMLImageElement&);
+    bool forceDecodeImageFrameAtIndex(HTMLImageElement&, unsigned index);
     float imageFrameDurationAtIndex(HTMLImageElement&, unsigned index);
     void setImageFrameDecodingDuration(HTMLImageElement&, float duration);
     void resetImageAnimation(HTMLImageElement&);
@@ -307,6 +305,10 @@ public:
 
     Ref<CSSComputedStyleDeclaration> computedStyleIncludingVisitedInfo(Element&) const;
 
+    float usedOutlineOffset(Element&);
+
+    String computedAppleColorFilter(Element&);
+
     Node& ensureUserAgentShadowRoot(Element& host);
     Node* shadowRoot(Element& host);
     ExceptionOr<String> shadowRootType(const Node&) const;
@@ -320,6 +322,8 @@ public:
     double requestAnimationFrameInterval() const;
     bool NODELETE scriptedAnimationsAreSuspended() const;
     bool NODELETE areTimersThrottled() const;
+    double domTimerAlignmentInterval() const;
+    double domTimerAlignmentIntervalIncreaseLimit() const;
 
     enum EventThrottlingBehavior { Responsive, Unresponsive };
     void NODELETE setEventThrottlingBehaviorOverride(std::optional<EventThrottlingBehavior>);
@@ -384,6 +388,7 @@ public:
 #endif
 
     Ref<DOMRect> boundingBox(Element&);
+    Ref<DOMRect> boundingBoxInRootViewCoordinates(Element&);
 
     ExceptionOr<Ref<DOMRectList>> inspectorHighlightRects();
     ExceptionOr<unsigned> inspectorGridOverlayCount();
@@ -409,6 +414,8 @@ public:
 
     ExceptionOr<Ref<DOMRect>> layoutViewportRect();
     ExceptionOr<Ref<DOMRect>> visualViewportRect();
+    ExceptionOr<Ref<DOMRect>> windowClipRect();
+    ExceptionOr<Ref<DOMRect>> exposedContentRect();
 
     ExceptionOr<void> setViewIsTransparent(bool);
 
@@ -417,6 +424,8 @@ public:
     ExceptionOr<void> setUnderPageBackgroundColorOverride(const String& colorValue);
 
     ExceptionOr<String> documentBackgroundColor();
+
+    ExceptionOr<String> paintedCaretColor();
 
     ExceptionOr<bool> displayP3Available()
     {
@@ -467,6 +476,7 @@ public:
     String textFragmentDirectiveForRange(const Range&);
 
     ExceptionOr<void> setDelegatesScrolling(bool enabled);
+    ExceptionOr<bool> delegatesScrollingToNativeView();
 
     ExceptionOr<uint64_t> lastSpellCheckRequestSequence();
     ExceptionOr<uint64_t> lastSpellCheckProcessedSequence();
@@ -539,8 +549,10 @@ public:
     ExceptionOr<RefPtr<Range>> rangeOfString(const String&, RefPtr<Range>&&, const Vector<String>& findOptions);
     ExceptionOr<unsigned> countMatchesForText(const String&, const Vector<String>& findOptions, const String& markMatches);
     ExceptionOr<unsigned> countFindMatches(const String&, const Vector<String>& findOptions);
+    void setCachedFindMatchBufferLimitForTesting(unsigned maximumRunCount);
 #if ENABLE(VIDEO)
     ExceptionOr<Vector<double>> findCueMatches(const String&, const Vector<String>& findOptions);
+    void clearFindCaptionTracks();
 #endif
 
     unsigned numberOfScrollableAreas();
@@ -699,6 +711,8 @@ public:
     void setHeaderHeight(float);
     void setFooterHeight(float);
 
+    float obscuredContentInsetTop();
+
     struct FullscreenInsets {
         float top { 0 };
         float left { 0 };
@@ -717,7 +731,7 @@ public:
         RGBA16F,
 #endif
     };
-    void NODELETE setScreenContentsFormatsForTesting(const Vector<Internals::ContentsFormat>&);
+    void setScreenContentsFormatsForTesting(const Vector<Internals::ContentsFormat>&);
 
 #if ENABLE(VIDEO)
     bool NODELETE isChangingPresentationMode(HTMLVideoElement&) const;
@@ -791,6 +805,9 @@ public:
     String toolTipFromElement(Element&) const;
 
     void forceAXObjectCacheUpdate() const;
+    void setAccessibilityAnnouncementTranslationTimeout(double seconds);
+    unsigned liveRegionSnapshotBuildCount() const;
+    void resetLiveRegionSnapshotBuildCount() const;
     void setShouldMockParentSearchResultsForTesting(bool);
     void setShouldMockChildFrameSearchResultsForTesting(bool);
     void forceReload(bool endToEnd);
@@ -841,9 +858,6 @@ public:
     void isVP9HardwareDecoderUsed(RTCPeerConnection&, DOMPromiseDeferred<IDLBoolean>&&);
     bool isSupportingAV1HardwareDecoder() const;
 
-    void setSFrameCounter(RTCRtpSFrameTransform&, const String&);
-    uint64_t NODELETE sframeCounter(const RTCRtpSFrameTransform&);
-    uint64_t NODELETE sframeKeyId(const RTCRtpSFrameTransform&);
     void NODELETE setEnableWebRTCEncryption(bool);
     bool hasPeerConnectionEnabledServiceClass(const RTCPeerConnection&);
 #endif
@@ -860,10 +874,12 @@ public:
     void NODELETE simulateAudioInterruption(HTMLMediaElement&);
     ExceptionOr<bool> mediaElementHasCharacteristic(HTMLMediaElement&, const String&);
     void enterViewerMode(HTMLVideoElement&);
+    void setVideoInExternalPlayback(HTMLVideoElement&, bool);
     ExceptionOr<bool> mediaPlayerRenderingCanBeAccelerated(HTMLMediaElement&);
 
     bool NODELETE elementShouldBufferData(HTMLMediaElement&);
     String elementBufferingPolicy(HTMLMediaElement&);
+    String elementPreferredBufferingPolicy(HTMLMediaElement&);
     void setMediaElementBufferingPolicy(HTMLMediaElement&, const String&);
     double privatePlayerVolume(const HTMLMediaElement&);
     bool privatePlayerMuted(const HTMLMediaElement&);
@@ -937,9 +953,11 @@ public:
     ExceptionOr<String> mediaSessionRestrictions(const String& mediaType) const;
     void setMediaElementRestrictions(HTMLMediaElement&, StringView restrictionsString);
     ExceptionOr<void> postRemoteControlCommand(const String&, float argument);
+    ExceptionOr<void> postSystemRemoteControlCommand(const String&, float argument);
     void activeAudioRouteDidChange(bool shouldPause);
     bool NODELETE elementIsBlockingDisplaySleep(const HTMLMediaElement&) const;
     bool NODELETE isPlayerVisibleInViewport(const HTMLMediaElement&) const;
+    bool isMediaElementIntersectingViewport(const HTMLMediaElement&) const;
     bool isPlayerMuted(const HTMLMediaElement&) const;
     bool isPlayerPaused(const HTMLMediaElement&) const;
     double effectiveRate(const HTMLMediaElement&) const;
@@ -956,6 +974,7 @@ public:
     void setMockMediaPlaybackTargetPickerEnabled(bool);
     ExceptionOr<void> setMockMediaPlaybackTargetPickerState(const String& deviceName, const String& deviceState);
     void mockMediaPlaybackTargetPickerDismissPopup();
+    void mockMediaPlaybackTargetPickerRect(DOMPromiseDeferred<IDLInterface<DOMRect>>&&);
 #endif
 
     bool isMonitoringWirelessRoutes() const;
@@ -986,6 +1005,8 @@ public:
     RefPtr<File> createFile(const String&);
     void asyncCreateFile(const String&, DOMPromiseDeferred<IDLInterface<File>>&&);
     String createTemporaryFile(const String& name, const String& contents);
+
+    String documentIPAddressSpace() const;
 
     void queueMicroTask(int);
     bool testPreloaderSettingViewport();
@@ -1041,8 +1062,6 @@ public:
     bool NODELETE hasHistoryActionActivation();
 
     bool consumeHistoryActionUserActivation();
-
-    RefPtr<GCObservation> observeGC(JSC::JSValue);
 
     enum class UserInterfaceLayoutDirection : uint8_t { LTR, RTL };
     void setUserInterfaceLayoutDirection(UserInterfaceLayoutDirection);
@@ -1109,6 +1128,7 @@ public:
     bool NODELETE isMediaStreamSourceEnded(MediaStreamTrack&) const;
     bool NODELETE isMockRealtimeMediaSourceCenterEnabled();
     bool NODELETE shouldAudioTrackPlay(const AudioTrack&);
+    void deleteAudioUnit();
 #endif // ENABLE(MEDIA_STREAM)
 #if ENABLE(WEB_RTC)
     String rtcNetworkInterfaceName() const;
@@ -1147,6 +1167,8 @@ public:
 
     bool NODELETE supportsAudioSession() const;
     AudioSessionCategory audioSessionCategory() const;
+    void systemAudioSessionCategory(DOMPromiseDeferred<IDLEnumeration<AudioSessionCategory>>&&);
+    void systemAudioSessionActivationCount(DOMPromiseDeferred<IDLUnsignedLongLong>&&);
     AudioSessionMode audioSessionMode() const;
     RouteSharingPolicy routeSharingPolicy() const;
 #if ENABLE(VIDEO)
@@ -1171,6 +1193,7 @@ public:
     void updateQuotaBasedOnSpaceUsage();
 
     void setConsoleMessageListener(RefPtr<StringCallback>&&);
+    void configureLoggingChannel(const String& channelName, bool enabled);
 
     using HasRegistrationPromise = DOMPromiseDeferred<IDLBoolean>;
     void hasServiceWorkerRegistration(const String& clientURL, HasRegistrationPromise&&);
@@ -1337,6 +1360,8 @@ public:
 #endif
 
     bool elementIsActiveNowPlayingSession(HTMLMediaElement&) const;
+    void elementIsActiveNowPlayingSessionInGPUProcess(HTMLMediaElement&, DOMPromiseDeferred<IDLBoolean>&&);
+    void elementIsRemoteCommandTargetInGPUProcess(HTMLMediaElement&, DOMPromiseDeferred<IDLBoolean>&&);
 
 #endif // ENABLE(VIDEO)
 
@@ -1352,7 +1377,7 @@ public:
 
     void notifyResourceLoadObserver();
 
-    unsigned NODELETE primaryScreenDisplayID();
+    unsigned primaryScreenDisplayID();
 
     bool capsLockIsOn();
         
@@ -1550,6 +1575,7 @@ public:
     bool destroySleepDisabler(unsigned identifier);
 
     void setTopDocumentURLForQuirks(const String&);
+    Vector<String> activeQuirks() const;
 
 #if ENABLE(APP_HIGHLIGHTS)
     Vector<String> appHighlightContextMenuItemTitles() const;
@@ -1653,6 +1679,7 @@ public:
     void setPDFDisplayModeForTesting(Element&, const String&) const;
     void unlockPDFDocumentForTesting(Element&, const String&) const;
     bool sendEditingCommandToPDFForTesting(Element&, const String& commandName, const String& argument) const;
+    Vector<String> pdfContextMenuItemTitlesForTesting(Element&, int x, int y) const;
     void registerPDFTest(Ref<VoidCallback>&&, Element&);
 
     String NODELETE defaultSpatialTrackingLabel() const;
@@ -1690,6 +1717,14 @@ public:
     bool NODELETE isModelElementIntersectingViewport(HTMLModelElement&);
 #endif
 
+#if ENABLE(SPATIAL_PORTAL)
+    unsigned NODELETE numberOfHostedModelsInSpatialPortal(Element&);
+    bool NODELETE establishesSpatialPortal(Element&);
+    RefPtr<Element> NODELETE spatialPortalAnchorForModel(HTMLModelElement&);
+    std::optional<Vector<double>> NODELETE spatialPortalResolvedTransform(Element&);
+    String NODELETE effectiveEnvironmentMap(Element&);
+#endif
+
     ExceptionOr<void> copyImageAtLocation(int x, int y);
 
     bool NODELETE hasMediaSessionManager() const;
@@ -1725,7 +1760,7 @@ private:
     ExceptionOr<RenderedDocumentMarker*> markerAt(Node&, const String& markerType, unsigned index);
     ExceptionOr<ScrollableArea*> scrollableAreaForNode(Node*) const;
 
-#if ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
+#if ENABLE(IMAGE_ANALYSIS)
     static RetainPtr<VKCImageAnalysis> fakeImageAnalysisResultForTesting(const Vector<ImageOverlayLine>&);
 #endif
 

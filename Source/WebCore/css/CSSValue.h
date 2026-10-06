@@ -78,6 +78,7 @@ public:
     bool isBorderImageSourceValue() const { return m_classType == ClassType::BorderImageSource; }
     bool isBorderImageWidthValue() const { return m_classType == ClassType::BorderImageWidth; }
     bool isBoxShadowPropertyValue() const { return m_classType == ClassType::BoxShadowProperty; }
+    bool isCalcSizeValue() const { return m_classType == ClassType::CalcSize; }
     bool isColorImageValue() const { return m_classType == ClassType::ColorImage; }
     bool isLightDarkImageValue() const { return m_classType == ClassType::LightDarkImage; }
     bool isCanvasValue() const { return m_classType == ClassType::Canvas; }
@@ -95,10 +96,12 @@ public:
     bool isEasingFunctionValue() const { return m_classType == ClassType::EasingFunction; }
     bool isFilterImageValue() const { return m_classType == ClassType::FilterImage; }
     bool isFilterValue() const { return m_classType == ClassType::Filter; }
+    bool isFlexWrapValue() const { return m_classType == ClassType::FlexWrap; }
     bool isFontFaceSrcLocalValue() const { return m_classType == ClassType::FontFaceSrcLocal; }
     bool isFontFaceSrcResourceValue() const { return m_classType == ClassType::FontFaceSrcResource; }
     bool isFontFamilyNameValue() const { return m_classType == ClassType::FontFamilyName; }
     bool isFontFeatureValue() const { return m_classType == ClassType::FontFeature; }
+    bool isFontPaletteValue() const { return m_classType == ClassType::FontPalette; }
     bool isFontStyleRangeValue() const { return m_classType == ClassType::FontStyleRange; }
     bool isFontStyleWithAngleValue() const { return m_classType == ClassType::FontStyleWithAngle; }
     bool isFontValue() const { return m_classType == ClassType::Font; }
@@ -122,7 +125,11 @@ public:
     bool isNamedImageValue() const { return m_classType == ClassType::NamedImage; }
     bool isOffsetRotateValue() const { return m_classType == ClassType::OffsetRotate; }
     bool isPaintImageValue() const { return m_classType == ClassType::PaintImage; }
+#if ENABLE(SPATIAL_PORTAL)
+    bool isPinnedAnchorNameValue() const { return m_classType == ClassType::PinnedAnchorName; }
+#endif
     bool isPair() const { return m_classType == ClassType::ValuePair; }
+    bool isParamValue() const { return m_classType == ClassType::Param; }
     bool isPath() const { return m_classType == ClassType::Path; }
     bool isShorthandSubstitutionValue() const { return m_classType == ClassType::ShorthandSubstitution; }
     bool isPositionValue() const { return m_classType == ClassType::Position; }
@@ -134,6 +141,7 @@ public:
     bool isRayValue() const { return m_classType == ClassType::Ray; }
     bool isScrollValue() const { return m_classType == ClassType::Scroll; }
     bool isStringValue() const { return m_classType == ClassType::String; }
+    bool isSymbolsFunctionValue() const { return m_classType == ClassType::SymbolsFunction; }
     bool isTextShadowPropertyValue() const { return m_classType == ClassType::TextShadowProperty; }
     bool isTransformListValue() const { return m_classType == ClassType::TransformList; }
     bool isURL() const { return m_classType == ClassType::URL; }
@@ -165,9 +173,6 @@ public:
     ComputedStyleDependencies computedStyleDependencies() const;
     void collectComputedStyleDependencies(ComputedStyleDependencies&) const;
 
-    // Checks to see if the provided conversion data is sufficient to resolve the dependencies of the CSSValue.
-    bool canResolveDependenciesWithConversionData(const CSSToLengthConversionData&) const;
-
     bool equals(const CSSValue&) const;
     bool operator==(const CSSValue& other) const { return equals(other); }
 
@@ -181,7 +186,7 @@ public:
     enum StaticCSSValueTag { StaticCSSValue };
 
     static constexpr size_t ValueSeparatorBits = 2;
-    enum ValueSeparator : uint8_t { SpaceSeparator, CommaSeparator, SlashSeparator };
+    enum class ValueSeparator : uint8_t { Space, Comma, Slash };
 
     inline const CSSValue& first() const; // CSSValuePair
     inline const CSSValue& second() const; // CSSValuePair
@@ -223,6 +228,7 @@ protected:
         BorderImageSource,
         BorderImageWidth,
         BoxShadowProperty,
+        CalcSize,
         Clip,
         Color,
 #if ENABLE(DARK_MODE_CSS)
@@ -234,11 +240,13 @@ protected:
         DynamicRangeLimit,
         EasingFunction,
         Filter,
+        FlexWrap,
         Font,
         FontFaceSrcLocal,
         FontFaceSrcResource,
         FontFamilyName,
         FontFeature,
+        FontPalette,
         FontStyleRange,
         FontStyleWithAngle,
         FontVariation,
@@ -254,8 +262,12 @@ protected:
         MaskBorderSource,
         MaskBorderWidth,
         OffsetRotate,
+        Param,
         Path,
         ShorthandSubstitution,
+#if ENABLE(SPATIAL_PORTAL)
+        PinnedAnchorName,
+#endif
         Position,
         PositionX,
         PositionY,
@@ -269,6 +281,7 @@ protected:
         ValuePair,
         String,
         Substitution,
+        SymbolsFunction,
         View,
         WebkitBoxReflect,
 
@@ -294,12 +307,12 @@ protected:
 
     WEBCORE_EXPORT void operator delete(CSSValue*, std::destroying_delete_t);
 
-    ValueSeparator separator() const { return static_cast<ValueSeparator>(m_valueSeparator); }
+    ValueSeparator separator() const { return m_valueSeparator; }
     ASCIILiteral separatorCSSText() const { return separatorCSSText(separator()); };
 
 private:
-    template<typename Visitor> constexpr decltype(auto) visitDerived(Visitor&&);
-    template<typename Visitor> constexpr decltype(auto) visitDerived(Visitor&&) const;
+    template<typename Visitor> constexpr decltype(auto) visitDerived(NOESCAPE Visitor&&);
+    template<typename Visitor> constexpr decltype(auto) visitDerived(NOESCAPE Visitor&&) const;
 
     static inline bool NODELETE customTraverseSubresources(NOESCAPE const Function<bool(const CachedResource&)>&);
     bool NODELETE addDerivedHash(Hasher&) const;
@@ -311,11 +324,12 @@ protected:
 
     // CSSPrimitiveValue:
     uint8_t m_primitiveUnitType : 7 { 0 }; // CSSUnitType
-    mutable uint8_t m_hasCachedCSSText : 1 { false };
     uint8_t m_isImplicitInitialValue : 1 { false };
 
     // CSSValueList and CSSValuePair:
-    uint8_t m_valueSeparator : ValueSeparatorBits { 0 };
+    ValueSeparator m_valueSeparator : ValueSeparatorBits { ValueSeparator::Space };
+
+    mutable uint8_t m_hasCachedCSSText { false };
 
 private:
     ClassType m_classType : ClassTypeBits;

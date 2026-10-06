@@ -63,6 +63,7 @@ NS_SWIFT_UI_ACTOR
 @property (nonatomic, readonly) float boundingRadius;
 @property (nonatomic, readonly) simd_float3 interactionPivotPoint;
 @property (nonatomic) WKEntityTransform transform;
+@property (nonatomic, weak) WKRKEntity * _Nullable referenceEntity;
 @property (nonatomic) float opacity;
 @property (nonatomic, readonly) NSTimeInterval duration;
 @property (nonatomic) BOOL loop;
@@ -77,8 +78,11 @@ NS_SWIFT_UI_ACTOR
 - (void)interactionContainerDidRecenterFromTransform:(simd_float4x4)transform;
 - (void)recenterEntityAtTransform:(WKEntityTransform)transform;
 - (void)applyDefaultIBL;
+- (void)removeIBL;
+- (void)removeFromParentEntity;
 
 #if HAVE(CORE_RE)
+@property (nonatomic, readonly) REEntityRef coreEntity;
 - (instancetype)initWithCoreEntity:(REEntityRef)coreEntity;
 - (void)setParentCoreEntity:(REEntityRef)parentCoreEntity preservingWorldTransform:(BOOL)preservingWorldTransform;
 #endif

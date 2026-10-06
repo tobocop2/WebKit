@@ -26,7 +26,7 @@
 #include "config.h"
 #include "LOLJITOperations.h"
 
-#if ENABLE(JIT) && USE(JSVALUE64)
+#if ENABLE(JIT)
 
 #include "ArithProfile.h"
 #include "ArrayConstructor.h"
@@ -38,6 +38,7 @@
 #include "DFGThunks.h"
 #include "Debugger.h"
 #include "EnsureStillAliveHere.h"
+#include "JSModuleEnvironment.h"
 #include "ExceptionFuzz.h"
 #include "FrameTracers.h"
 #include "GetterSetter.h"
@@ -59,6 +60,7 @@
 #include "JSGeneratorFunction.h"
 #include "JSGlobalObjectFunctions.h"
 #include "JSLexicalEnvironment.h"
+#include "JSModuleEnvironment.h"
 #include "JSRemoteFunction.h"
 #include "JSWithScope.h"
 #include "LLIntEntrypoint.h"
@@ -86,15 +88,19 @@ JSC_DEFINE_JIT_OPERATION(operationResolveScopeForLOL, EncodedJSValue, (CallFrame
     const JSInstruction* pc = codeBlock->instructionAt(BytecodeIndex(bytecodeOffset));
     auto bytecode = pc->as<OpResolveScope>();
     const Identifier& ident = codeBlock->identifier(bytecode.m_var);
+    auto& metadata = bytecode.metadata(codeBlock);
+
+    if (metadata.m_resolveType == ModuleVar) {
+        JSObject* result = JSModuleEnvironment::fillImportSlot(globalObject, environment, metadata.m_localScopeDepth, ScopeOffset(metadata.m_moduleImportSlot));
+        OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
+        OPERATION_RETURN(scope, JSValue::encode(result));
+    }
+
     JSObject* resolvedScope = JSScope::resolve(globalObject, environment, ident);
     // Proxy can throw an error here, e.g. Proxy in with statement's @unscopables.
     OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
 
-    auto& metadata = bytecode.metadata(codeBlock);
     ResolveType resolveType = metadata.m_resolveType;
-
-    // ModuleVar does not keep the scope register value alive in DFG.
-    ASSERT(resolveType != ModuleVar);
 
     switch (resolveType) {
     case GlobalProperty:
@@ -142,6 +148,10 @@ JSC_DEFINE_JIT_OPERATION(operationGetFromScopeForLOL, EncodedJSValue, (CallFrame
     // ModuleVar is always converted to ClosureVar for get_from_scope.
     ASSERT(getPutInfo.resolveType() != ModuleVar);
 
+    // The shared code for LazyClosureVar also runs in CodeBlocks that linked this as ClosureVar.
+    if (getPutInfo.resolveType() == LazyClosureVar || getPutInfo.resolveType() == ClosureVar)
+        OPERATION_RETURN(scope, JSValue::encode(JSModuleEnvironment::readLazyClosureVar(vm, environment, ScopeOffset(bytecode.metadata(codeBlock).m_operand))));
+
     OPERATION_RETURN(scope, JSValue::encode(environment->getPropertySlot(globalObject, ident, [&] (bool found, PropertySlot& slot) -> JSValue {
         if (!found) {
             if (getPutInfo.resolveMode() == ThrowIfNotFound)
@@ -188,7 +198,7 @@ JSC_DEFINE_JIT_OPERATION(operationPutToScopeForLOL, void, (CallFrame* callFrame,
     if (getPutInfo.resolveType() == ResolvedClosureVar) {
         JSLexicalEnvironment* environment = uncheckedDowncast<JSLexicalEnvironment>(jsScope);
         environment->variableAt(ScopeOffset(metadata.m_operand)).set(vm, environment, value);
-        if (RefPtr set = metadata.m_watchpointSet)
+        if (InlineWatchpointSet* set = metadata.m_watchpointSet)
             set->touch(vm, "Executed op_put_scope<ResolvedClosureVar>");
         OPERATION_RETURN(scope);
     }
@@ -223,4 +233,4 @@ JSC_DEFINE_JIT_OPERATION(operationPutToScopeForLOL, void, (CallFrame* callFrame,
 
 } // namespace JSC::LOL
 
-#endif // ENABLE(JIT) && USE(JSVALUE64)
+#endif // ENABLE(JIT)

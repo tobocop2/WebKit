@@ -134,7 +134,9 @@ public:
     virtual void setIsResizable(WebKit::WebPageProxy&, bool) { }
 
     virtual void setWindowFrame(WebKit::WebPageProxy&, const WebCore::FloatRect&) { }
-    virtual void windowFrame(WebKit::WebPageProxy&, Function<void(WebCore::FloatRect)>&& completionHandler) { completionHandler({ }); }
+    // std::nullopt means the client does not supply a window frame, as opposed to deliberately
+    // reporting an empty one. WebPageProxy only substitutes the hosting window in the former case.
+    virtual void windowFrame(WebKit::WebPageProxy&, Function<void(std::optional<WebCore::FloatRect>)>&& completionHandler) { completionHandler(std::nullopt); }
 
     virtual bool canRunBeforeUnloadConfirmPanel() const { return false; }
     virtual void runBeforeUnloadConfirmPanel(WebKit::WebPageProxy&, WTF::String&&, WebKit::WebFrameProxy*, WebKit::FrameInfoData&&, Function<void(bool)>&& completionHandler) { completionHandler(true); }
@@ -214,7 +216,7 @@ public:
 #if ENABLE(WEB_AUTHN)
     virtual void runWebAuthenticationPanel(WebKit::WebPageProxy&, WebAuthenticationPanel&, WebKit::WebFrameProxy&, WebKit::FrameInfoData&&, CompletionHandler<void(WebKit::WebAuthenticationPanelResult)>&& completionHandler) { completionHandler(WebKit::WebAuthenticationPanelResult::Unavailable); }
 
-    virtual void requestWebAuthenticationConditonalMediationRegistration(const WTF::String&, CompletionHandler<void(std::optional<bool>)>&& completionHandler)
+    virtual void requestWebAuthenticationConditonalMediationRegistration(const WTF::String&, Vector<WTF::String>&& relatedOrigins, CompletionHandler<void(std::optional<bool>)>&& completionHandler)
     {
         completionHandler(std::nullopt);
     }
@@ -226,6 +228,10 @@ public:
     {
         return InspectorConfiguration::create();
     }
+#if ENABLE(APPLE_PAY)
+    virtual void didCompleteApplePayPayment(WebKit::WebPageProxy&) { }
+#endif
+
     virtual void didEnableInspectorBrowserDomain(WebKit::WebPageProxy&) { }
     virtual void didDisableInspectorBrowserDomain(WebKit::WebPageProxy&) { }
 

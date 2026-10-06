@@ -4,10 +4,6 @@
 // found in the LICENSE file.
 //
 
-#ifdef UNSAFE_BUFFERS_BUILD
-#    pragma allow_unsafe_buffers
-#endif
-
 #include "test_utils/CompilerTest.h"
 
 #include "test_utils/angle_test_configs.h"
@@ -228,7 +224,7 @@ void main() {
     }
     else
     {
-        verifyIsInTranslation(GL_VERTEX_SHADER, "_uout1 = _uMyS(");
+        verifyIsInTranslation(GL_VERTEX_SHADER, "_uout1 = _uMyS_0(");
     }
 }
 
@@ -582,7 +578,11 @@ void main() {
                          "for (uint i = 0u; i < 4294967295u; ++i) { }",
                          "for (uint i = 10u; i > 1u+3u ; --i) { }",
                          "const int z = 7; for (int i = 0; i < z; i++) { }",
-                         "for (int i = 0; i < 10; i++) { for (int j = 0; j < 1000; ++j) { }}"};
+                         "for (int i = 0; i < 10; i++) { for (int j = 0; j < 1000; ++j) { }}",
+                         "for (uint i = 10u; i >= 1u; --i) { }",
+                         "for (uint i = 0u; i <= 10u; ++i) { }",
+                         "for (int i = 0; i <= 2147483646; ++i) { }",
+                         "for (int i = 0; i >= -2147483647; --i) { }"};
 
     for (const char *test : kTests)
     {
@@ -600,6 +600,7 @@ TEST_P(GLSLOutputMSLTest_EnsureLoopForwardProgress, InfiniteFors)
 precision highp int;
 uniform int a;
 uniform uint b;
+int f() { return 0; }
 void main() {
 
 )";
@@ -617,14 +618,28 @@ void main() {
         "for (int i = 0; float(i) < 10e10; ++i) { }",
         "for (int i = 0; i < 10; i++) { for (int j = 0; j < 1000; ++i) { }}",
         "for (int i = 0; i != 1; i+=2) { }",
+        "uint i; for (i = 0u; i < 10u; i++) { for (i = 0u; i < 0u; i++) { } }",
         "for (int i = 0; i < 10; i++) { int j; for (j = 0, i = 0; j < 10; j++) { } }",
         "for (int i = 0; i < 10; i++) { for (int j = 0; i = 0, j < 10; j++) { } }",
         "for (int i = 0; i < 10; i++) { for (int j = 0; j < 10; i = 0, j++) { } }",
         "for (int i = 0; i < 10; i++) { for (int j = 0; j < 10; i--, j++) { } }",
+        "for (int i = 0; i < 10; f()) { }",
+        "for (int i = 0; i < 10; a == 0 ? i++ : i = 0) { }",
+        "for (ivec2 i = ivec2(0); i != ivec2(10, 20); i++) { }",
+        "for (ivec2 i = ivec2(0); i != ivec2(10, 10); i += ivec2(1, 2)) { }",
+        "for (uint i = 0u; i >= 0u; i--) { }",
+        "for (uint i = 0u; i >= 0u; i++) { }",
+        "for (uint i = 0u; i <= 4294967295u; i++) { }",
+        "for (int i = 0; i <= 2147483647; i++) { }",
+        "for (int i = 0; i >= -2147483647 - 1; i--) { }",
+        "const uint z = 0u; for (uint i = 0u; i >= z; i--) { }",
+        "for (int i = 0; i <= a; i++) { }",
+        "for (uint i = 0u; i >= b; i--) { }"
     };
 
     for (const char *test : kTests)
     {
+        SCOPED_TRACE(testing::Message() << "test: " << test);
         std::string shader = (std::stringstream() << kShaderPrefix << test << kShaderSuffix).str();
         compileShader(GL_FRAGMENT_SHADER, shader.c_str());
         verifyIsInTranslation(GL_FRAGMENT_SHADER, "loopForwardProgress");

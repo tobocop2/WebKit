@@ -103,10 +103,10 @@ BaselineUnlinkedCallLinkInfo* JIT::addUnlinkedCallLinkInfo()
     return &m_unlinkedCalls.alloc();
 }
 
-void JIT::emitNotifyWriteWatchpoint(GPRReg pointerToSet)
+void JIT::emitNotifyWriteWatchpoint(GPRReg pointerToSetAndScratch)
 {
-    auto ok = branchTestPtr(Zero, pointerToSet);
-    addSlowCase(branch8(NotEqual, Address(pointerToSet, WatchpointSet::offsetOfState()), TrustedImm32(IsInvalidated)));
+    auto ok = branchTestPtr(Zero, pointerToSetAndScratch);
+    addSlowCase(branchIfInlineWatchpointSetIsStillValid(pointerToSetAndScratch));
     ok.link(this);
 }
 
@@ -190,14 +190,15 @@ void JIT::privateCompileMainPass()
             breakpoint();
         }
 
+        Label bytecodeStart = label();
         if (m_disassembler)
-            m_disassembler->setForBytecodeMainPath(m_bytecodeIndex.offset(), label());
+            m_disassembler->setForBytecodeMainPath(m_bytecodeIndex.offset(), bytecodeStart);
         const auto* currentInstruction = instructions.at(m_bytecodeIndex).ptr();
         ASSERT(currentInstruction->size());
 
-        m_pcToCodeOriginMapBuilder.appendItem(label(), CodeOrigin(m_bytecodeIndex));
+        m_pcToCodeOriginMapBuilder.appendItem(bytecodeStart, CodeOrigin(m_bytecodeIndex));
 
-        m_labels[m_bytecodeIndex.offset()] = label();
+        m_labels[m_bytecodeIndex.offset()] = bytecodeStart;
 
         if (JITInternal::verbose)
             dataLogLn("Baseline JIT emitting code for ", m_bytecodeIndex, " at offset ", (long)debugOffset());
@@ -389,6 +390,7 @@ void JIT::privateCompileMainPass()
         DEFINE_OP(op_new_async_generator_func_exp)
         DEFINE_OP(op_new_object)
         DEFINE_OP(op_new_reg_exp)
+        DEFINE_OP(op_new_reg_exp_shared)
         DEFINE_OP(op_not)
         DEFINE_OP(op_nstricteq)
         DEFINE_OP(op_create_lexical_environment)
@@ -417,12 +419,15 @@ void JIT::privateCompileMainPass()
 
         DEFINE_OP(op_iterator_open)
         DEFINE_OP(op_iterator_next)
+        DEFINE_OP(op_iterator_close_check)
+        DEFINE_OP(op_async_iterator_next)
 
         DEFINE_OP(op_ret)
         DEFINE_OP(op_rshift)
         DEFINE_OP(op_unsigned)
         DEFINE_OP(op_urshift)
         DEFINE_OP(op_set_function_name)
+        DEFINE_OP(op_async_iterator_open)
         DEFINE_OP(op_stricteq)
         DEFINE_OP(op_sub)
         DEFINE_OP(op_switch_char)
@@ -488,7 +493,8 @@ void JIT::privateCompileSlowCases()
     for (Vector<SlowCaseEntry>::iterator iter = m_slowCases.begin(); iter != m_slowCases.end();) {
         m_bytecodeIndex = iter->to;
 
-        m_pcToCodeOriginMapBuilder.appendItem(label(), CodeOrigin(m_bytecodeIndex));
+        Label slowPathStart = label();
+        m_pcToCodeOriginMapBuilder.appendItem(slowPathStart, CodeOrigin(m_bytecodeIndex));
 
         BytecodeIndex firstTo = m_bytecodeIndex;
 
@@ -498,7 +504,7 @@ void JIT::privateCompileSlowCases()
             dataLogLn("Baseline JIT emitting slow code for ", m_bytecodeIndex, " at offset ", (long)debugOffset());
 
         if (m_disassembler)
-            m_disassembler->setForBytecodeSlowPath(m_bytecodeIndex.offset(), label());
+            m_disassembler->setForBytecodeSlowPath(m_bytecodeIndex.offset(), slowPathStart);
 
         OpcodeID opcodeID = currentInstruction->opcodeID();
 
@@ -574,6 +580,7 @@ void JIT::privateCompileSlowCases()
 
         DEFINE_SLOWCASE_OP(op_iterator_open)
         DEFINE_SLOWCASE_OP(op_iterator_next)
+        DEFINE_SLOWCASE_OP(op_async_iterator_open)
 
         DEFINE_SLOWCASE_SLOW_OP(unsigned)
         DEFINE_SLOWCASE_SLOW_OP(inc)
@@ -611,8 +618,8 @@ void JIT::privateCompileSlowCases()
         if (JITInternal::verbose)
             dataLog("At ", firstTo, " slow: ", iter - m_slowCases.begin(), "\n");
 
-        RELEASE_ASSERT_WITH_MESSAGE(iter == m_slowCases.end() || firstTo.offset() != iter->to.offset(), "Not enough jumps linked in slow case codegen while handling %s.", toCString(currentInstruction->opcodeID()).data());
-        RELEASE_ASSERT_WITH_MESSAGE(firstTo.offset() == (iter - 1)->to.offset(), "Too many jumps linked in slow case codegen while handling %s.", toCString(currentInstruction->opcodeID()).data());
+        RELEASE_ASSERT_WITH_MESSAGE(iter == m_slowCases.end() || firstTo.offset() != iter->to.offset(), "Not enough jumps linked in slow case codegen while handling %s.", toUTF8CString(currentInstruction->opcodeID()));
+        RELEASE_ASSERT_WITH_MESSAGE(firstTo.offset() == (iter - 1)->to.offset(), "Too many jumps linked in slow case codegen while handling %s.", toUTF8CString(currentInstruction->opcodeID()));
 
         jump().linkTo(fastPathResumePoint(), this);
         ++bytecodeCountHavingSlowCase;
@@ -771,11 +778,6 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
     int frameTopOffset = stackPointerOffsetFor(m_unlinkedCodeBlock) * sizeof(Register);
     addPtr(TrustedImm32(frameTopOffset), callFrameRegister, regT1);
     JumpList stackOverflow;
-#if !CPU(ADDRESS64)
-    unsigned maxFrameSize = -frameTopOffset;
-    if (maxFrameSize > Options::reservedZoneSize()) [[unlikely]]
-        stackOverflow.append(branchPtr(Above, regT1, callFrameRegister));
-#endif
     stackOverflow.append(branchPtr(GreaterThan, AbsoluteAddress(m_vm->addressOfSoftStackLimit()), regT1));
 
     move(regT1, stackPointerRegister);
@@ -797,8 +799,8 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
                 if (m_unlinkedCodeBlock->isConstructor() && !argument)
                     continue;
                 int offset = CallFrame::argumentOffsetIncludingThis(argument) * static_cast<int>(sizeof(Register));
-                loadValue(Address(callFrameRegister, offset), jsRegT10);
-                storeValue(jsRegT10, Address(regT2, FixedVector<ArgumentValueProfile>::Storage::offsetOfData() + argument * sizeof(ArgumentValueProfile) + ArgumentValueProfile::offsetOfFirstBucket()));
+                loadValue(Address(callFrameRegister, offset), regT0);
+                storeValue(regT0, Address(regT2, FixedVector<ArgumentValueProfile>::Storage::offsetOfData() + argument * sizeof(ArgumentValueProfile) + ArgumentValueProfile::offsetOfFirstBucket()));
             }
         }
     }
@@ -828,7 +830,7 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
         RELEASE_ASSERT(m_unlinkedCodeBlock->codeType() == FunctionCode);
 
         unsigned numberOfParameters = m_unlinkedCodeBlock->numParameters();
-        load32(CCallHelpers::calleeFramePayloadSlot(CallFrameSlot::argumentCountIncludingThis).withOffset(sizeof(CallerFrameAndPC) - prologueStackPointerDelta()), GPRInfo::argumentGPR2);
+        load32(CCallHelpers::calleeFrameLowWordSlot(CallFrameSlot::argumentCountIncludingThis).withOffset(sizeof(CallerFrameAndPC) - prologueStackPointerDelta()), GPRInfo::argumentGPR2);
         branch32(AboveOrEqual, GPRInfo::argumentGPR2, TrustedImm32(numberOfParameters)).linkTo(entryLabel, this);
         m_bytecodeIndex = BytecodeIndex(0);
         getArityPadding(*m_vm, numberOfParameters, GPRInfo::argumentGPR2, GPRInfo::argumentGPR0, GPRInfo::argumentGPR1, GPRInfo::argumentGPR3, stackOverflowWithEntry);
@@ -925,10 +927,8 @@ RefPtr<BaselineJITCode> JIT::link(LinkBuffer& patchBuffer)
 #endif
 
     auto finalizeICs = [&] (auto& generators) {
-        for (auto& gen : generators) {
-            gen.m_unlinkedPropertyCache->doneLocation = patchBuffer.locationOf<JSInternalPtrTag>(gen.m_done);
-            gen.m_unlinkedPropertyCache->slowPathStartLocation = patchBuffer.locationOf<JITStubRoutinePtrTag>(gen.m_slowPathBegin);
-        }
+        for (auto& gen : generators)
+            gen.m_baselineUnlinkedPropertyCache->doneLocation = patchBuffer.locationOf<JSInternalPtrTag>(gen.m_done);
     };
 
     finalizeICs(m_getByIds);
@@ -981,7 +981,7 @@ RefPtr<BaselineJITCode> JIT::link(LinkBuffer& patchBuffer)
                 BytecodeIndex bytecodeIndex(bytecodeOffset);
                 if (bytecodeIndex.offset() >= m_profiledCodeBlock->instructionsSize())
                     continue;
-                LineColumn lineColumn = m_profiledCodeBlock->lineColumnForBytecodeIndex(bytecodeIndex);
+                LineColumn lineColumn = m_profiledCodeBlock->lineColumnForBytecodeIndexConcurrently(bytecodeIndex);
                 auto location = patchBuffer.locationOf<DisassemblyPtrTag>(m_labels[bytecodeOffset]);
                 uint32_t codeOffset = static_cast<uint32_t>(location.dataLocation<uintptr_t>() - reinterpret_cast<uintptr_t>(codeStart));
                 debugInfo->codeEntries.append({ codeOffset, lineColumn, Ref { *provider } });
@@ -993,7 +993,7 @@ RefPtr<BaselineJITCode> JIT::link(LinkBuffer& patchBuffer)
     // FIXME: Make a version of CodeBlockWithJITType that knows about UnlinkedCodeBlock.
     CodeRef<JSEntryPtrTag> result = FINALIZE_BASELINE_CODE(
         patchBuffer, JSEntryPtrTag,
-        "Baseline JIT code for %s", toCString(CodeBlockWithJITType(m_profiledCodeBlock, JITType::BaselineJIT)).data());
+        "Baseline JIT code for %s", toUTF8CString(CodeBlockWithJITType(m_profiledCodeBlock, JITType::BaselineJIT)));
     
     CodePtr<JSEntryPtrTag> withArityCheck = patchBuffer.locationOf<JSEntryPtrTag>(m_arityCheck);
     auto jitCode = adoptRef(*new BaselineJITCode(result, withArityCheck));
@@ -1081,9 +1081,9 @@ int JIT::stackPointerOffsetFor(CodeBlock* codeBlock)
     return stackPointerOffsetFor(codeBlock->unlinkedCodeBlock());
 }
 
-UncheckedKeyHashMap<CString, Seconds> JIT::compileTimeStats()
+UncheckedKeyHashMap<ASCIICString, Seconds> JIT::compileTimeStats()
 {
-    UncheckedKeyHashMap<CString, Seconds> result;
+    UncheckedKeyHashMap<ASCIICString, Seconds> result;
     if (Options::reportTotalCompileTimes()) {
         result.add("Total Compile Time"_s, totalCompileTime());
         result.add("Baseline Compile Time"_s, totalBaselineCompileTime);

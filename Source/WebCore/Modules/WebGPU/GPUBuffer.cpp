@@ -33,7 +33,11 @@
 
 namespace WebCore {
 
-GPUBuffer::~GPUBuffer() = default;
+GPUBuffer::~GPUBuffer()
+{
+    if (RefPtr device = m_device)
+        device->willDestroyBuffer(*this);
+}
 
 GPUBuffer::GPUBuffer(Ref<WebGPU::Buffer>&& backing, size_t bufferSize, GPUBufferUsageFlags usage, bool mappedAtCreation, GPUDevice& device)
     : m_backing(WTF::move(backing))
@@ -45,6 +49,17 @@ GPUBuffer::GPUBuffer(Ref<WebGPU::Buffer>&& backing, size_t bufferSize, GPUBuffer
 {
     if (mappedAtCreation)
         m_mappedRangeSize = m_bufferSize;
+}
+
+bool GPUBuffer::hasActiveInspectorCanvasCallTracer() const
+{
+    RefPtr device = m_device;
+    return device && device->hasActiveInspectorCanvasCallTracer();
+}
+
+GPUDevice* GPUBuffer::device() const
+{
+    return m_device;
 }
 
 String GPUBuffer::label() const
@@ -75,7 +90,7 @@ void GPUBuffer::mapAsync(GPUMapModeFlags mode, GPUSize64 offset, std::optional<G
             if (protectedThis->m_destroyed)
                 promise.reject(Exception { ExceptionCode::OperationError, "buffer destroyed during mapAsync"_s });
             else
-                promise.resolve(nullptr);
+                promise.resolve();
             return;
         }
 
@@ -84,7 +99,7 @@ void GPUBuffer::mapAsync(GPUMapModeFlags mode, GPUSize64 offset, std::optional<G
             protectedThis->m_mapState = GPUBufferMapState::Mapped;
             protectedThis->m_mappedRangeOffset = offset;
             protectedThis->m_mappedRangeSize = size.value_or(protectedThis->m_bufferSize - protectedThis->m_mappedRangeOffset);
-            promise.resolve(nullptr);
+            promise.resolve();
         } else {
             if (protectedThis->m_mapState == GPUBufferMapState::Pending)
                 protectedThis->m_mapState = GPUBufferMapState::Unmapped;
@@ -229,10 +244,15 @@ void GPUBuffer::internalUnmap(ScriptExecutionContext& scriptExecutionContext)
 
 void GPUBuffer::destroy(ScriptExecutionContext& scriptExecutionContext)
 {
+    if (m_destroyed)
+        return;
+
     m_destroyed = true;
     internalUnmap(scriptExecutionContext);
     m_bufferSize = 0;
     m_backing->destroy();
+    if (RefPtr device = m_device)
+        device->didChangeBufferMemoryCost(*this);
 }
 
 }

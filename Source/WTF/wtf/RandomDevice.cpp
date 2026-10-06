@@ -35,9 +35,15 @@
 #include <unistd.h>
 #endif
 
+#if OS(LINUX)
+#include <sys/syscall.h>
+#ifndef GRND_NONBLOCK
+#define GRND_NONBLOCK 0x0001
+#endif
+#endif
+
 #if OS(WINDOWS)
 #include <windows.h>
-#include <wincrypt.h> // windows.h must be included before wincrypt.h.
 #endif
 
 #if OS(DARWIN)
@@ -50,6 +56,27 @@
 #endif
 
 namespace WTF {
+
+#if OS(WINDOWS)
+// ProcessPrng (bcryptprimitives.dll) is the primitive that BCryptGenRandom and
+// RtlGenRandom bottom out in; calling it directly avoids loading the CNG/CryptoAPI
+// provider stacks on first use. It has no import library, so resolve it once.
+static void processPrng(std::span<uint8_t> buffer)
+{
+    using ProcessPrngFunction = BOOL (WINAPI*)(PBYTE, SIZE_T);
+    static const ProcessPrngFunction function = [] {
+        ProcessPrngFunction result = nullptr;
+        if (HMODULE module = LoadLibraryExW(L"bcryptprimitives.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+            result = reinterpret_cast<ProcessPrngFunction>(GetProcAddress(module, "ProcessPrng"));
+        if (!result)
+            CRASH();
+        return result;
+    }();
+    // Documented to always return TRUE; checked to stay fail-closed regardless.
+    if (!function(buffer.data(), buffer.size()))
+        CRASH();
+}
+#endif
 
 #if !OS(DARWIN) && !OS(FUCHSIA) && OS(UNIX)
 NEVER_INLINE NO_RETURN_DUE_TO_CRASH static void crashUnableToOpenURandom()
@@ -66,9 +93,16 @@ NEVER_INLINE NO_RETURN_DUE_TO_CRASH static void crashUnableToReadFromURandom()
 #if !OS(DARWIN) && !OS(FUCHSIA) && !OS(WINDOWS)
 RandomDevice::RandomDevice()
 {
+#if !OS(LINUX)
+    openURandom();
+#endif
+}
+
+void RandomDevice::openURandom()
+{
     int ret = 0;
     do {
-        ret = open("/dev/urandom", O_RDONLY, 0);
+        ret = open("/dev/urandom", O_RDONLY | O_CLOEXEC, 0);
     } while (ret == -1 && errno == EINTR);
     m_fd = ret;
     if (m_fd < 0)
@@ -79,7 +113,8 @@ RandomDevice::RandomDevice()
 #if !OS(DARWIN) && !OS(FUCHSIA) && !OS(WINDOWS)
 RandomDevice::~RandomDevice()
 {
-    close(m_fd);
+    if (m_fd >= 0)
+        close(m_fd);
 }
 #endif
 
@@ -93,6 +128,26 @@ void RandomDevice::cryptographicallyRandomValues(std::span<uint8_t> buffer)
     zx_cprng_draw(buffer.data(), buffer.size());
 #elif OS(UNIX)
     ssize_t amountRead = 0;
+#if OS(LINUX)
+#if defined(SYS_getrandom)
+    // getrandom(2) reads the pool /dev/urandom reads, but needs neither the path nor a free descriptor.
+    // Any failure reads the rest from /dev/urandom: EAGAIN (pool not initialized, where /dev/urandom
+    // does not block), ENOSYS, EPERM (a seccomp filter, which can be installed at any time).
+    while (static_cast<size_t>(amountRead) < buffer.size()) {
+        WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+        ssize_t currentRead = syscall(SYS_getrandom, buffer.data() + amountRead, buffer.size() - amountRead, GRND_NONBLOCK);
+        WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+        if (currentRead > 0)
+            amountRead += currentRead;
+        else if (currentRead != -1 || errno != EINTR)
+            break;
+    }
+    if (static_cast<size_t>(amountRead) == buffer.size())
+        return;
+#endif
+    if (m_fd < 0)
+        openURandom();
+#endif
     while (static_cast<size_t>(amountRead) < buffer.size()) {
         WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
         ssize_t currentRead = read(m_fd, buffer.data() + amountRead, buffer.size() - amountRead);
@@ -106,14 +161,7 @@ void RandomDevice::cryptographicallyRandomValues(std::span<uint8_t> buffer)
             amountRead += currentRead;
     }
 #elif OS(WINDOWS)
-    // FIXME: We cannot ensure that Cryptographic Service Provider context and CryptGenRandom are safe across threads.
-    // If it is safe, we can acquire context per RandomDevice.
-    HCRYPTPROV hCryptProv = 0;
-    if (!CryptAcquireContext(&hCryptProv, nullptr, MS_DEF_PROV, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
-        CRASH();
-    if (!CryptGenRandom(hCryptProv, buffer.size(), buffer.data()))
-        CRASH();
-    CryptReleaseContext(hCryptProv, 0);
+    processPrng(buffer);
 #else
 #error "This configuration doesn't have a strong source of randomness."
 // WARNING: When adding new sources of OS randomness, the randomness must

@@ -61,6 +61,7 @@
 #include <WebCore/StyleSheetContents.h>
 #include <WebCore/SubstituteData.h>
 #include <WebCore/Timer.h>
+#include <WebCore/WebsitePolicies.h>
 #include <wtf/HashSet.h>
 #include <wtf/OptionSet.h>
 #include <wtf/Platform.h>
@@ -126,22 +127,10 @@ enum class MetaViewportPolicy : uint8_t {
     Ignore,
 };
 
-enum class MediaSourcePolicy : uint8_t {
-    Default,
-    Disable,
-    Enable
-};
-
 enum class SimulatedMouseEventsDispatchPolicy : uint8_t {
     Default,
     Allow,
     Deny,
-};
-
-enum class LegacyOverflowScrollingTouchPolicy : uint8_t {
-    Default,
-    Disable,
-    Enable,
 };
 
 enum class MouseEventPolicy : uint8_t {
@@ -152,24 +141,6 @@ enum class MouseEventPolicy : uint8_t {
 };
 
 enum class ModalContainerObservationPolicy : bool { Disabled, Prompt };
-
-enum class ColorSchemePreference : uint8_t {
-    NoPreference,
-    Light,
-    Dark
-};
-
-enum class PushAndNotificationsEnabledPolicy: uint8_t {
-    UseGlobalPolicy,
-    No,
-    Yes,
-};
-
-enum class InlineMediaPlaybackPolicy : uint8_t {
-    Default,
-    RequiresPlaysInlineAttribute,
-    DoesNotRequirePlaysInlineAttribute
-};
 
 enum class ContentExtensionDefaultEnablement : bool { Disabled, Enabled };
 using ContentExtensionEnablement = std::pair<ContentExtensionDefaultEnablement, HashSet<String>>;
@@ -279,7 +250,6 @@ public:
 #endif
 
     void scheduleSubstituteResourceLoad(ResourceLoader&, SubstituteResource&);
-    void scheduleCannotShowURLError(ResourceLoader&);
 
     // FrameDestructionObserver.
     WEBCORE_EXPORT void frameDestroyed() final;
@@ -307,6 +277,11 @@ public:
     NavigationAction& triggeringAction() { return m_triggeringAction; }
     void setTriggeringAction(NavigationAction&&);
     void setTriggeringNavigationAPIType(NavigationNavigationType type) { m_triggeringAction.setNavigationAPIType(type); };
+
+    // The history handling of the navigation this loader was created for. Only meaningful before the
+    // triggering action has been given a navigation API type, which is what it is used to compute.
+    NavigationHistoryBehavior navigationHistoryBehavior() const { return m_navigationHistoryBehavior; }
+    void setNavigationHistoryBehavior(NavigationHistoryBehavior historyHandling) { m_navigationHistoryBehavior = historyHandling; }
 
     void setOverrideEncoding(const String& encoding) { m_overrideEncoding = encoding; }
     void setLastCheckedRequest(ResourceRequest&& request) { m_lastCheckedRequest = WTF::move(request); }
@@ -441,6 +416,7 @@ public:
     const DocumentLoadTiming& timing() const LIFETIME_BOUND { return m_loadTiming; }
     DocumentLoadTiming& timing() LIFETIME_BOUND { return m_loadTiming; }
     void resetTiming() { m_loadTiming = { }; }
+    void setOriginalNavigationStartTime(MonotonicTime time) { m_originalNavigationStartTime = time; }
 
     // The WebKit layer calls this function when it's ready for the data to actually be added to the document.
     WEBCORE_EXPORT void commitData(const SharedBuffer&);
@@ -501,6 +477,9 @@ public:
     OptionSet<AdvancedPrivacyProtections> navigationalAdvancedPrivacyProtections() const { return m_originatorAdvancedPrivacyProtections.value_or(m_advancedPrivacyProtections); }
     std::optional<OptionSet<AdvancedPrivacyProtections>> originatorAdvancedPrivacyProtections() const { return m_originatorAdvancedPrivacyProtections; }
 
+    void setGlobalPrivacyControlEnabled(std::optional<bool> enabled) { m_globalPrivacyControlEnabled = enabled; }
+    std::optional<bool> globalPrivacyControlEnabled() const { return m_globalPrivacyControlEnabled; }
+
     void setIdempotentModeAutosizingOnlyHonorsPercentages(bool idempotentModeAutosizingOnlyHonorsPercentages) { m_idempotentModeAutosizingOnlyHonorsPercentages = idempotentModeAutosizingOnlyHonorsPercentages; }
     bool idempotentModeAutosizingOnlyHonorsPercentages() const { return m_idempotentModeAutosizingOnlyHonorsPercentages; }
 
@@ -526,6 +505,9 @@ public:
     bool isRequestFromClientOrUserInput() const { return m_isRequestFromClientOrUserInput; }
     void setIsRequestFromClientOrUserInput(bool isRequestFromClientOrUserInput) { m_isRequestFromClientOrUserInput = isRequestFromClientOrUserInput; }
 
+    bool hasCrossOriginRedirect() const;
+    void setHasCrossOriginRedirect(bool hasCrossOriginRedirect) { m_hasCrossOriginRedirect = hasCrossOriginRedirect; }
+
     bool loadStartedDuringSwipeAnimation() const { return m_loadStartedDuringSwipeAnimation; }
     void setLoadStartedDuringSwipeAnimation() { m_loadStartedDuringSwipeAnimation = true; }
 
@@ -541,7 +523,7 @@ public:
     std::optional<NavigationIdentifier> navigationID() const { return m_navigationID.asOptional(); }
     WEBCORE_EXPORT void NODELETE setNavigationID(NavigationIdentifier);
 
-    bool isInitialAboutBlank() const { return m_isInitialAboutBlank; }
+    IsInitialAboutBlank isInitialAboutBlank() const { return m_isInitialAboutBlank; }
 
     CanTriggerCrossDocumentViewTransition navigationCanTriggerCrossDocumentViewTransition(Document& oldDocument, bool fromBackForwardCache);
     WEBCORE_EXPORT void whenDocumentIsCreated(Function<void(Document*)>&&);
@@ -717,6 +699,7 @@ private:
     
     String m_clientRedirectSourceForHistory;
     DocumentLoadTiming m_loadTiming;
+    MonotonicTime m_originalNavigationStartTime;
 
     Markable<ResourceLoaderIdentifier> m_identifierForLoadWithoutResourceLoader;
 
@@ -768,6 +751,7 @@ private:
 
     OptionSet<AdvancedPrivacyProtections> m_advancedPrivacyProtections;
     std::optional<OptionSet<AdvancedPrivacyProtections>> m_originatorAdvancedPrivacyProtections;
+    std::optional<bool> m_globalPrivacyControlEnabled;
     AutoplayPolicy m_autoplayPolicy { AutoplayPolicy::Default };
     OptionSet<AutoplayQuirk> m_allowedAutoplayQuirks;
     PopUpPolicy m_popUpPolicy { PopUpPolicy::Default };
@@ -792,6 +776,7 @@ private:
     bool m_idempotentModeAutosizingOnlyHonorsPercentages { false };
 
     bool m_isRequestFromClientOrUserInput { false };
+    bool m_hasCrossOriginRedirect { false };
     bool m_loadStartedDuringSwipeAnimation { false };
     bool m_lastNavigationWasAppInitiated { true };
     bool m_allowPrivacyProxy { true };
@@ -805,9 +790,10 @@ private:
     bool m_gotFirstByte { false };
     bool m_isContentRuleListRedirect { false };
     bool m_isClientRedirect { false };
+    NavigationHistoryBehavior m_navigationHistoryBehavior { NavigationHistoryBehavior::Auto };
     bool m_isLoadingMultipartContent { false };
     bool m_isInFinishedLoadingOfEmptyDocument { false };
-    bool m_isInitialAboutBlank { false };
+    IsInitialAboutBlank m_isInitialAboutBlank { IsInitialAboutBlank::No };
 
     // FIXME: Document::m_processingLoadEvent and DocumentLoader::m_wasOnloadDispatched are roughly the same
     // and should be merged.

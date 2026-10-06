@@ -175,6 +175,9 @@ BasicBlock* CloneHelper::cloneBlock(BasicBlock* const block, const CustomizeSucc
     CLONE_STATUS(BooleanToNumber, Common) \
     CLONE_STATUS(BottomValue, Common) \
     CLONE_STATUS(Branch, Special) \
+    CLONE_STATUS(BufferReadFloat, Common) \
+    CLONE_STATUS(BufferReadInt, Common) \
+    CLONE_STATUS(BufferWrite, Common) \
     CLONE_STATUS(Call, Common) \
     CLONE_STATUS(CallCustomAccessorGetter, Common) \
     CLONE_STATUS(CallDirectEval, Common) \
@@ -244,6 +247,7 @@ BasicBlock* CloneHelper::cloneBlock(BasicBlock* const block, const CustomizeSucc
     CLONE_STATUS(GetByValWithThis, Common) \
     CLONE_STATUS(GetByValWithThisMegamorphic, Common) \
     CLONE_STATUS(GetClosureVar, Common) \
+    CLONE_STATUS(GetLazyClosureVar, Common) \
     CLONE_STATUS(GetExecutable, Common) \
     CLONE_STATUS(GetGlobalLexicalVariable, Common) \
     CLONE_STATUS(GetGlobalVar, Common) \
@@ -362,6 +366,7 @@ BasicBlock* CloneHelper::cloneBlock(BasicBlock* const block, const CustomizeSucc
     CLONE_STATUS(StringSearch, Common) \
     CLONE_STATUS(StringSubstring, Common) \
     CLONE_STATUS(StringSubstr, Common) \
+    CLONE_STATUS(StringTrim, Common) \
     CLONE_STATUS(StrCat, Common) \
     CLONE_STATUS(Switch, Special) \
     CLONE_STATUS(TailCallForwardVarargsInlinedCaller, Special) \

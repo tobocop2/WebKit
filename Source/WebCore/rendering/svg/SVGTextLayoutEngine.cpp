@@ -22,7 +22,6 @@
 #include "config.h"
 #include "SVGTextLayoutEngine.h"
 
-#include "PathTraversalState.h"
 #include "RenderElementInlines.h"
 #include "RenderSVGTextPath.h"
 #include "SVGElement.h"
@@ -158,6 +157,38 @@ bool SVGTextLayoutEngine::parentDefinesTextLength(RenderObject* parent) const
     return false;
 }
 
+float SVGTextLayoutEngine::computeTextPathStartOffset(const RenderSVGTextPath& textPath) const
+{
+    const auto& startOffset = textPath.startOffset();
+
+    // 'pathLength' has no effect on percentage distance-along-a-path calculations.
+    if (startOffset.lengthType() == SVGLengthType::Percentage)
+        return startOffset.valueAsPercentage() * m_textPathLength;
+
+    auto offset = startOffset.valueInSpecifiedUnits();
+
+    // Inline path data has no referenced element, so there is no author-declared
+    // length to measure startOffset against, even when an overridden href has one.
+    if (textPath.usesPathAttribute())
+        return offset;
+
+    RefPtr targetElement = textPath.targetElement();
+    if (!targetElement || !targetElement->hasAttribute(SVGNames::pathLengthAttr))
+        return offset;
+
+    // 'pathLength' restates the path's length in the author's own units, so the offset is
+    // scaled by the measured length over the declared one. A declared zero is a scaling
+    // factor of infinity, but zero scaled infinitely must stay zero, and 0 * infinity is a
+    // NaN. A negative value is an error and is ignored.
+    // https://w3c.github.io/svgwg/svg2-draft/paths.html#PathLengthAttribute
+    auto declaredLength = targetElement->pathLength();
+    if (declaredLength < 0 || !offset)
+        return offset;
+    if (!declaredLength)
+        return offset * std::numeric_limits<float>::infinity();
+    return offset * (m_textPathLength / declaredLength);
+}
+
 void SVGTextLayoutEngine::beginTextPathLayout(const RenderSVGTextPath& textPath, SVGTextLayoutEngine& lineLayout)
 {
     m_inPathLayout = true;
@@ -166,23 +197,11 @@ void SVGTextLayoutEngine::beginTextPathLayout(const RenderSVGTextPath& textPath,
     if (m_textPath.isEmpty())
         return;
 
-    const auto& startOffset = textPath.startOffset();
-    m_textPathLength = m_textPath.length();
-    
-    if (textPath.startOffset().lengthType() == SVGLengthType::Percentage)
-        m_textPathStartOffset = startOffset.valueAsPercentage() * m_textPathLength;
-    else {
-        m_textPathStartOffset = startOffset.valueInSpecifiedUnits();
-        if (RefPtr targetElement = textPath.targetElement()) {
-            if (targetElement->hasAttribute(SVGNames::pathLengthAttr)) {
-                float pathLength = targetElement->pathLength();
-                if (pathLength > 0)
-                    m_textPathStartOffset *= m_textPathLength / pathLength;
-                else if (!pathLength && m_textPathStartOffset)
-                    m_textPathStartOffset *= std::numeric_limits<float>::infinity();
-            }
-        }
-    }
+    // Precompute the arc-length table once so per-glyph queries are O(log n), not a full re-walk each (webkit.org/b/318396).
+    m_textPathMapper = m_textPath.arcLengthMapper();
+
+    m_textPathLength = m_textPathMapper.totalLength();
+    m_textPathStartOffset = computeTextPathStartOffset(textPath);
 
     lineLayout.m_chunkLayoutBuilder.buildTextChunks(lineLayout.m_lineLayoutBoxes, lineLayout.m_lineLayoutChunkStarts, lineLayout.m_fragmentMap);
 
@@ -261,7 +280,7 @@ static inline void dumpTextBoxes(Vector<InlineIterator::SVGTextBoxIterator>& box
             SVGTextFragment& fragment = fragments.at(i);
             String fragmentString(characters + fragment.characterOffset, fragment.length);
             fprintf(stderr, "    -> Fragment %d, x=%.2f, y=%.2f, width=%.2f, height=%.2f, characterOffset=%d, length=%d, characters='%s'\n"
-                          , i, fragment.x, fragment.y, fragment.width, fragment.height, fragment.characterOffset, fragment.length, fragmentString.utf8().data());
+                          , i, fragment.x, fragment.y, fragment.width, fragment.height, fragment.characterOffset, fragment.length, fragmentString.utf8().legacyCStringPointer());
         }
     }
 }
@@ -412,8 +431,7 @@ void SVGTextLayoutEngine::layoutTextOnLineOrPath(InlineIterator::SVGTextBoxItera
 
     RenderElement* textParent = text.parent();
     ASSERT(textParent);
-    RefPtr lengthContext = downcast<SVGElement>(textParent->element());
-    
+
     bool definesTextLength = parentDefinesTextLength(textParent);
 
     m_visualMetricsListOffset = 0;
@@ -603,15 +621,13 @@ void SVGTextLayoutEngine::layoutTextOnLineOrPath(InlineIterator::SVGTextBoxItera
             if (textPathOffset > m_textPathLength)
                 break;
 
-            auto traversalState(m_textPath.traversalStateAtLength(textPathOffset));
-            ASSERT(traversalState.success());
+            auto position = m_textPathMapper.positionAtLength(textPathOffset);
 
-            FloatPoint point = traversalState.current();
-            x = point.x();
-            y = point.y();
+            x = position.point.x();
+            y = position.point.y();
 
             // Compose with rotate attribute per SVG 2 §11.2.1.
-            angle += traversalState.normalAngle();
+            angle += position.angleInDegrees;
 
             // For vertical text on path, the actual angle has to be rotated 90 degrees anti-clockwise, not the orientation angle!
             if (m_isVerticalText)

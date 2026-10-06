@@ -637,12 +637,10 @@ void run(const TestConfig* config)
     RUN(testInt52RoundTripBinary());
     RUN(testTruncSShrAddUnalignedConstant());
 
-#if !CPU(ARM)
     RUN_UNARY(testCheckAddRemoveCheckWithSExt8, int8Operands());
     RUN_UNARY(testCheckAddRemoveCheckWithSExt16, int16Operands());
     RUN_UNARY(testCheckAddRemoveCheckWithSExt32, int32Operands());
     RUN_UNARY(testCheckAddRemoveCheckWithZExt32, int32Operands());
-#endif
 
     RUN(testStoreZeroReg());
     RUN(testStore32(44));
@@ -778,11 +776,8 @@ void run(const TestConfig* config)
     RUN(testPatchpointAnyImm(ValueRep::WarmAny));
     RUN(testPatchpointAnyImm(ValueRep::ColdAny));
     RUN(testPatchpointAnyImm(ValueRep::LateColdAny));
-    if constexpr (!is32Bit()) {
-        // Can't handle ConstDoubleValue arguments to patchpoints on 32 bits.
-        RUN(testPatchpointManyWarmAnyImms());
-        RUN(testPatchpointManyColdAnyImms());
-    }
+    RUN(testPatchpointManyWarmAnyImms());
+    RUN(testPatchpointManyColdAnyImms());
     RUN(testPatchpointWithRegisterResult());
     RUN(testPatchpointWithStackArgumentResult());
     RUN(testPatchpointWithAnyResult());
@@ -794,7 +789,6 @@ void run(const TestConfig* config)
     RUN(testCheckTrickyMegaCombo());
     RUN(testCheckTwoMegaCombos());
     RUN(testCheckTwoNonRedundantMegaCombos());
-#if !CPU(ARM)
     RUN(testCheckAddImm());
     RUN(testCheckAddImmCommute());
     RUN(testCheckAddImmSomeRegister());
@@ -824,7 +818,6 @@ void run(const TestConfig* config)
     RUN(testCheckMulFoldFail(2147483647, 100));
     RUN(testCheckMulArgumentAliasing64());
     RUN(testCheckMulArgumentAliasing32());
-#endif
 
     RUN_BINARY([](int32_t a, int32_t b) { testCompare(Equal, a, b); }, int64Operands(), int64Operands());
     RUN_BINARY([](int32_t a, int32_t b) { testCompare(NotEqual, a, b); }, int64Operands(), int64Operands());
@@ -924,6 +917,7 @@ void run(const TestConfig* config)
 
     RUN(testSwitchTargettingSameBlock());
     RUN(testSwitchTargettingSameBlockFoldPathConstant());
+    RUN(testSwitchSparseI64RangeOverflow());
 
     RUN(testTrunc(0));
     RUN(testTrunc(1));
@@ -993,6 +987,7 @@ void run(const TestConfig* config)
     RUN(testCheckSelect());
     RUN(testCheckSelectCheckSelect());
     RUN(testCheckSelectAndCSE());
+    RUN(testCheckSelectAndDeadCheckCSE());
     RUN_BINARY(testPowDoubleByIntegerLoop, floatingPointOperands<double>(), int64Operands());
 
     RUN(testTruncOrHigh());
@@ -1159,6 +1154,8 @@ void run(const TestConfig* config)
     RUN(testLICMControlDependent());
     RUN(testLICMControlDependentNotBackwardsDominant());
     RUN(testLICMControlDependentSideExits());
+    RUN(testLICMControlDependentSideExitInPredecessor());
+    RUN(testLICMControlDependentSideExitInEarlierIteration());
     RUN(testLICMReadsPinnedWritesPinned());
     RUN(testLICMReadsWritesDifferentHeaps());
     RUN(testLICMReadsWritesOverlappingHeaps());
@@ -1166,10 +1163,7 @@ void run(const TestConfig* config)
 
     addAtomicTests(config, tasks);
     RUN(testDepend32());
-    if constexpr (!is32Bit()) {
-        // Test only applicable on 64-bits.
-        RUN(testDepend64());
-    }
+    RUN(testDepend64());
 
     RUN(testWasmBoundsCheck(0));
     RUN(testWasmBoundsCheck(100));
@@ -1177,6 +1171,9 @@ void run(const TestConfig* config)
     RUN(testWasmBoundsCheck(std::numeric_limits<unsigned>::max() - 5));
 
     RUN(testWasmAddress());
+    RUN(testWasmAddressZeroExtendScaledIndex());
+    RUN(testWasmAddressZeroExtend32BitShiftWraps());
+    RUN(testWasmAddressScaledIndexWithLockedShlChild());
     RUN(testWasmAddressWithOffset());
     
     RUN(testFastTLSLoad());
@@ -1197,6 +1194,7 @@ void run(const TestConfig* config)
     RUN(testLoopWithMultipleHeaderEdges());
 
     RUN(testInfiniteLoopDoesntCauseBadHoisting());
+    RUN(testBackwardsDominatorsWithMultipleBackEdges());
 
     RUN(testFloatMaxMin());
     RUN(testDoubleMaxMin());
@@ -1405,6 +1403,13 @@ void run(const TestConfig* config)
     RUN(testFCCmpNegatedAndDouble(1.0, 2.0, 4.0, 3.0));  // !(true && false) = true
     RUN(testFCCmpNegatedAndDouble(2.0, 1.0, 4.0, 3.0));  // !(false && false) = true
 
+    RUN(testCCmpChainRollback(5, 8, 5, 5, 5, 10)); // in-bounds, expected 1
+    RUN(testCCmpChainRollback(5, 8, 1, 2, 3, 4)); // inner expr non-zero, expected 0
+    RUN(testCCmpChainRollback(5, 8, 5, 5, 5, 5)); // inner expr non-zero (both eq), expected 0
+    RUN(testCCmpChainRollback(-1, 8, 5, 5, 5, 10)); // signed i<len, expected 1
+    RUN(testCCmpChainRollback(200, 8, 5, 5, 5, 10)); // i>=len; pre-fix wrongly returns 1
+    RUN(testCCmpChainRollback(5, 8, 5, 5, 5, -10)); // c>d, expected 1
+
     RUN_UNARY(testSShrCompare32, int32OperandsMore());
     RUN_UNARY(testSShrCompare64, int64OperandsMore());
 
@@ -1486,6 +1491,7 @@ void run(const TestConfig* config)
         RUN(testVectorXor3());
         RUN(testVectorShlImmediate());
         RUN(testVectorShrImmediate());
+        RUN(testVectorZipWithZeroIsZeroExtend());
         RUN(testVectorUnzipEven());
         RUN(testVectorUnzipOdd());
         RUN(testVectorZipLower());

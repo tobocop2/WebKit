@@ -49,6 +49,7 @@ void BytecodeRewriter::applyModification()
             m_writer.m_instructions.insertVector(insertion.index.bytecodeOffset, insertion.instructions.m_instructions);
         }
     }
+    m_writer.didMutateBuffer();
     m_insertions.clear();
 }
 
@@ -58,7 +59,7 @@ void BytecodeRewriter::execute()
         return lhs.index < rhs.index;
     });
 
-    m_codeBlock->applyModification(*this, m_writer);
+    m_codeBlock->applyModification(*this);
 }
 
 void BytecodeRewriter::adjustJumpTargetsInFragment(unsigned finalOffset, Insertion& insertion)

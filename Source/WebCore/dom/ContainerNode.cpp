@@ -312,6 +312,49 @@ static ContainerNode::ChildChange makeChildChangeForInsertion(ContainerNode& con
     };
 }
 
+static ContainerNode::ChildChange makeChildChangeForMoveRemoval(Node& child)
+{
+    auto changeType = [&] {
+        if (is<Element>(child))
+            return ContainerNode::ChildChange::Type::ElementMovedFrom;
+        if (is<Text>(child))
+            return ContainerNode::ChildChange::Type::TextMovedFrom;
+        return ContainerNode::ChildChange::Type::NonContentsChildMovedFrom;
+    }();
+
+    return {
+        changeType,
+        nullptr,
+        dynamicDowncast<Element>(child),
+        ElementTraversal::previousSibling(child),
+        ElementTraversal::nextSibling(child),
+        ContainerNode::ChildChange::Source::API,
+        changeType == ContainerNode::ChildChange::Type::ElementMovedFrom ? ContainerNode::ChildChange::AffectsElements::Yes : ContainerNode::ChildChange::AffectsElements::No
+    };
+}
+
+static ContainerNode::ChildChange makeChildChangeForMoveInsertion(ContainerNode& containerNode, Node& child, Node* beforeChild)
+{
+    auto changeType = [&] {
+        if (is<Element>(child))
+            return ContainerNode::ChildChange::Type::ElementMovedInto;
+        if (is<Text>(child))
+            return ContainerNode::ChildChange::Type::TextMovedInto;
+        return ContainerNode::ChildChange::Type::NonContentsChildMovedInto;
+    }();
+
+    auto* beforeChildElement = dynamicDowncast<Element>(beforeChild);
+    return {
+        changeType,
+        nullptr,
+        dynamicDowncast<Element>(child),
+        beforeChild ? ElementTraversal::previousSibling(*beforeChild) : ElementTraversal::lastChild(containerNode),
+        !beforeChild || beforeChildElement ? beforeChildElement : ElementTraversal::nextSibling(*beforeChild),
+        ContainerNode::ChildChange::Source::API,
+        changeType == ContainerNode::ChildChange::Type::ElementMovedInto ? ContainerNode::ChildChange::AffectsElements::Yes : ContainerNode::ChildChange::AffectsElements::No
+    };
+}
+
 static ContainerNode::ChildChange NODELETE makeChildChangeForInsertion(ContainerNode& containerNode, NodeVector& children, Node* beforeChild, ContainerNode::ChildChange::Source source, ReplacedAllChildren replacedAllChildren)
 {
     using Type = ContainerNode::ChildChange::Type;
@@ -542,27 +585,39 @@ static inline bool NODELETE isChildTypeAllowed(ContainerNode& newParent, Node& c
     return true;
 }
 
-static bool containsIncludingHostElements(const Node& possibleAncestor, const Node& node)
+static inline const ContainerNode* NODELETE hostIncludingParent(const Node& node)
 {
-    const Node* currentNode = &node;
-    do {
+    if (auto* parent = node.parentNode())
+        return parent;
+    if (auto* shadowRoot = dynamicDowncast<ShadowRoot>(node))
+        return shadowRoot->host();
+    if (auto* fragment = dynamicDowncast<TemplateContentDocumentFragment>(node))
+        return fragment->host();
+    return nullptr;
+}
+
+// https://dom.spec.whatwg.org/#concept-tree-host-including-inclusive-ancestor
+bool containsIncludingHostElements(const Node& possibleAncestor, const Node& node)
+{
+    if (&possibleAncestor == &node)
+        return true;
+
+    if (!possibleAncestor.hasChildNodes() && !possibleAncestor.shadowRoot() && !possibleAncestor.hasTagName(HTMLNames::templateTag))
+        return false;
+
+    auto* possibleAncestorRoot = &possibleAncestor.shadowIncludingRoot();
+    for (auto* currentNode = &node; currentNode; currentNode = hostIncludingParent(*currentNode)) {
         if (currentNode == &possibleAncestor)
             return true;
-        const ContainerNode* parent = currentNode->parentNode();
-        if (!parent) {
-            if (auto* shadowRoot = dynamicDowncast<ShadowRoot>(*currentNode))
-                parent = shadowRoot->host();
-            else if (auto* fragment = dynamicDowncast<TemplateContentDocumentFragment>(*currentNode))
-                parent = fragment->host();
-        }
-        currentNode = WTF::move(parent);
-    } while (currentNode);
+        if (auto* currentRoot = &currentNode->shadowIncludingRoot(); currentRoot != possibleAncestorRoot)
+            currentNode = currentRoot;
+    }
 
     return false;
 }
 
 enum class ShouldValidateChildParent : bool { No, Yes };
-static inline ExceptionOr<void> checkAcceptChild(ContainerNode& newParent, Node& newChild, const Node* refChild, Document::AcceptChildOperation operation, ShouldValidateChildParent shouldValidateChildParent)
+static inline ExceptionOr<void> checkAcceptChild(ContainerNode& newParent, Node& newChild, const Node* refChild, AcceptChildOperation operation, ShouldValidateChildParent shouldValidateChildParent)
 {
     if (containsIncludingHostElements(newChild, newParent))
         return Exception { ExceptionCode::HierarchyRequestError };
@@ -605,11 +660,11 @@ static inline ExceptionOr<void> checkAcceptChildGuaranteedNodeTypes(ContainerNod
 // https://dom.spec.whatwg.org/#concept-node-ensure-pre-insertion-validity
 ExceptionOr<void> ContainerNode::ensurePreInsertionValidity(Node& newChild, Node* refChild)
 {
-    return checkAcceptChild(*this, newChild, refChild, Document::AcceptChildOperation::InsertOrAdd, ShouldValidateChildParent::Yes);
+    return checkAcceptChild(*this, newChild, refChild, AcceptChildOperation::InsertOrAdd, ShouldValidateChildParent::Yes);
 }
 
 // https://dom.spec.whatwg.org/#concept-node-ensure-pre-insertion-validity when node is a new DocumentFragment created in "converting nodes into a node"
-ExceptionOr<void> ContainerNode::ensurePreInsertionValidityForPhantomDocumentFragment(NodeVector& newChildren, Node* refChild)
+ExceptionOr<void> ContainerNode::ensurePreInsertionValidityForPhantomDocumentFragment(NodeVector& newChildren, Node* refChild, AcceptChildOperation operation)
 {
     if (is<Document>(*this)) [[unlikely]] {
         bool hasSeenElement = false;
@@ -622,7 +677,7 @@ ExceptionOr<void> ContainerNode::ensurePreInsertionValidityForPhantomDocumentFra
         }
     }
     for (auto& child : newChildren) {
-        if (auto result = checkAcceptChild(*this, child, refChild, Document::AcceptChildOperation::InsertOrAdd, ShouldValidateChildParent::Yes); result.hasException())
+        if (auto result = checkAcceptChild(*this, child, refChild, operation, ShouldValidateChildParent::Yes); result.hasException())
             return result;
     }
     return { };
@@ -631,7 +686,7 @@ ExceptionOr<void> ContainerNode::ensurePreInsertionValidityForPhantomDocumentFra
 // https://dom.spec.whatwg.org/#concept-node-replace
 static inline ExceptionOr<void> checkPreReplacementValidity(ContainerNode& newParent, Node& newChild, Node& oldChild, ShouldValidateChildParent shouldValidateChildParent)
 {
-    return checkAcceptChild(newParent, newChild, &oldChild, Document::AcceptChildOperation::Replace, shouldValidateChildParent);
+    return checkAcceptChild(newParent, newChild, &oldChild, AcceptChildOperation::Replace, shouldValidateChildParent);
 }
 
 ExceptionOr<void> ContainerNode::insertBefore(Node& newChild, RefPtr<Node>&& refChild)
@@ -1404,7 +1459,7 @@ ExceptionOr<void> ContainerNode::replaceChildren(FixedVector<NodeOrString>&& vec
         return result.releaseException();
     auto newChildren = result.releaseReturnValue();
 
-    if (auto checkResult = ensurePreInsertionValidityForPhantomDocumentFragment(newChildren); checkResult.hasException())
+    if (auto checkResult = ensurePreInsertionValidityForPhantomDocumentFragment(newChildren, nullptr, AcceptChildOperation::ReplaceAll); checkResult.hasException())
         return checkResult;
 
     Ref protectedThis { *this };
@@ -1430,6 +1485,23 @@ void ContainerNode::replaceChildrenWithoutValidityCheck(NodeVector&& newChildren
     RELEASE_ASSERT(!appendResult.hasException());
     rebuildSVGExtensionsElementsIfNecessary();
     dispatchSubtreeModifiedEvent();
+}
+
+static void runMovingStepsForShadowIncludingInclusiveDescendants(Node& root, Node& movedNode, ContainerNode& oldParent, bool newParentIsConnected)
+{
+    for (RefPtr inclusiveDescendant = &root; inclusiveDescendant; inclusiveDescendant = NodeTraversal::next(*inclusiveDescendant, &root)) {
+        bool isSubtreeRoot = inclusiveDescendant.get() == &movedNode;
+
+        inclusiveDescendant->movingSteps(isSubtreeRoot ? Node::IsSubtreeRoot::Yes : Node::IsSubtreeRoot::No, oldParent);
+
+        if (newParentIsConnected) {
+            if (RefPtr element = dynamicDowncast<Element>(*inclusiveDescendant); element && element->isDefinedCustomElement())
+                CustomElementReactionQueue::enqueueConnectedMoveCallbackIfNeeded(*element);
+        }
+
+        if (RefPtr shadowRoot = inclusiveDescendant->shadowRoot())
+            runMovingStepsForShadowIncludingInclusiveDescendants(*shadowRoot, movedNode, oldParent, newParentIsConnected);
+    }
 }
 
 // https://dom.spec.whatwg.org/#dom-parentnode-movebefore
@@ -1462,7 +1534,7 @@ ExceptionOr<void> ContainerNode::moveBefore(Node& node, RefPtr<Node>&& refChild)
             return Exception { ExceptionCode::HierarchyRequestError };
 
         if (refChild) {
-            for (auto* followingSibling = refChild.get(); followingSibling; followingSibling = followingSibling->nextSibling()) {
+            for (RefPtr followingSibling = refChild; followingSibling; followingSibling = followingSibling->nextSibling()) {
                 if (followingSibling->isDocumentTypeNode())
                     return Exception { ExceptionCode::HierarchyRequestError };
             }
@@ -1475,7 +1547,7 @@ ExceptionOr<void> ContainerNode::moveBefore(Node& node, RefPtr<Node>&& refChild)
     RefPtr oldPreviousSibling = node.previousSibling();
     RefPtr oldNextSibling = node.nextSibling();
 
-    auto removalChildChange = makeChildChangeForRemoval(node, ChildChange::Source::API);
+    auto removalChildChange = makeChildChangeForMoveRemoval(node);
 
     {
         Ref nodeDocument = node.document();
@@ -1501,6 +1573,8 @@ ExceptionOr<void> ContainerNode::moveBefore(Node& node, RefPtr<Node>&& refChild)
         }
 
         node.updateAncestorConnectedSubframeCountForRemoval();
+        // FIXME(319588): Handle inspector DOM breakpoints (e.g. InspectorInstrumentation::willRemoveDOMNode)
+        InspectorInstrumentation::didRemoveDOMNode(nodeDocument, node);
         node.setParentNode(nullptr);
 
         // FIXME(281223): Handle slot assignments and live ranges.
@@ -1509,6 +1583,8 @@ ExceptionOr<void> ContainerNode::moveBefore(Node& node, RefPtr<Node>&& refChild)
             insertBeforeCommon(*refChild, node);
         else
             appendChildCommon(node);
+        // FIXME(319588): Handle inspector DOM breakpoints (e.g. InspectorInstrumentation::willInsertDOMNode)
+        InspectorInstrumentation::didInsertDOMNode(protect(document()), node);
 
         node.setTreeScopeRecursively(treeScope());
         node.updateAncestorConnectedSubframeCountForInsertion();
@@ -1517,22 +1593,10 @@ ExceptionOr<void> ContainerNode::moveBefore(Node& node, RefPtr<Node>&& refChild)
 
     auto newParentIsConnected = isConnected();
 
-    // FIXME(281223): Need to recurse into shadow trees.
-    for (RefPtr inclusiveDescendant = &node; inclusiveDescendant; inclusiveDescendant = NodeTraversal::next(*inclusiveDescendant, &node)) {
-        bool isSubtreeRoot = inclusiveDescendant.get() == &node;
-
-        inclusiveDescendant->movingSteps(isSubtreeRoot, *oldParent);
-
-        if (newParentIsConnected) {
-            if (RefPtr element = dynamicDowncast<Element>(*inclusiveDescendant); element && element->isDefinedCustomElement())
-                CustomElementReactionQueue::enqueueConnectedMoveCallbackIfNeeded(*element);
-        }
-    }
-
-    // FIXME: Add a new type for ChildChange.
+    runMovingStepsForShadowIncludingInclusiveDescendants(node, node, *oldParent, newParentIsConnected);
 
     oldParent->childrenChanged(removalChildChange);
-    childrenChanged(makeChildChangeForInsertion(*this, node, refChild, ChildChange::Source::API, ReplacedAllChildren::No));
+    childrenChanged(makeChildChangeForMoveInsertion(*this, node, refChild));
 
     return { };
 }

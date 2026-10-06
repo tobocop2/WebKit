@@ -31,14 +31,17 @@
 
 #pragma once
 
+#include <WebCore/BackForwardCacheCommitData.h>
 #include <WebCore/FrameIdentifier.h>
 #include <WebCore/FrameLoaderStateMachine.h>
 #include <WebCore/FrameLoaderTypes.h>
 #include <WebCore/LayoutMilestone.h>
 #include <WebCore/LoaderMalloc.h>
 #include <WebCore/NavigationAction.h>
+#include <WebCore/NavigationHistoryBehavior.h>
 #include <WebCore/NavigationRequester.h>
 #include <WebCore/PageIdentifier.h>
+#include <WebCore/PendingNavigateEventIdentifier.h>
 #include <WebCore/PrivateClickMeasurement.h>
 #include <WebCore/ReferrerPolicy.h>
 #include <WebCore/ResourceLoadNotifier.h>
@@ -95,8 +98,6 @@ enum class CachePolicy : uint8_t;
 enum class NewLoadInProgress : bool;
 enum class NavigationPolicyDecision : uint8_t;
 enum class ShouldTreatAsContinuingLoad : uint8_t;
-enum class UsedLegacyTLS : bool;
-enum class WasPrivateRelayed : bool;
 enum class IsMainResource : bool { No, Yes };
 enum class ShouldUpdateAppInitiatedValue : bool { No, Yes };
 
@@ -139,6 +140,8 @@ public:
     WEBCORE_EXPORT void loadFrameRequest(FrameLoadRequest&&, Event*, RefPtr<const FormSubmission>&&, std::optional<PrivateClickMeasurement>&& = std::nullopt); // Called by submitForm, calls loadPostRequest and loadURL.
 
     WEBCORE_EXPORT void load(FrameLoadRequest&&, std::optional<NavigationRequester>&& crossSiteRequester = std::nullopt);
+
+    WEBCORE_EXPORT bool dispatchPendingNavigateEventAfterNavigationPolicy(PendingNavigateEventIdentifier);
 
 #if ENABLE(WEB_ARCHIVE) || ENABLE(MHTML)
     WEBCORE_EXPORT void loadArchive(Ref<Archive>&&);
@@ -364,11 +367,12 @@ public:
 
     void updateURLAndHistory(const URL&, RefPtr<SerializedScriptValue>&& stateObject, NavigationHistoryBehavior = NavigationHistoryBehavior::Replace);
 
-    WEBCORE_EXPORT void NODELETE setPendingAsyncBackForwardNavigation();
-    WEBCORE_EXPORT void cancelPendingAsyncBackForwardNavigation();
-    bool asyncBackForwardNavigationWasCancelled() const { return m_asyncBackForwardNavigationState == AsyncBackForwardNavigationState::Cancelled; }
-    WEBCORE_EXPORT void clearAsyncBackForwardNavigationState();
-    bool isWaitingForAsyncBackForwardNavigation() const { return m_asyncBackForwardNavigationState != AsyncBackForwardNavigationState::None; }
+    void clearDeferredTraversal();
+    void resumeDeferredTraversal();
+
+    void setWaitingForDelegatedBackForwardLoad() { m_isWaitingForDelegatedBackForwardLoad = true; }
+    WEBCORE_EXPORT void clearWaitingForDelegatedBackForwardLoad();
+    bool isWaitingForDelegatedBackForwardLoad() const { return m_isWaitingForDelegatedBackForwardLoad; }
 
     void setRequiredCookiesVersion(uint64_t version) { m_requiredCookiesVersion = version; }
     uint64_t requiredCookiesVersion() const { return m_requiredCookiesVersion; }
@@ -383,6 +387,8 @@ public:
     WEBCORE_EXPORT FrameLoadRequest createFrameLoadRequest(URL&&);
 
     bool isDispatchingPageSwapEvent() const  { return m_isDispatchingPageSwapEvent; }
+
+    void updateFirstPartyForCookies();
 
 private:
     enum FormSubmissionCacheLoadPolicy {
@@ -408,7 +414,6 @@ private:
 
     void loadProvisionalItemFromCachedPage();
 
-    void updateFirstPartyForCookies();
     void setFirstPartyForCookies(const URL&);
 
     ResourceRequestCachePolicy defaultRequestCachingPolicy(const ResourceRequest&, FrameLoadType, bool isMainResource);
@@ -444,7 +449,7 @@ private:
 
     bool shouldReloadToHandleUnreachableURL(DocumentLoader&);
 
-    void dispatchDidCommitLoad(std::optional<HasInsecureContent> initialHasInsecureContent, std::optional<UsedLegacyTLS> initialUsedLegacyTLS, std::optional<WasPrivateRelayed> initialWasPrivateRelayed);
+    void dispatchDidCommitLoad(const std::optional<BackForwardCacheCommitData>&);
 
     void loadWithDocumentLoader(DocumentLoader*, FrameLoadType, RefPtr<const FormSubmission>&&, AllowNavigationToInvalidURL, ShouldRestoreFromBackForwardCache = ShouldRestoreFromBackForwardCache::Unspecified, CompletionHandler<void()>&& = [] { }); // Calls continueLoadAfterNavigationPolicy
     void load(DocumentLoader&, const SecurityOrigin* requesterOrigin); // Calls loadWithDocumentLoader
@@ -565,8 +570,9 @@ private:
     URL m_previousURL;
     RefPtr<HistoryItem> m_requestedHistoryItem;
 
-    enum class AsyncBackForwardNavigationState : uint8_t { None, Pending, Cancelled };
-    AsyncBackForwardNavigationState m_asyncBackForwardNavigationState { AsyncBackForwardNavigationState::None };
+    // A child frame whose back/forward load is delegated to the UIProcess still reports isComplete()
+    // on its initial empty document, so this is what keeps its parent from completing.
+    bool m_isWaitingForDelegatedBackForwardLoad { false };
 
     bool m_alwaysAllowLocalWebarchive { false };
 
@@ -579,6 +585,8 @@ private:
     bool m_doNotAbortNavigationAPI { false };
     bool m_isDispatchingPageSwapEvent { false };
     RefPtr<HistoryItem> m_pendingNavigationAPIItem;
+    RefPtr<HistoryItem> m_deferredTraversalItem;
+    FrameLoadType m_deferredTraversalLoadType { FrameLoadType::IndexedBackForward };
     uint64_t m_requiredCookiesVersion { 0 };
 
     const Ref<DocumentPrefetcher> m_documentPrefetcher;

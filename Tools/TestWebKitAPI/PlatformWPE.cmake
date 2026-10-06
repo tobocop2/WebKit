@@ -19,10 +19,13 @@ list(APPEND TestWTF_SOURCES
     ${test_main_SOURCES}
 
     Tests/WTF/glib/ActivityObserver.cpp
+    Tests/WTF/glib/FilePathWatcher.cpp
     Tests/WTF/glib/GMallocString.cpp
     Tests/WTF/glib/GRefPtr.cpp
     Tests/WTF/glib/GUniquePtr.cpp
     Tests/WTF/glib/GWeakPtr.cpp
+    Tests/WTF/glib/SysprofAnnotator.cpp
+    Tests/WTF/glib/TimeZoneGLib.cpp
     Tests/WTF/glib/WorkQueueGLib.cpp
 )
 
@@ -35,11 +38,13 @@ list(APPEND TestJavaScriptCore_SOURCES
 list(APPEND TestWebCore_SOURCES
     ${test_main_SOURCES}
 
-    Tests/WebCore/UserAgentQuirks.cpp
+    Tests/WebCore/ImageDecoderTests.cpp
 
     Tests/WebCore/glib/Damage.cpp
-    Tests/WebCore/glib/GraphicsContextGLTextureMapper.cpp
+    Tests/WebCore/glib/GraphicsContextGLEGL.cpp
     Tests/WebCore/glib/RunLoopObserver.cpp
+    Tests/WebCore/glib/SkiaCompositingLayerDamage.cpp
+    Tests/WebCore/glib/UserAgentQuirks.cpp
 
     Tests/WebCore/gstreamer/GStreamerTest.cpp
     Tests/WebCore/gstreamer/GstElementHarness.cpp

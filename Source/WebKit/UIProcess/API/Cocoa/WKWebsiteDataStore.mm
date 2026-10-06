@@ -34,6 +34,7 @@
 #import "CompletionHandlerCallChecker.h"
 #import "NetworkProcessProxy.h"
 #import "RestrictedOpenerType.h"
+#import "SecurityFlagsController.h"
 #import "ShouldGrandfatherStatistics.h"
 #import "UserNotificationsSPI.h"
 #import "WKAPICast.h"
@@ -76,17 +77,18 @@
 #import <wtf/darwin/DispatchExtras.h>
 #import <wtf/persistence/PersistentDecoder.h>
 #import <wtf/persistence/PersistentEncoder.h>
+#import <wtf/text/CString.h>
 
 #if HAVE(NW_PROXY_CONFIG)
 #import <Network/Network.h>
 #endif
 
-#if ENABLE(SCREEN_TIME)
-#import <pal/cocoa/ScreenTimeSoftLink.h>
-#endif
-
 #if PLATFORM(IOS_FAMILY)
 #import "UIKitSPI.h"
+#endif
+
+#if ENABLE(SCREEN_TIME)
+#import <pal/cocoa/ScreenTimeSoftLink.h>
 #endif
 
 @interface WKWebsiteDataStore (WKWebPushHandling)
@@ -541,7 +543,7 @@ static Vector<WebKit::WebsiteDataRecord> toWebsiteDataRecords(NSArray *dataRecor
 
     auto uuid = WTF::UUID::fromNSUUID(identifier);
     if (!uuid || !uuid->isValid())
-        [NSException raise:NSInvalidArgumentException format:@"Identifier (%s) is invalid for data store", String([identifier UUIDString]).utf8().data()];
+        [NSException raise:NSInvalidArgumentException format:@"Identifier (%s) is invalid for data store", UTF8CString { identifier.UUIDString }.legacyCStringPointer()];
 
     return wrapper(WebKit::WebsiteDataStore::dataStoreForIdentifier(*uuid)).autorelease();
 }
@@ -572,8 +574,7 @@ static Vector<WebKit::WebsiteDataRecord> toWebsiteDataRecords(NSArray *dataRecor
         uuid_t proxyIdentifier;
         nw_proxy_config_get_identifier(proxyConfig, proxyIdentifier);
 
-        WTF::UUID uuid { std::span<const uint8_t, 16> { proxyIdentifier } };
-        configDataVector.append({ makeVector(agentData.get()), uuid.isValid() ? std::optional { uuid } : std::nullopt });
+        configDataVector.append({ makeVector(agentData.get()), WTF::UUID::tryCreate(proxyIdentifier) });
     }
 
     protect(*_websiteDataStore)->setProxyConfigData(WTF::move(configDataVector));
@@ -729,7 +730,8 @@ struct WKWebsiteData {
             _WKWebsiteDataTypeAdClickAttributions,
             _WKWebsiteDataTypePrivateClickMeasurements,
             _WKWebsiteDataTypeAlternativeServices,
-            _WKWebsiteDataTypeEnhancedSecurityRecord
+            _WKWebsiteDataTypeEnhancedSecurityRecord,
+            _WKWebsiteDataTypeIsolatedSiteRecord
         ];
 
         return [retainPtr([self allWebsiteDataTypes]) setByAddingObjectsFromArray:privateTypes];
@@ -788,6 +790,11 @@ struct WKWebsiteData {
     protect(*_websiteDataStore)->resolveDirectoriesAsynchronously();
 
     return self;
+}
+
++ (instancetype)_storeWithConfiguration:(_WKWebsiteDataStoreConfiguration *)configuration
+{
+    return adoptNS([[WKWebsiteDataStore alloc] _initWithConfiguration:configuration]).autorelease();
 }
 
 - (void)_fetchDataRecordsOfTypes:(NSSet<NSString *> *)dataTypes withOptions:(_WKWebsiteDataStoreFetchOptions)options completionHandler:(void (^)(NSArray<WKWebsiteDataRecord *> *))completionHandler
@@ -1131,7 +1138,7 @@ struct WKWebsiteData {
 
 - (_WKWebsiteDataStoreConfiguration *)_configuration
 {
-    return wrapper(_websiteDataStore->configuration().copy()).autorelease();
+    return wrapper(protect(_websiteDataStore->configuration())->copy()).autorelease();
 }
 
 + (WKNotificationManagerRef)_sharedServiceWorkerNotificationManager
@@ -1253,6 +1260,24 @@ struct WKWebsiteData {
     return protect(*_websiteDataStore)->hasServiceWorkerBackgroundActivityForTesting();
 }
 
+- (NSNumber *)_isolatedSiteSignalsForTesting:(NSURL *)url
+{
+    auto signals = protect(*_websiteDataStore)->isolatedSiteSignalsForTesting(url);
+    if (!signals)
+        return nil;
+    return @(signals->toRaw());
+}
+
+- (void)_setHighValueFraudTargetDomainsForTesting:(NSArray<NSString *> *)domains
+{
+    protect(*_websiteDataStore)->setHighValueFraudTargetDomainsForTesting(makeVector<String>(domains));
+}
+
+- (void)_setMaximumIsolatedSiteCountForTesting:(NSUInteger)count
+{
+    protect(*_websiteDataStore)->setMaximumIsolatedSiteCountForTesting(count);
+}
+
 - (void)_getPendingPushMessage:(void(^)(NSDictionary *))completionHandler
 {
     RELEASE_LOG(Push, "Getting pending push message");
@@ -1310,7 +1335,7 @@ struct WKWebsiteData {
     }
 #endif
 
-    RELEASE_LOG(Push, "Sending persistent notification click from origin %" SENSITIVE_LOG_STRING " to network process to handle", notificationData.originString.utf8().data());
+    RELEASE_LOG(Push, "Sending persistent notification click from origin %" SENSITIVE_LOG_STRING " to network process to handle", notificationData.originString.utf8());
 
     notificationData.sourceSession = _websiteDataStore->sessionID();
     protect(protect(*_websiteDataStore)->networkProcess())->processNotificationEvent(notificationData, WebCore::NotificationEventType::Click, [completionHandler = makeBlockPtr(completionHandler)] (bool wasProcessed) {
@@ -1333,7 +1358,7 @@ struct WKWebsiteData {
 
 -(void)_processWebCorePersistentNotificationClose:(const WebCore::NotificationData&)notificationData completionHandler:(void(^)(bool))completionHandler
 {
-    RELEASE_LOG(Push, "Sending persistent notification close from origin %" SENSITIVE_LOG_STRING " to network process to handle", notificationData.originString.utf8().data());
+    RELEASE_LOG(Push, "Sending persistent notification close from origin %" SENSITIVE_LOG_STRING " to network process to handle", notificationData.originString.utf8());
 
     protect(protect(*_websiteDataStore)->networkProcess())->processNotificationEvent(notificationData, WebCore::NotificationEventType::Close, [completionHandler = makeBlockPtr(completionHandler)] (bool wasProcessed) {
         RELEASE_LOG(Push, "Notification close event processing complete. Callback result: %d", wasProcessed);
@@ -1496,6 +1521,22 @@ struct WKWebsiteData {
     });
 }
 
++ (void)_setDisabledSecurityFlagsForTesting:(NSArray<NSString *> *)flagNames
+{
+#if defined(ENGINEERING_BUILD) && ENGINEERING_BUILD
+    WebKit::SecurityFlagsController::singleton().setDisabledFlagsNamedForTesting(makeVector<String>(flagNames));
+#endif // ENGINEERING_BUILD
+}
+
+- (void)_isSecurityFlagEnabledInNetworkProcessForTesting:(NSString *)flagName completionHandler:(void(^)(NSNumber *))completionHandler
+{
+#if defined(ENGINEERING_BUILD) && ENGINEERING_BUILD
+    protect(protect(*_websiteDataStore)->networkProcess())->isSecurityFlagEnabledForTesting(flagName, [completionHandlerCopy = makeBlockPtr(completionHandler)] (std::optional<bool> enabled) {
+        completionHandlerCopy(enabled ? [NSNumber numberWithBool:*enabled] : nil);
+    });
+#endif // ENGINEERING_BUILD
+}
+
 + (void)_setWebPushActionHandler:(WKWebsiteDataStore *(^)(_WKWebPushAction *))handler
 {
 #if PLATFORM(IOS)
@@ -1595,10 +1636,15 @@ struct WKWebsiteData {
 
 - (void)_installMockParentalControlsURLFilterForTestingWithBlockedURLs:(NSArray<NSURL *> *)blockedURLs completionHandler:(void(^)(void))completionHandler
 {
+    [self _installMockParentalControlsURLFilterForTestingWithBlockedURLs:blockedURLs replacementData:nil completionHandler:completionHandler];
+}
+
+- (void)_installMockParentalControlsURLFilterForTestingWithBlockedURLs:(NSArray<NSURL *> *)blockedURLs replacementData:(NSData *)replacementData completionHandler:(void(^)(void))completionHandler
+{
 #if HAVE(WEBCONTENTRESTRICTIONS)
     auto urls = makeVector<URL>(blockedURLs);
 
-    protect(*_websiteDataStore)->installMockParentalControlsURLFilterForTesting(WTF::move(urls), [completionHandler = makeBlockPtr(completionHandler)] {
+    protect(*_websiteDataStore)->installMockParentalControlsURLFilterForTesting(WTF::move(urls), span(replacementData), [completionHandler = makeBlockPtr(completionHandler)] {
         completionHandler();
     });
 #else

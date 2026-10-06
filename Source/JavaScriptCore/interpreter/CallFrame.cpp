@@ -85,12 +85,12 @@ bool CallFrame::callSiteBitsAreCodeOriginIndex() const
 
 unsigned CallFrame::callSiteAsRawBits() const
 {
-    return this[static_cast<int>(CallFrameSlot::argumentCountIncludingThis)].tag();
+    return this[static_cast<int>(CallFrameSlot::argumentCountIncludingThis)].highWord();
 }
 
 SUPPRESS_ASAN unsigned CallFrame::unsafeCallSiteAsRawBits() const
 {
-    return this[static_cast<int>(CallFrameSlot::argumentCountIncludingThis)].unsafeTag();
+    return this[static_cast<int>(CallFrameSlot::argumentCountIncludingThis)].unsafeHighWord();
 }
 
 CallSiteIndex CallFrame::callSiteIndex() const
@@ -112,7 +112,7 @@ const JSInstruction* CallFrame::currentVPC() const
 void CallFrame::setCurrentVPC(const JSInstruction* vpc)
 {
     CallSiteIndex callSite(codeBlock()->bytecodeIndex(vpc));
-    this[static_cast<int>(CallFrameSlot::argumentCountIncludingThis)].tag() = callSite.bits();
+    this[static_cast<int>(CallFrameSlot::argumentCountIncludingThis)].highWord() = callSite.bits();
     ASSERT(currentVPC() == vpc);
 }
 
@@ -178,6 +178,15 @@ CallFrame* CallFrame::callerFrame(EntryFrame*& currEntryFrame) const
 SUPPRESS_ASAN CallFrame* CallFrame::unsafeCallerFrame(EntryFrame*& currEntryFrame) const
 {
     if (unsafeCallerFrameOrEntryFrame() == currEntryFrame) {
+        // The sampling profiler walks the sampled thread's unsafe state: it can
+        // start from a stale vm.topCallFrame, or from a machine frame inside
+        // vmEntryToJavaScript's prologue/epilogue, while its vm.topEntryFrame
+        // snapshot is null. A walked frame whose caller slot reads null then
+        // matches the null entry frame here, and vmEntryRecord(nullptr) faults
+        // reading near address zero. Treat a null entry frame as the end of the
+        // walk instead.
+        if (!currEntryFrame)
+            return nullptr;
         VMEntryRecord* currVMEntryRecord = vmEntryRecord(currEntryFrame);
         currEntryFrame = currVMEntryRecord->unsafePrevTopEntryFrame();
         return currVMEntryRecord->unsafePrevTopCallFrame();
@@ -355,7 +364,7 @@ const char* CallFrame::describeFrame()
 
     dump(stringStream);
 
-    strncpy(buffer, stringStream.toCString().data(), bufferSize);
+    strncpy(buffer, stringStream.toUTF8CString().legacyCStringPointer(), bufferSize);
     buffer[bufferSize] = '\0';
 
     return buffer;
@@ -437,11 +446,7 @@ bool isFromJSCode(void* returnAddress)
 JSWebAssemblyInstance* CallFrame::wasmInstance() const
 {
     ASSERT(callee().isNativeCallee());
-#if USE(JSVALUE32_64)
-    return std::bit_cast<JSWebAssemblyInstance*>(this[static_cast<int>(CallFrameSlot::codeBlock)].asanUnsafePointer());
-#else
     return uncheckedDowncast<JSWebAssemblyInstance>(this[static_cast<int>(CallFrameSlot::codeBlock)].jsValue());
-#endif
 }
 #endif
 

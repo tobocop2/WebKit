@@ -58,8 +58,8 @@ public:
     ConnectStatus connect(const URL&, const String& protocol) final;
     String subprotocol() final;
     String extensions() final;
-    void send(CString&&) final;
-    void send(const JSC::ArrayBuffer&, unsigned byteOffset, unsigned byteLength) final;
+    void send(UTF8CString&&) final;
+    void send(const JSC::ArrayBuffer&, size_t byteOffset, size_t byteLength) final;
     void send(Blob&) final;
     void close(int code, const String& reason) final;
     void fail(String&& reason) final;
@@ -79,7 +79,7 @@ public:
         ~Peer();
 
         ConnectStatus connect(const URL&, const String& protocol);
-        void send(CString&&);
+        void send(UTF8CString&&);
         void send(const JSC::ArrayBuffer&);
         void send(Blob&);
         void bufferedAmount();
@@ -93,9 +93,9 @@ public:
         void didConnect() final;
         void didReceiveMessage(String&& message) final;
         void didReceiveBinaryData(Vector<uint8_t>&&) final;
-        void didUpdateBufferedAmount(unsigned bufferedAmount) final;
+        void didUpdateBufferedAmount(uint64_t bufferedAmount) final;
         void didStartClosingHandshake() final;
-        void didClose(unsigned unhandledBufferedAmount, ClosingHandshakeCompletionStatus, unsigned short code, const String& reason) final;
+        void didClose(uint64_t unhandledBufferedAmount, ClosingHandshakeCompletionStatus, unsigned short code, const String& reason) final;
         void didReceiveMessageError(String&& reason) final;
         void didUpgradeURL() final;
 
@@ -122,8 +122,8 @@ private:
         ~Bridge();
         void initialize(WorkerGlobalScope&);
         void connect(const URL&, const String& protocol);
-        void send(CString&&);
-        void send(const JSC::ArrayBuffer&, unsigned byteOffset, unsigned byteLength);
+        void send(UTF8CString&&);
+        void send(const JSC::ArrayBuffer&, size_t byteOffset, size_t byteLength);
         void send(Blob&);
         void close(int code, const String& reason);
         void fail(String&& reason);

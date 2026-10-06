@@ -152,6 +152,7 @@ inline CapabilityLevel canCompile(DFG::Node* node)
     case NewAsyncGeneratorFunction:
     case NewBoundFunction:
     case GetClosureVar:
+    case GetLazyClosureVar:
     case PutClosureVar:
     case GetInternalField:
     case PutInternalField:
@@ -211,6 +212,7 @@ inline CapabilityLevel canCompile(DFG::Node* node)
     case ConstructForwardVarargs:
     case CallWasm:
     case TailCallInlinedCallerWasm:
+    case CallFFI:
     case CallCustomAccessorGetter:
     case CallCustomAccessorSetter:
     case VarargsLength:
@@ -245,6 +247,7 @@ inline CapabilityLevel canCompile(DFG::Node* node)
     case FunctionBind:
     case ToObject:
     case CallObjectConstructor:
+    case OpenAsyncFromSyncIterator:
     case CallStringConstructor:
     case CallNumberConstructor:
     case ObjectAssign:
@@ -266,7 +269,6 @@ inline CapabilityLevel canCompile(DFG::Node* node)
     case ArraySortCommit:
     case NewArrayWithSpecies:
     case NewArrayWithSizeAndStructure:
-    case TryGetById:
     case GetById:
     case GetByIdFlush:
     case GetByIdMegamorphic:
@@ -332,7 +334,6 @@ inline CapabilityLevel canCompile(DFG::Node* node)
     case IsObject:
     case IsCallable:
     case IsConstructor:
-    case IsTypedArrayView:
     case ArrayIsArray:
     case CheckTypeInfoFlags:
     case HasStructureWithFlags:
@@ -404,6 +405,7 @@ inline CapabilityLevel canCompile(DFG::Node* node)
     case CreateRest:
     case RegExpExec:
     case RegExpExecNonGlobalOrSticky:
+    case RegExpExecSticky:
     case RegExpTest:
     case RegExpTestInline:
     case RegExpMatchFast:
@@ -424,6 +426,7 @@ inline CapabilityLevel canCompile(DFG::Node* node)
     case SetRegExpObjectLastIndex:
     case RecordRegExpCachedResult:
     case SetFunctionName:
+    case EnqueueAsyncGeneratorDriver:
     case LogShadowChickenPrologue:
     case LogShadowChickenTail:
     case ResolveScope:
@@ -450,6 +453,7 @@ inline CapabilityLevel canCompile(DFG::Node* node)
     case StringSubstr:
     case ToUpperCase:
     case ToLowerCase:
+    case StringTrim:
     case NumberToStringWithRadix:
     case NumberToStringWithValidRadixConstant:
     case CheckJSCast:
@@ -520,8 +524,13 @@ inline CapabilityLevel canCompile(DFG::Node* node)
     case DataViewGetInt:
     case DataViewGetFloat:
     case DataViewSet:
+    case BufferReadInt:
+    case BufferReadFloat:
+    case BufferWrite:
     case DateNow:
+    case DateGetStorage:
     case DateGetInt32OrNaN:
+    case DateGetMilliseconds:
     case DateGetTime:
     case DateSetTime:
     case ResolvePromiseFirstResolving:

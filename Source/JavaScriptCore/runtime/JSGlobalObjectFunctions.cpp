@@ -36,10 +36,10 @@
 #include "JSModuleLoader.h"
 #include "JSPromise.h"
 #include "JSSet.h"
-#include "Lexer.h"
 #include "LiteralParser.h"
 #include "ObjectConstructorInlines.h"
 #include "ParseInt.h"
+#include "SourceCharacters.h"
 #include "SourceProfiler.h"
 #include <stdio.h>
 #include <wtf/ASCIICType.h>
@@ -127,8 +127,9 @@ static JSValue encode(JSGlobalObject* globalObject, const WTF::BitSet<256>& doNo
             // 4-d-vi-1. Let jOctet be the value at index j within Octets.
             // 4-d-vi-2. Let S be a String containing three code units "%XY" where XY are two uppercase hexadecimal digits encoding the value of jOctet.
             // 4-d-vi-3. Let R be a new String value computed by concatenating the previous value of R and S.
-            builder.append('%');
-            builder.append(hex(utf8OctetsBuffer[index], 2));
+            auto octet = utf8OctetsBuffer[index];
+            std::array<Latin1Character, 3> escaped { '%', static_cast<Latin1Character>(upperNibbleToASCIIHexDigit(octet)), static_cast<Latin1Character>(lowerNibbleToASCIIHexDigit(octet)) };
+            builder.append(std::span<const Latin1Character> { escaped });
         }
     }
 
@@ -162,7 +163,7 @@ static JSValue decode(JSGlobalObject* globalObject, std::span<const CharType> ch
         if (c == '%') {
             size_t charLen = 0;
             if (k + 3 <= characters.size() && isASCIIHexDigit(p[1]) && isASCIIHexDigit(p[2])) {
-                const char b0 = Lexer<CharType>::convertHex(p[1], p[2]);
+                const char b0 = convertHex(p[1], p[2]);
                 const int sequenceLen = 1 + U8_COUNT_TRAIL_BYTES(b0);
                 if ((k + sequenceLen * 3) <= characters.size()) {
                     charLen = sequenceLen * 3;
@@ -171,7 +172,7 @@ static JSValue decode(JSGlobalObject* globalObject, std::span<const CharType> ch
                     for (int i = 1; i < sequenceLen; ++i) {
                         const CharType* q = p + i * 3;
                         if (q[0] == '%' && isASCIIHexDigit(q[1]) && isASCIIHexDigit(q[2]))
-                            sequence[i] = Lexer<CharType>::convertHex(q[1], q[2]);
+                            sequence[i] = convertHex(q[1], q[2]);
                         else {
                             charLen = 0;
                             break;
@@ -204,7 +205,7 @@ static JSValue decode(JSGlobalObject* globalObject, std::span<const CharType> ch
                         && isASCIIHexDigit(p[2]) && isASCIIHexDigit(p[3])
                         && isASCIIHexDigit(p[4]) && isASCIIHexDigit(p[5])) {
                     charLen = 6;
-                    u = Lexer<char16_t>::convertUnicode(p[2], p[3], p[4], p[5]);
+                    u = convertUnicode(p[2], p[3], p[4], p[5]);
                 }
             }
             if (charLen && (u >= 128 || !doNotUnescape.get(static_cast<Latin1Character>(u)))) {
@@ -662,12 +663,12 @@ JSC_DEFINE_HOST_FUNCTION(globalFuncUnescape, (JSGlobalObject* globalObject, Call
                 auto c = characters.subspan(k);
                 if (c[0] == '%' && k <= length - 6 && c[1] == 'u') {
                     if (isASCIIHexDigit(c[2]) && isASCIIHexDigit(c[3]) && isASCIIHexDigit(c[4]) && isASCIIHexDigit(c[5])) {
-                        builder.append(Lexer<char16_t>::convertUnicode(c[2], c[3], c[4], c[5]));
+                        builder.append(convertUnicode(c[2], c[3], c[4], c[5]));
                         k += 6;
                         continue;
                     }
                 } else if (c[0] == '%' && k <= length - 3 && isASCIIHexDigit(c[1]) && isASCIIHexDigit(c[2])) {
-                    converted = Latin1Character(Lexer<Latin1Character>::convertHex(c[1], c[2]));
+                    converted = Latin1Character(convertHex(c[1], c[2]));
                     c = span(converted);
                     k += 2;
                 }
@@ -682,12 +683,12 @@ JSC_DEFINE_HOST_FUNCTION(globalFuncUnescape, (JSGlobalObject* globalObject, Call
                 char16_t converted;
                 if (c[0] == '%' && k <= length - 6 && c[1] == 'u') {
                     if (isASCIIHexDigit(c[2]) && isASCIIHexDigit(c[3]) && isASCIIHexDigit(c[4]) && isASCIIHexDigit(c[5])) {
-                        converted = Lexer<char16_t>::convertUnicode(c[2], c[3], c[4], c[5]);
+                        converted = convertUnicode(c[2], c[3], c[4], c[5]);
                         c = span(converted);
                         k += 5;
                     }
                 } else if (c[0] == '%' && k <= length - 3 && isASCIIHexDigit(c[1]) && isASCIIHexDigit(c[2])) {
-                    converted = char16_t(Lexer<char16_t>::convertHex(c[1], c[2]));
+                    converted = char16_t(convertHex(c[1], c[2]));
                     c = span(converted);
                     k += 2;
                 }
@@ -818,7 +819,8 @@ JSC_DEFINE_HOST_FUNCTION(globalFuncImportModule, (JSGlobalObject* globalObject, 
     // we should retrieve this from the arguments.
     JSValue parameters = callFrame->argument(1);
     bool deferred = callFrame->argument(2).isTrue();
-    auto* importPromise = globalObject->moduleLoader()->importModule(globalObject, specifier, parameters, sourceOrigin, deferred);
+    auto* loader = uncheckedDowncast<JSModuleLoader>(callFrame->argument(3));
+    auto* importPromise = loader->importModule(globalObject, specifier, parameters, sourceOrigin, deferred);
     if (scope.exception()) [[unlikely]]
         return rejectWithCaughtException();
 
@@ -912,6 +914,9 @@ JSC_DEFINE_HOST_FUNCTION(globalFuncCopyDataProperties, (JSGlobalObject* globalOb
 
     auto sourceStructure = source->structure();
     if (canPerformFastPropertyEnumerationForCopyDataProperties(sourceStructure)) [[likely]] {
+        if ((!excludedSet || excludedSet->isEmpty()) && objectCloneFast(vm, target, source))
+            return JSValue::encode(target);
+
         EnsureStillAliveScope sourceStructureScope(sourceStructure);
         Vector<UniquedStringImpl*, 8> properties; // sourceStructure ensures the lifetimes of these strings.
         MarkedArgumentBuffer values;

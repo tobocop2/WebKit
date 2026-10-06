@@ -127,6 +127,10 @@ endif
 
 to-pattern = $(join $(basename $1), $(subst .,%,$(suffix $1)))
 
+# Only the first match is used, since the file can be present both in the build output and in the SDK;
+# use the file from the build.
+find-webkitadditions-file = $(firstword $(wildcard $(addsuffix /$1,$(WEBKITADDITIONS_HEADER_SEARCH_PATHS))))
+
 MESSAGE_RECEIVERS = \
 	LogStream \
 	NetworkProcess/Authentication/AuthenticationManager \
@@ -156,7 +160,6 @@ MESSAGE_RECEIVERS = \
 	Shared/Notifications/NotificationManagerMessageHandler \
 	Shared/IPCConnectionTester \
 	Shared/IPCStreamTester \
-	Shared/IPCStreamTesterProxy \
 	Shared/IPCTester \
 	Shared/IPCTesterReceiver \
 	UIProcess/WebFullScreenManagerProxy \
@@ -172,6 +175,7 @@ MESSAGE_RECEIVERS = \
 	UIProcess/Inspector/WebInspectorUIExtensionControllerProxy \
 	UIProcess/DrawingAreaProxy \
 	UIProcess/WebFrameProxy \
+	UIProcess/WebFrameProxyFromNetworkProcess \
 	UIProcess/Network/NetworkProcessProxy \
 	UIProcess/Network/CustomProtocols/LegacyCustomProtocolManagerProxy \
 	UIProcess/WebPageProxy \
@@ -357,6 +361,7 @@ GENERATE_MESSAGE_RECEIVER_SCRIPTS = \
     $(WebKit2)/Scripts/webkit/parser.py \
     $(WebKit2)/Scripts/webkit/opaque_ipc_types.py \
     $(WebKit2)/Scripts/webkit/opaque_ipc_types.tracking.in \
+    $(WebKit2)/Scripts/webkit/untrusted_origins.py \
     $(WebKit2)/DerivedSources.make \
 #
 
@@ -436,8 +441,18 @@ $(LOG_OUTPUT_FILES) : $(GENERATE_DERIVED_LOG_SOURCES_SCRIPT) $(LOG_IN_FILES) $(F
 
 all : $(GENERATED_MESSAGES_FILES)
 
-$(GENERATED_MESSAGES_FILES_AS_PATTERNS) : $(LOG_OUTPUT_FILES) $(MESSAGES_IN_FILES) $(GENERATE_MESSAGE_RECEIVER_SCRIPTS)
-	$(PYTHON) $(GENERATE_MESSAGE_RECEIVER_SCRIPT) $(WebKit2) --output-dir=IPC $(MESSAGE_RECEIVERS)
+# A receiver may be extended by a <Receiver>Additions.messages.in fragment in WebKitAdditions; see
+# splice_additions() in generate-message-receiver.py. The script finds them by receiver name, but
+# they are listed here as well so make and DerivedSources-input.xcfilelist both track them.
+WEBKITADDITIONS_MESSAGES_IN_FILES = \
+	WebPageProxyAdditions.messages.in \
+#
+
+MESSAGES_IN_ADDITIONS_ARGS := $(foreach D,$(WEBKITADDITIONS_HEADER_SEARCH_PATHS),--additions-dir $D)
+MESSAGES_IN_ADDITIONS_FILES := $(foreach I,$(WEBKITADDITIONS_MESSAGES_IN_FILES),$(call find-webkitadditions-file,$I))
+
+$(GENERATED_MESSAGES_FILES_AS_PATTERNS) : $(LOG_OUTPUT_FILES) $(MESSAGES_IN_FILES) $(MESSAGES_IN_ADDITIONS_FILES) $(GENERATE_MESSAGE_RECEIVER_SCRIPTS)
+	$(PYTHON) $(GENERATE_MESSAGE_RECEIVER_SCRIPT) $(WebKit2) --output-dir=IPC $(MESSAGES_IN_ADDITIONS_ARGS) $(MESSAGE_RECEIVERS)
 
 TEXT_PREPROCESSOR_FLAGS=-E -P -w
 
@@ -548,6 +563,7 @@ all : WebAutomationSessionProxyScriptSource.h
 WEBDRIVER_BIDI_PROTOCOL_INPUT_FILES = \
     $(WebKit2)/UIProcess/Automation/protocol/BidiBrowser.json \
     $(WebKit2)/UIProcess/Automation/protocol/BidiBrowsingContext.json \
+    $(WebKit2)/UIProcess/Automation/protocol/BidiDigitalCredentials.json \
     $(WebKit2)/UIProcess/Automation/protocol/BidiLog.json \
     $(WebKit2)/UIProcess/Automation/protocol/BidiPermissions.json \
     $(WebKit2)/UIProcess/Automation/protocol/BidiScript.json \
@@ -583,8 +599,12 @@ all : $(WEBDRIVER_BIDI_PROTOCOL_OUTPUT_FILES)
 
 # WebPreferences generation
 
+# Only the first match is used, since the file can be present both in the build output and in the SDK.
+WEB_PREFERENCES_ADDITIONS = $(firstword $(wildcard $(addsuffix /WebPreferencesAdditions.yaml, $(WEBKITADDITIONS_HEADER_SEARCH_PATHS))))
+
 WEB_PREFERENCES = \
     $(WTF_BUILD_SCRIPTS_DIR)/Preferences/UnifiedWebPreferences.yaml \
+    $(WEB_PREFERENCES_ADDITIONS) \
     $(ADDITIONAL_WEB_PREFERENCES_INPUT_FILES) \
 #
 
@@ -608,6 +628,25 @@ all : $(WEB_PREFERENCES_FILES)
 $(WEB_PREFERENCES_PATTERNS) : $(WTF_BUILD_SCRIPTS_DIR)/GeneratePreferences.rb $(WEB_PREFERENCES_TEMPLATES) $(WEB_PREFERENCES)
 	$(RUBY) $< --frontend WebKit $(addprefix --template , $(WEB_PREFERENCES_TEMPLATES)) $(WEB_PREFERENCES)
 
+# Security flag generation
+
+SECURITY_FLAGS = \
+    $(WTF_BUILD_SCRIPTS_DIR)/Preferences/SecurityFlags.yaml \
+#
+
+SECURITY_FLAGS_TEMPLATES = \
+    $(WebKit2)/Scripts/SecurityFlagsTemplates/SecurityFlags.h.erb \
+    $(WebKit2)/Scripts/SecurityFlagsTemplates/SecurityFlags.cpp.erb \
+    $(WebKit2)/Scripts/SecurityFlagsTemplates/SecurityFlags.serialization.in.erb \
+#
+SECURITY_FLAGS_FILES = $(basename $(notdir $(SECURITY_FLAGS_TEMPLATES)))
+SECURITY_FLAGS_PATTERNS = $(call to-pattern, $(SECURITY_FLAGS_FILES))
+
+all : $(SECURITY_FLAGS_FILES)
+
+$(SECURITY_FLAGS_PATTERNS) : $(WTF_BUILD_SCRIPTS_DIR)/GenerateSecurityFlags.rb $(SECURITY_FLAGS_TEMPLATES) $(SECURITY_FLAGS)
+	$(RUBY) $< $(addprefix --template , $(SECURITY_FLAGS_TEMPLATES)) $(SECURITY_FLAGS)
+
 SERIALIZATION_DESCRIPTION_FILES = \
 	GPUProcess/GPUProcessCreationParameters.serialization.in \
 	GPUProcess/GPUProcessPreferences.serialization.in \
@@ -627,6 +666,7 @@ SERIALIZATION_DESCRIPTION_FILES = \
 	NetworkProcess/NetworkProcessCreationParameters.serialization.in \
 	NetworkProcess/NetworkResourceLoadParameters.serialization.in \
 	NetworkProcess/NetworkSessionCreationParameters.serialization.in \
+	NetworkProcess/PreconnectRequest.serialization.in \
 	NetworkProcess/Classifier/ITPThirdPartyData.serialization.in \
 	NetworkProcess/Classifier/ITPThirdPartyDataForSpecificFirstParty.serialization.in \
 	NetworkProcess/PrivateClickMeasurement/PrivateClickMeasurementManagerInterface.serialization.in \
@@ -744,6 +784,8 @@ SERIALIZATION_DESCRIPTION_FILES = \
 	Shared/Extensions/WebExtensionMenuItem.serialization.in \
 	Shared/Extensions/WebExtensionMessageSenderParameters.serialization.in \
 	Shared/Extensions/WebExtensionMessageTargetParameters.serialization.in \
+	Shared/Extensions/WebExtensionNotification.serialization.in \
+	Shared/Extensions/WebExtensionOffscreenDocumentParameters.serialization.in \
 	Shared/Extensions/WebExtensionSidebarParameters.serialization.in \
 	Shared/Extensions/WebExtensionStorage.serialization.in \
 	Shared/Extensions/WebExtensionTab.serialization.in \
@@ -780,6 +822,7 @@ SERIALIZATION_DESCRIPTION_FILES = \
 	Shared/NavigationActionData.serialization.in \
 	Shared/NetworkProcessConnectionParameters.serialization.in \
 	Shared/NodeHitTestResult.serialization.in \
+	Shared/PDFAccessibilityDisplayModeState.serialization.in \
 	Shared/PDFDisplayMode.serialization.in \
 	Shared/Pasteboard.serialization.in \
 	Shared/PlatformPopupMenuData.serialization.in \
@@ -826,7 +869,6 @@ SERIALIZATION_DESCRIPTION_FILES = \
 	Shared/WebCoreArgumentCodersMedia.serialization.in \
 	Shared/WebCoreArgumentCodersNetwork.serialization.in \
 	Shared/WebCoreArgumentCodersPayment.serialization.in \
-	Shared/WebCoreArgumentCodersPlatform.serialization.in \
 	Shared/WebCoreArgumentCodersStorage.serialization.in \
 	Shared/WebCoreFont.serialization.in \
 	Shared/WebEvent.serialization.in \
@@ -971,6 +1013,7 @@ SERIALIZATION_DESCRIPTION_FILES = \
 	WebProcess/WebCoreSupport/WebSpeechSynthesisVoice.serialization.in \
 	WebProcess/WebPage/RemoteLayerTree/PlatformCAAnimationRemoteProperties.serialization.in \
 	SharedPreferencesForWebProcess.serialization.in \
+	SecurityFlags.serialization.in \
 #
 
 WEBCORE_SERIALIZATION_DESCRIPTION_FILES = \
@@ -997,32 +1040,18 @@ WEBCORE_SERIALIZATION_DESCRIPTION_FILES = \
 
 WEBCORE_SERIALIZATION_DESCRIPTION_FILES_FULLPATH := $(foreach I,$(WEBCORE_SERIALIZATION_DESCRIPTION_FILES),$(WebCorePrivateHeaders)/$I)
 
-all : IPC/GeneratedSerializers.h IPC/GeneratedSerializersExtra.h IPC/GeneratedSerializersShared0.mm IPC/GeneratedSerializersShared1.mm IPC/GeneratedSerializersSharedAPI.mm IPC/GeneratedSerializersSharedCocoa.mm IPC/GeneratedSerializersSharedEditorState.mm IPC/GeneratedSerializersSharedExtensions.mm IPC/GeneratedSerializersSharedModel.mm IPC/GeneratedSerializersSharedRemoteLayerTree.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersAuth.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersMedia.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersNetwork.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersPayment.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersPlatform.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersStorage.mm IPC/GeneratedSerializersSharedWebCoreFont.mm IPC/GeneratedSerializersSharedWebEvent.mm IPC/GeneratedSerializersSharedWebGL.mm IPC/GeneratedSerializersSharedWebGPU.mm IPC/GeneratedSerializersSharedWebPageCreationParameters.mm IPC/GeneratedSerializersSharedWebProcessCreationParameters.mm IPC/GeneratedSerializersSharedXR.mm IPC/GeneratedSerializersWebProcess.mm IPC/GeneratedSerializersGPUProcess.mm IPC/GeneratedSerializersNetworkProcess.mm IPC/GeneratedSerializersPlatform.mm IPC/GeneratedSerializersModelProcess.mm IPC/GeneratedSerializersUIProcess.mm IPC/GeneratedSerializersCommon.mm IPC/GeneratedWebKitSecureCoding.h IPC/GeneratedWebKitSecureCoding.mm IPC/SerializedTypeInfo.mm IPC/WebKitPlatformGeneratedSerializers.mm
+all : IPC/GeneratedSerializers.h IPC/GeneratedSerializersShared.mm IPC/GeneratedSerializersSharedExtensions.mm IPC/GeneratedSerializersSharedWebGPU.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersAuth.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersMedia.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersNetwork.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersPayment.mm IPC/GeneratedSerializersSharedWebCoreArgumentCodersStorage.mm IPC/GeneratedSerializersWebProcess.mm IPC/GeneratedSerializersGPUProcess.mm IPC/GeneratedSerializersNetworkProcess.mm IPC/GeneratedSerializersPlatform.mm IPC/GeneratedSerializersModelProcess.mm IPC/GeneratedSerializersUIProcess.mm IPC/GeneratedSerializersCommon.mm IPC/GeneratedWebKitSecureCoding.h IPC/GeneratedWebKitSecureCoding.mm IPC/SerializedTypeInfo.mm IPC/WebKitPlatformGeneratedSerializers.mm
 
 GENERATED_SERIALIZERS_OUTPUT_FILES = \
     IPC/GeneratedSerializers.h \
-    IPC/GeneratedSerializersExtra.h \
-    IPC/GeneratedSerializersShared0.mm \
-    IPC/GeneratedSerializersShared1.mm \
-    IPC/GeneratedSerializersSharedAPI.mm \
-    IPC/GeneratedSerializersSharedCocoa.mm \
-    IPC/GeneratedSerializersSharedEditorState.mm \
+    IPC/GeneratedSerializersShared.mm \
     IPC/GeneratedSerializersSharedExtensions.mm \
-    IPC/GeneratedSerializersSharedModel.mm \
-    IPC/GeneratedSerializersSharedRemoteLayerTree.mm \
+    IPC/GeneratedSerializersSharedWebGPU.mm \
     IPC/GeneratedSerializersSharedWebCoreArgumentCodersAuth.mm \
     IPC/GeneratedSerializersSharedWebCoreArgumentCodersMedia.mm \
     IPC/GeneratedSerializersSharedWebCoreArgumentCodersNetwork.mm \
     IPC/GeneratedSerializersSharedWebCoreArgumentCodersPayment.mm \
-    IPC/GeneratedSerializersSharedWebCoreArgumentCodersPlatform.mm \
     IPC/GeneratedSerializersSharedWebCoreArgumentCodersStorage.mm \
-    IPC/GeneratedSerializersSharedWebCoreFont.mm \
-    IPC/GeneratedSerializersSharedWebEvent.mm \
-    IPC/GeneratedSerializersSharedWebGL.mm \
-    IPC/GeneratedSerializersSharedWebGPU.mm \
-    IPC/GeneratedSerializersSharedWebPageCreationParameters.mm \
-    IPC/GeneratedSerializersSharedWebProcessCreationParameters.mm \
-    IPC/GeneratedSerializersSharedXR.mm \
     IPC/GeneratedSerializersWebProcess.mm \
     IPC/GeneratedSerializersGPUProcess.mm \
     IPC/GeneratedSerializersNetworkProcess.mm \
@@ -1046,6 +1075,7 @@ EXTENSIONS_SCRIPTS_DIR = $(EXTENSIONS_DIR)/Bindings/Scripts
 EXTENSIONS_INTERFACES_DIR = $(EXTENSIONS_DIR)/Interfaces
 IDL_ATTRIBUTES_FILE = $(EXTENSIONS_SCRIPTS_DIR)/IDLAttributes.json
 IDL_FILE_NAMES_LIST = WebExtensionIDLFileNamesList.txt
+CPP_IDL_FILE_NAMES_LIST = WebExtensionCPPIDLFileNamesList.txt
 
 BINDINGS_SCRIPTS = \
     $(WebCorePrivateHeaders)/generate-bindings.pl \
@@ -1057,7 +1087,6 @@ BINDINGS_SCRIPTS = \
 
 EXTENSION_INTERFACES = \
     WebExtensionAPIAction \
-    WebExtensionAPIAlarms \
     WebExtensionAPIBookmarks \
     WebExtensionAPICommands \
     WebExtensionAPICookies \
@@ -1072,40 +1101,56 @@ EXTENSION_INTERFACES = \
     WebExtensionAPIExtension \
     WebExtensionAPILocalization \
     WebExtensionAPIMenus \
-    WebExtensionAPINamespace \
     WebExtensionAPINotifications \
+    WebExtensionAPIOffscreen \
     WebExtensionAPIPermissions \
     WebExtensionAPIPort \
-    WebExtensionAPIRuntime \
     WebExtensionAPIScripting \
     WebExtensionAPISidePanel \
     WebExtensionAPISidebarAction \
     WebExtensionAPIStorage \
     WebExtensionAPIStorageArea \
     WebExtensionAPITabs \
-    WebExtensionAPITest \
     WebExtensionAPIWebNavigation \
     WebExtensionAPIWebNavigationEvent \
-    WebExtensionAPIWebPageNamespace \
-    WebExtensionAPIWebPageRuntime \
     WebExtensionAPIWebRequest \
     WebExtensionAPIWebRequestEvent \
     WebExtensionAPIWindows \
     WebExtensionAPIWindowsEvent \
 #
 
+CPP_EXTENSION_INTERFACES = \
+	WebExtensionAPIAlarms \
+	WebExtensionAPINamespace \
+    WebExtensionAPIRuntime \
+    WebExtensionAPITest \
+	WebExtensionAPIWebPageNamespace \
+    WebExtensionAPIWebPageRuntime \
+#
+
 $(IDL_FILE_NAMES_LIST) : $(EXTENSION_INTERFACES:%=%.idl)
+	echo $^ | tr " " "\n" > $@
+
+$(CPP_IDL_FILE_NAMES_LIST) : $(CPP_EXTENSION_INTERFACES:%=%.idl)
 	echo $^ | tr " " "\n" > $@
 
 JS%.h JS%.mm : %.idl $(BINDINGS_SCRIPTS) $(IDL_ATTRIBUTES_FILE) $(FEATURE_AND_PLATFORM_FLAGS_RESPONSE_FILE) $(IDL_FILE_NAMES_LIST)
 	@echo Generating bindings for $*...
 	$(PERL) -I $(WebCorePrivateHeaders) -I $(EXTENSIONS_SCRIPTS_DIR) $(WebCorePrivateHeaders)/generate-bindings.pl --defines "$(FEATURE_AND_PLATFORM_DEFINES)" --outputDir . --generator Extensions --idlAttributesFile $(IDL_ATTRIBUTES_FILE) --idlFileNamesList $(IDL_FILE_NAMES_LIST) $<
 
+JS%.h JS%.cpp : %.idl $(BINDINGS_SCRIPTS) $(IDL_ATTRIBUTES_FILE) $(FEATURE_AND_PLATFORM_FLAGS_RESPONSE_FILE) $(CPP_IDL_FILE_NAMES_LIST)
+	@echo Generating bindings for $*...
+	$(PERL) -I $(WebCorePrivateHeaders) -I $(EXTENSIONS_SCRIPTS_DIR) $(WebCorePrivateHeaders)/generate-bindings.pl --defines "$(FEATURE_AND_PLATFORM_DEFINES)" --outputDir . --generator Extensions --idlAttributesFile $(IDL_ATTRIBUTES_FILE) --idlFileNamesList $(CPP_IDL_FILE_NAMES_LIST) $<
+
 JSWebExtensionAPIUnified.mm: $(BINDINGS_SCRIPTS) $(EXTENSION_INTERFACES:%=JS%.mm)
 	@echo "Generating $@..."
-	$(PERL) $(EXTENSIONS_SCRIPTS_DIR)/GenerateImports.pl $@ $(EXTENSION_INTERFACES:%=JS%.mm)
+	$(PERL) $(EXTENSIONS_SCRIPTS_DIR)/GenerateImports.pl --output=$@ -- $(EXTENSION_INTERFACES:%=JS%.mm)
 
-all : JSWebExtensionAPIUnified.mm $(EXTENSION_INTERFACES:%=JS%.h) $(EXTENSION_INTERFACES:%=JS%.mm)
+JSWebExtensionAPIUnified.cpp: $(BINDINGS_SCRIPTS) $(CPP_EXTENSION_INTERFACES:%=JS%.cpp)
+	@echo "Generating $@..."
+	$(PERL) $(EXTENSIONS_SCRIPTS_DIR)/GenerateImports.pl --output=$@ --cpp -- $(CPP_EXTENSION_INTERFACES:%=JS%.cpp)
+
+all : JSWebExtensionAPIUnified.mm $(EXTENSION_INTERFACES:%=JS%.h) $(EXTENSION_INTERFACES:%=JS%.mm) JSWebExtensionAPIUnified.cpp $(CPP_EXTENSION_INTERFACES:%=JS%.h) $(CPP_EXTENSION_INTERFACES:%=JS%.cpp)
 
 ifeq ($(USE_INTERNAL_SDK),YES)
 WEBKIT_ADDITIONS_SWIFT_FILES = \

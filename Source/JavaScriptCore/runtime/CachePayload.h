@@ -38,6 +38,11 @@ public:
     JS_EXPORT_PRIVATE static CachePayload makeMallocPayload(MallocSpan<uint8_t, VMMalloc>&&);
     JS_EXPORT_PRIVATE static CachePayload makePayloadWithDestructor(std::span<uint8_t>, Destructor&&);
     JS_EXPORT_PRIVATE static CachePayload makeEmptyPayload();
+    // Only an explicit embedder promise makes a payload borrowable; nothing is inferred from how it is stored.
+    bool isPersistent() const { return m_isPersistent; }
+    void setIsPersistent() { m_isPersistent = true; } // embedder promises the bytes outlive every VM use (e.g. a section of the running executable)
+    // The bytes stay valid for as long as this object does. Only a bare span handed in without a destructor is a borrow of unknown duration.
+    bool isOwnedOrPersistent() const { return m_isPersistent || !!m_destructor || !std::holds_alternative<std::span<uint8_t>>(m_data); }
 
     JS_EXPORT_PRIVATE CachePayload(CachePayload&&);
     JS_EXPORT_PRIVATE ~CachePayload();
@@ -50,6 +55,7 @@ public:
     explicit CachePayload(DataType&&, Destructor&& = {nullptr});
 
     DataType m_data;
+    bool m_isPersistent { false };
     Destructor m_destructor { nullptr };
 };
 

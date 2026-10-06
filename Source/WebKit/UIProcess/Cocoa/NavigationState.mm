@@ -495,8 +495,12 @@ static void interceptMarketplaceKitNavigation(Ref<API::NavigationAction>&& actio
     }
 
     [getWKMarketplaceKitClassSingleton() requestAppInstallationWithTopOrigin:requesterTopOriginURL.get() url:url.get() completionHandler:makeBlockPtr([addConsoleError = WTF::move(addConsoleError)](NSError *error) mutable {
-        if (error)
-            addConsoleError(error.description);
+        if (!error)
+            return;
+
+        ensureOnMainRunLoop([addConsoleError = WTF::move(addConsoleError), error = protect(error)] mutable {
+            addConsoleError([error description]);
+        });
     }).get()];
 }
 
@@ -536,13 +540,14 @@ static void tryInterceptNavigation(Ref<API::NavigationAction>&& navigationAction
         auto* localCompletionHandler = new WTF::Function<void (bool)>([navigationAction = WTF::move(navigationAction), weakPage = WeakPtr { page }, completionHandler = WTF::move(completionHandler)] (bool success) mutable {
             ASSERT(RunLoop::isMain());
             RELEASE_LOG(Loading, "tryInterceptNavigation: LSAppLink openWithURL completed, success=%d", success);
-            if (!success && weakPage) {
-                trySOAuthorization(WTF::move(navigationAction), *weakPage, WTF::move(completionHandler));
+            RefPtr page = weakPage;
+            if (!success && page) {
+                trySOAuthorization(WTF::move(navigationAction), *page, WTF::move(completionHandler));
                 return;
             }
 #if PLATFORM(IOS_FAMILY)
-            if (success && weakPage)
-                weakPage->willOpenAppLink();
+            if (success && page)
+                page->willOpenAppLink();
 #endif
             completionHandler(success);
         });
@@ -1769,6 +1774,16 @@ void NavigationState::willChangeWebProcessIsResponsive()
 void NavigationState::didChangeWebProcessIsResponsive()
 {
     [webView() didChangeValueForKey:@"_webProcessIsResponsive"];
+}
+
+void NavigationState::willChangeQualifiedServerTrust()
+{
+    [webView() willChangeValueForKey:@"qualifiedServerTrust"];
+}
+
+void NavigationState::didChangeQualifiedServerTrust()
+{
+    [webView() didChangeValueForKey:@"qualifiedServerTrust"];
 }
 
 void NavigationState::didSwapWebProcesses()

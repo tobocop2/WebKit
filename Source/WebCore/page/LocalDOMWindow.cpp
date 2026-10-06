@@ -587,6 +587,16 @@ void LocalDOMWindow::willDetachDocumentFromFrame()
     InspectorInstrumentation::frameWindowDiscarded(*protect(frame()), this);
 }
 
+JSDOMGlobalObject* LocalDOMWindow::cachedMainWorldGlobalObject() const
+{
+    return m_cachedMainWorldGlobalObject.get();
+}
+
+void LocalDOMWindow::setCachedMainWorldGlobalObject(JSDOMGlobalObject* globalObject)
+{
+    m_cachedMainWorldGlobalObject = JSC::Weak<JSDOMGlobalObject> { globalObject };
+}
+
 #if ENABLE(GAMEPAD)
 
 void LocalDOMWindow::incrementGamepadEventListenerCount()
@@ -632,6 +642,9 @@ void LocalDOMWindow::suspendForBackForwardCache()
 
     SetForScope isSuspendingObservers(m_isSuspendingObservers, true);
     RELEASE_ASSERT(frame());
+
+    if (RefPtr navigation = m_navigation)
+        navigation->discardOngoingNavigationForBackForwardCache();
 
     m_observers.forEach([](auto& observer) {
         Ref { observer }->suspendForBackForwardCache();
@@ -851,7 +864,7 @@ VisualViewport& LocalDOMWindow::visualViewport()
 
 bool LocalDOMWindow::shouldHaveWebKitNamespaceForWorld(DOMWrapperWorld& world, JSC::JSGlobalObject* globalObject)
 {
-    if (world.allowNodeSerialization())
+    if (world.allowNodeSnapshotCreation())
         return true;
 
     if (downcast<JSDOMGlobalObject>(globalObject)->allowsJSHandleCreation())
@@ -1593,7 +1606,7 @@ bool LocalDOMWindow::consumeTransientActivation()
             window->consumeLastActivationIfNecessary();
     }
 
-    if (thisFrame && thisFrame->settings().siteIsolationEnabled())
+    if (RefPtr page = thisFrame ? thisFrame->page() : nullptr; page && page->mainFrame().tree().containsRemoteFrame())
         thisFrame->loader().client().didConsumeUserActivation();
 
     return true;
@@ -1679,7 +1692,7 @@ void LocalDOMWindow::notifyActivated(MonotonicTime activationTime)
         updateActivationTimestampAndNotify(*descendantWindow, activationTime, closeWatcherEnabled);
     }
 
-    if (frame->settings().siteIsolationEnabled())
+    if (RefPtr page = frame->page(); page && page->mainFrame().tree().containsRemoteFrame())
         frame->loader().client().didNotifyUserActivation(activationTime);
 }
 
@@ -2436,6 +2449,12 @@ void LocalDOMWindow::dispatchLoadEvent()
         WTFEmitSignpost(document.get(), NavigationAndPaintTiming, "loadEventBegin");
     }
 
+    // When the owner element lives in another process its load event is dispatched asynchronously,
+    // so notify it before running this frame's own load event handlers. Otherwise a message posted
+    // to the parent frame by one of those handlers could be delivered before the owner element's
+    // load event, which is never the case when both frames are in the same process.
+    bool notifiedRemoteParent = frame && frame->dispatchLoadEventToRemoteParent();
+
     dispatchEvent(Event::create(eventNames().loadEvent, Event::CanBubble::No, Event::IsCancelable::No), document.get());
 
     if (shouldMarkLoadEventTimes) {
@@ -2447,7 +2466,7 @@ void LocalDOMWindow::dispatchLoadEvent()
     }
 
     // Send a separate load event to the element that owns this frame.
-    if (RefPtr frame = this->frame())
+    if (RefPtr frame = this->frame(); frame && !notifiedRemoteParent)
         frame->dispatchLoadEventToParent();
 
     InspectorInstrumentation::loadEventFired(protect(this->frame()).get());
@@ -2901,6 +2920,9 @@ ExceptionOr<RefPtr<Frame>> LocalDOMWindow::createWindow(const String& urlString,
     if (!newFrame)
         return RefPtr<Frame> { nullptr };
 
+    ASSERT(!isParentTargetFrameName(frameName) && !isTopTargetFrameName(frameName));
+    bool shouldReturnNull = noopener && (created == CreatedNewPage::Yes || !isSelfTargetFrameName(frameName));
+
     // https://html.spec.whatwg.org/#the-rules-for-choosing-a-navigable
     // Consume user activation when a new browsing context is created.
     if (created == CreatedNewPage::Yes)
@@ -2922,7 +2944,7 @@ ExceptionOr<RefPtr<Frame>> LocalDOMWindow::createWindow(const String& urlString,
 
     RefPtr window = newFrame->window();
     if (window && window->isInsecureScriptAccess(activeWindow, completedURL))
-        return noopener ? RefPtr<Frame> { nullptr } : newFrame;
+        return shouldReturnNull ? RefPtr<Frame> { nullptr } : newFrame;
 
     RefPtr localNewFrame = dynamicDowncast<LocalFrame>(newFrame);
     if (prepareDialogFunction && localNewFrame)
@@ -2943,7 +2965,7 @@ ExceptionOr<RefPtr<Frame>> LocalDOMWindow::createWindow(const String& urlString,
     if (!newFrame->page())
         return RefPtr<Frame> { nullptr };
 
-    return noopener ? RefPtr<Frame> { nullptr } : newFrame;
+    return shouldReturnNull ? RefPtr<Frame> { nullptr } : newFrame;
 }
 
 #if PLATFORM(IOS_FAMILY)

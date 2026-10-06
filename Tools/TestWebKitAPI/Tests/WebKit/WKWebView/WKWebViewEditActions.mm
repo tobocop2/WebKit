@@ -28,6 +28,7 @@
 #import "ClassMethodSwizzler.h"
 #import "Helpers/PlatformUtilities.h"
 #import "Helpers/cocoa/TestWKWebView.h"
+#import "PDFTestHelpers.h"
 #import <WebKit/WKWebViewPrivate.h>
 #import <WebKit/WKWebViewPrivateForTesting.h>
 
@@ -399,6 +400,57 @@ TEST(WebKit, CanInvokeTranslateWithTextSelection)
 #endif // HAVE(TRANSLATION_UI_SERVICES)
 
 #else
+
+static void validateCopyMenuItem(WKWebViewConfiguration *webViewConfiguration, void (^prepareContent)(TestWKWebView *webView), bool copyAllowed)
+{
+    NSRect frame = NSMakeRect(0, 0, 400, 400);
+    RetainPtr<TestWKWebView> webView;
+    if (webViewConfiguration)
+        webView = adoptNS([[TestWKWebView alloc] initWithFrame:frame configuration:webViewConfiguration]);
+    else
+        webView = adoptNS([[TestWKWebView alloc] initWithFrame:frame]);
+    prepareContent(webView);
+
+    auto validateCopyItem = [&] -> BOOL {
+        RetainPtr menu = adoptNS([NSMenu new]);
+        RetainPtr item = adoptNS([NSMenuItem new]);
+        [item setTarget:webView];
+        [item setAction:@selector(copy:)];
+        [menu addItem:item];
+        [webView validateUserInterfaceItem:item];
+        [webView waitForNextPresentationUpdate];
+        return [item isEnabled];
+    };
+
+    [webView stringByEvaluatingJavaScript:@"getSelection().removeAllRanges()"];
+    EXPECT_FALSE(validateCopyItem());
+
+    [webView selectAll:nil];
+    [webView waitForNextPresentationUpdate];
+    EXPECT_EQ(validateCopyItem(), copyAllowed);
+}
+
+TEST(WKWebViewEditActions, CopyMenuItemDisabledWithNoSelection)
+{
+    validateCopyMenuItem(nil, ^(TestWKWebView *webView) {
+        [webView synchronouslyLoadHTMLString:@"<p>Hello, WebKit</p>"];
+        [webView becomeFirstResponder];
+        [webView waitForNextPresentationUpdate];
+    }, true);
+}
+
+TEST(WKWebViewEditActions, CopyMenuItemDisabledInCopyDisallowedPDF)
+{
+    validateCopyMenuItem(configurationForWebViewTestingUnifiedPDF(), ^(TestWKWebView *webView) {
+        RetainPtr request = [NSURLRequest requestWithURL:[NSBundle.test_resourcesBundle URLForResource:@"copying-disabled" withExtension:@"pdf"]];
+        [webView synchronouslyLoadRequest:request];
+        [webView waitForNextPresentationUpdate];
+        [[webView window] makeFirstResponder:webView];
+        [[webView window] makeKeyAndOrderFront:nil];
+        [[webView window] orderFrontRegardless];
+        [webView sendClickAtPoint:NSMakePoint(100, 100)];
+    }, false);
+}
 
 TEST(WKWebViewEditActions, ModifyTextWritingDirection)
 {

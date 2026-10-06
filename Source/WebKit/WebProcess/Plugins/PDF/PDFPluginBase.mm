@@ -33,6 +33,7 @@
 #import "GestureTypes.h"
 #import "Logging.h"
 #import "MessageSenderInlines.h"
+#import "PDFAccessibilityDisplayModeState.h"
 #import "PDFIncrementalLoader.h"
 #import "PDFKitSPI.h"
 #import "PDFPluginAnnotation.h"
@@ -91,6 +92,7 @@
 #import <WebCore/StyleColorOptions.h>
 #import <WebCore/VoidCallback.h>
 #import <wtf/CheckedArithmetic.h>
+#import <wtf/HexNumber.h>
 #import <wtf/StdLibExtras.h>
 #import <wtf/TZoneMallocInlines.h>
 #import <wtf/cf/VectorCF.h>
@@ -620,7 +622,7 @@ void PDFPluginBase::startByteRangeRequest(NetscapePlugInStreamLoaderClient& stre
     resourceRequest.setHTTPHeaderField(HTTPHeaderName::Range, makeString("bytes="_s, position, '-', position + count - 1));
     resourceRequest.setCachePolicy(ResourceRequestCachePolicy::DoNotUseAnyCache);
 
-    protect(WebProcess::singleton().webLoaderStrategy())->schedulePluginStreamLoad(*coreFrame, streamLoaderClient, WTF::move(resourceRequest), [incrementalLoader = Ref { *m_incrementalLoader }, requestIdentifier] (RefPtr<NetscapePlugInStreamLoader>&& streamLoader) {
+    protect(WebProcess::singleton().webLoaderStrategy())->schedulePluginStreamLoad(*coreFrame, streamLoaderClient, WTF::move(resourceRequest), protect(m_view)->fetchDestination(), [incrementalLoader = Ref { *m_incrementalLoader }, requestIdentifier] (RefPtr<NetscapePlugInStreamLoader>&& streamLoader) {
         incrementalLoader->streamLoaderDidStart(requestIdentifier, WTF::move(streamLoader));
     });
 }
@@ -915,15 +917,6 @@ float PDFPluginBase::deviceScaleFactor() const
     if (auto* page = this->page())
         return page->deviceScaleFactor();
     return 1;
-}
-
-bool PDFPluginBase::useDarkAppearance() const
-{
-    if (!isFullFramePlugin())
-        return ScrollableArea::useDarkAppearance();
-    if (RefPtr page = this->page())
-        return page->useDarkAppearance();
-    return false;
 }
 
 void PDFPluginBase::scrollbarStyleChanged(ScrollbarStyle style, bool forceUpdate)
@@ -1266,6 +1259,11 @@ void PDFPluginBase::writeStringToFindPasteboard(const String& string) const
 }
 #endif
 
+PDFAccessibilityDisplayModeState PDFPluginBase::accessibilityDisplayModeState() const
+{
+    return PDFAccessibilityDisplayModeState::Ineligible;
+}
+
 #if ENABLE(PDF_HUD)
 
 void PDFPluginBase::updateHUDLocation()
@@ -1347,7 +1345,15 @@ bool PDFPluginBase::showContextMenuAtPoint(const IntPoint& point)
     if (!frameView)
         return false;
     IntPoint contentsPoint = frameView->contentsToRootView(point);
-    WebMouseEvent event({ WebEventType::MouseDown, OptionSet<WebEventModifier> { }, MonotonicTime::now() }, WebMouseEventButton::Right, 0, contentsPoint, contentsPoint, 0, 0, 0, 1, WebCore::ForceAtClick, WebEventInputSource::UserDriven);
+    Ref event = WebMouseEvent::create({ WebEventType::MouseDown, OptionSet<WebEventModifier> { }, MonotonicTime::now() }, {
+        .button = WebMouseEventButton::Right,
+        .buttons = 0,
+        .position = contentsPoint,
+        .globalPosition = contentsPoint,
+        .clickCount = 1,
+        .force = WebCore::ForceAtClick,
+        .inputSource = WebEventInputSource::UserDriven,
+    });
     return handleContextMenuEvent(event);
 }
 
@@ -1448,7 +1454,7 @@ SelectionWasFlipped PDFPluginBase::moveSelectionEndpoint(FloatPoint, SelectionEn
     return SelectionWasFlipped::No;
 }
 
-SelectionEndpoint PDFPluginBase::extendInitialSelection(FloatPoint pointInRootView, TextGranularity)
+SelectionEndpoint PDFPluginBase::extendInitialSelection(FloatPoint pointInRootView, TextGranularity, SelectionExtentAnchor)
 {
     return SelectionEndpoint::Start;
 }
@@ -1488,7 +1494,7 @@ static void verboseLog(PDFIncrementalLoader* incrementalLoader, std::optional<ui
         stream << " not";
     stream << " complete";
 
-    LOG(IncrementalPDFVerbose, "%s", stream.release().utf8().data());
+    LOG(IncrementalPDFVerbose, "%s", stream.release().utf8());
 }
 #endif
 

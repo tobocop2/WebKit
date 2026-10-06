@@ -235,24 +235,25 @@ void CacheStorageManager::makeDirty()
     m_updateCounter = nextUpdateNumber();
 }
 
-Ref<CacheStorageManager> CacheStorageManager::create(const String& path, CacheStorageRegistry& registry, const std::optional<WebCore::ClientOrigin>& origin, QuotaCheckFunction&& quotaCheckFunction, Ref<WorkQueue>&& queue)
+Ref<CacheStorageManager> CacheStorageManager::create(const String& path, CacheStorageRegistry& registry, const WebCore::ClientOrigin& origin, ShouldWriteOriginFile shouldWriteOriginFile, QuotaCheckFunction&& quotaCheckFunction, Ref<WorkQueue>&& queue)
 {
-    return adoptRef(*new CacheStorageManager(path, registry, origin, WTF::move(quotaCheckFunction), WTF::move(queue)));
+    return adoptRef(*new CacheStorageManager(path, registry, origin, shouldWriteOriginFile, WTF::move(quotaCheckFunction), WTF::move(queue)));
 }
 
-CacheStorageManager::CacheStorageManager(const String& path, CacheStorageRegistry& registry, const std::optional<WebCore::ClientOrigin>& origin, QuotaCheckFunction&& quotaCheckFunction, Ref<WorkQueue>&& queue)
+CacheStorageManager::CacheStorageManager(const String& path, CacheStorageRegistry& registry, const WebCore::ClientOrigin& origin, ShouldWriteOriginFile shouldWriteOriginFile, QuotaCheckFunction&& quotaCheckFunction, Ref<WorkQueue>&& queue)
     : m_updateCounter(nextUpdateNumber())
     , m_path(path)
+    , m_origin(origin)
     , m_salt(readOrMakeSalt(saltFilePath(m_path)))
     , m_registry(registry)
     , m_quotaCheckFunction(WTF::move(quotaCheckFunction))
     , m_queue(WTF::move(queue))
 {
-    if (m_path.isEmpty() || !origin)
+    if (m_path.isEmpty() || shouldWriteOriginFile == ShouldWriteOriginFile::No)
         return;
 
     auto originFile = FileSystem::pathByAppendingComponent(m_path, cachesOriginFileName);
-    WebCore::StorageUtilities::writeOriginToFile(originFile, *origin);
+    WebCore::StorageUtilities::writeOriginToFile(originFile, m_origin);
 }
 
 CacheStorageManager::~CacheStorageManager()
@@ -427,7 +428,7 @@ void CacheStorageManager::sizeDecreased(uint64_t amount)
     if (!m_size || !amount)
         return;
 
-    m_size = *m_size - amount;
+    m_size = *m_size > amount ? *m_size - amount : 0;
     writeSizeFile(m_path, *m_size);
 }
 
@@ -475,19 +476,17 @@ void CacheStorageManager::connectionClosed(IPC::Connection::UniqueID connection)
 {
     m_activeConnections.remove(connection);
 
-    HashSet<WebCore::DOMCacheIdentifier> unusedCacheIdentifiers;
-    for (auto& [identifier, refConnections] : m_cacheRefConnections) {
+    m_cacheRefConnections.removeIf([&](auto& entry) {
+        auto& [identifier, refConnections] = entry;
         refConnections.removeAllMatching([&](auto refConnection) {
             return refConnection == connection;
         });
         if (refConnections.isEmpty()) {
             removeUnusedCache(identifier);
-            unusedCacheIdentifiers.add(identifier);
+            return true;
         }
-    }
-
-    for (auto& identifier : unusedCacheIdentifiers)
-        m_cacheRefConnections.remove(identifier);
+        return false;
+    });
 }
 
 void CacheStorageManager::removeUnusedCache(WebCore::DOMCacheIdentifier cacheIdentifier)

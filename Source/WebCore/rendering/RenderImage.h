@@ -32,6 +32,8 @@ namespace WebCore {
 
 class HTMLAreaElement;
 class HTMLMapElement;
+class GraphicsContext;
+class ImageBuffer;
 
 enum ImageSizeChangeType {
     ImageSizeChangeNone,
@@ -76,7 +78,8 @@ public:
     bool isShowingAltText() const;
 
     virtual bool shouldDisplayBrokenImageIcon() const;
-    bool shouldRespectZeroIntrinsicWidth() const override;
+    bool shouldRespectZeroIntrinsicWidth() const final;
+    bool shouldRespectZeroIntrinsicHeight() const final;
 
     String accessibilityDescription() const { return imageResource().image()->accessibilityDescription(); }
 
@@ -89,6 +92,10 @@ public:
 protected:
     RenderImage(Type, Element&, Style::ComputedStyle&&, OptionSet<ReplacedFlag>, Style::Image* = nullptr, const float imageDevicePixelRatio = 1.0f);
     void willBeDestroyed() override;
+
+#if ENABLE(SMART_IMAGE_RESIZER)
+    void insertedIntoTree() override;
+#endif
 
     bool shouldInvalidateContentWidths() const final;
     RenderReplaced* embeddedSVGRoot() const final;
@@ -138,10 +145,7 @@ private:
 
     bool hasShadowContent() const { return m_hasShadowControls || m_hasImageOverlay; }
 
-    LayoutUnit computeReplacedLogicalWidth(IsComputingIntrinsicSize = IsComputingIntrinsicSize::No) const override;
-    LayoutUnit computeReplacedLogicalHeight(std::optional<LayoutUnit> estimatedUsedWidth = std::nullopt) const override;
-
-    bool shouldCollapseToEmpty() const;
+    bool imageRepresentsNothing() const;
 
     // Text to display as long as the image isn't available.
     String m_altText;

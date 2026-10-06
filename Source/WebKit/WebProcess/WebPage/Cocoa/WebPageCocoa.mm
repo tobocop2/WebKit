@@ -50,6 +50,7 @@
 #import "WebEventConversion.h"
 #import "WebFrame.h"
 #import "WebImage.h"
+#import "WebMouseEvent.h"
 #import "WebPageInternals.h"
 #import "WebPageProxyMessages.h"
 #import "WebPasteboardOverrides.h"
@@ -64,6 +65,7 @@
 #import <WebCore/AccessibilityObject.h>
 #import <WebCore/AccessibilityScrollView.h>
 #import <WebCore/AnimationTimelinesController.h>
+#import <WebCore/BoundaryPointInlines.h>
 #import <WebCore/CSSKeywordValue.h>
 #import <WebCore/Chrome.h>
 #import <WebCore/ChromeClient.h>
@@ -110,6 +112,7 @@
 #import <WebCore/ImageUtilities.h>
 #import <WebCore/JSNode.h>
 #import <WebCore/LegacyWebArchive.h>
+#import <WebCore/LocalDOMWindow.h>
 #import <WebCore/LocalFrameInlines.h>
 #import <WebCore/LocalFrameView.h>
 #import <WebCore/MIMETypeRegistry.h>
@@ -142,6 +145,7 @@
 #import <WebCore/UTIRegistry.h>
 #import <WebCore/UTIUtilities.h>
 #import <WebCore/UserTypingGestureIndicator.h>
+#import <WebCore/VisibleSelection.h>
 #import <WebCore/VisibleUnits.h>
 #import <WebCore/WebAccessibilityObjectWrapperMac.h>
 #import <WebCore/markup.h>
@@ -643,9 +647,11 @@ void WebPage::bindRemoteAccessibilityFrames(int processIdentifier, WebCore::Fram
 
     registerRemoteFrameAccessibilityTokens(processIdentifier, dataToken, frameID);
 
-    // Get our remote token data and send back to the RemoteFrame.
+    // Get our remote token data and send back to the RemoteFrame. This must be the token for this
+    // frame's own mock element, so the UI process's placeholder for this iframe resolves to this
+    // frame rather than to another frame sharing this process.
 #if PLATFORM(MAC)
-    completionHandler({ makeVector(accessibilityRemoteTokenData().get()) }, getpid());
+    completionHandler({ makeVector(accessibilityRemoteTokenDataForFrame(frameID).get()) }, getpid());
 #else
     completionHandler({ dataToken }, getpid());
 #endif
@@ -817,6 +823,35 @@ void WebPage::getContentsAsAttributedString(CompletionHandler<void(const WebCore
 {
     RefPtr localFrame = corePage()->localMainFrame();
     completionHandler(localFrame ? attributedString(makeRangeSelectingNodeContents(*protect(localFrame->document())), IgnoreUserSelectNone::No) : AttributedString { });
+}
+
+HashMap<WebCore::FrameIdentifier, WebCore::AttributedString> WebPage::attributedStringsForRemoteFrames(WebCore::FrameIdentifier rootFrameIdentifier, const Vector<WebCore::FrameIdentifier>& selectedSubframeIdentifiers)
+{
+    if (selectedSubframeIdentifiers.isEmpty())
+        return { };
+
+    auto sendResult = sendSync(Messages::WebPageProxy::GetAttributedStringsForRemoteFrames(rootFrameIdentifier, selectedSubframeIdentifiers));
+    auto [result] = sendResult.takeReplyOr(HashMap<WebCore::FrameIdentifier, WebCore::AttributedString> { });
+
+    // Skip frames in our own process to avoid deadlock.
+    RefPtr rootFrame = WebProcess::singleton().webFrame(rootFrameIdentifier);
+    RefPtr rootCoreFrame = rootFrame ? rootFrame->coreLocalFrame() : nullptr;
+    if (!rootCoreFrame)
+        return result;
+
+    for (RefPtr frame = rootCoreFrame->tree().traverseNext(rootCoreFrame.get()); frame; frame = frame->tree().traverseNext(rootCoreFrame.get())) {
+        RefPtr localFrame = dynamicDowncast<WebCore::LocalFrame>(frame.get());
+        if (!localFrame)
+            continue;
+
+        if (!localFrame->tree().hasRemoteFrameAncestor())
+            continue;
+
+        if (RefPtr document = localFrame->document())
+            result.add(localFrame->frameID(), attributedString(makeRangeSelectingNodeContents(*document), IgnoreUserSelectNone::No, WebCore::MarkRemoteFrameContentPositions::Yes));
+    }
+
+    return result;
 }
 
 void WebPage::setRemoteObjectRegistry(WebRemoteObjectRegistry* registry)
@@ -1065,7 +1100,7 @@ private:
     Vector<String> m_types;
 };
 
-#if ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
+#if ENABLE(IMAGE_ANALYSIS)
 
 void WebPage::replaceImageForRemoveBackground(const ElementContext& elementContext, const Vector<String>& types, std::span<const uint8_t> data)
 {
@@ -1135,7 +1170,7 @@ void WebPage::replaceImageForRemoveBackground(const ElementContext& elementConte
     protect(frame->selection())->setSelection(newSelectionRange, restoreSelectionOptions);
 }
 
-#endif // ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
+#endif // ENABLE(IMAGE_ANALYSIS)
 
 void WebPage::replaceSelectionWithPasteboardData(const Vector<String>& types, std::span<const uint8_t> data)
 {
@@ -1192,12 +1227,12 @@ std::pair<URL, DidFilterLinkDecoration> WebPage::applyLinkDecorationFilteringWit
         return isLinkDecorationFilteringEnabled(mainFrame->loader().policyDocumentLoader());
     }();
 
+    if (!url.hasQuery())
+        return { url, DidFilterLinkDecoration::No };
+
     RefPtr document = mainFrame ? mainFrame->document() : nullptr;
     bool isConsistentQueryParameterFilteringQuirkEnabled = document && (document->quirks().needsConsistentQueryParameterFilteringQuirk(document->url()) || document->quirks().needsConsistentQueryParameterFilteringQuirk(url));
     if (!hasOptedInToLinkDecorationFiltering && !m_page->settings().filterLinkDecorationByDefaultEnabled() && !isConsistentQueryParameterFilteringQuirkEnabled)
-        return { url, DidFilterLinkDecoration::No };
-
-    if (!url.hasQuery())
         return { url, DidFilterLinkDecoration::No };
 
     auto sanitizedURL = url;
@@ -1221,11 +1256,14 @@ std::pair<URL, DidFilterLinkDecoration> WebPage::applyLinkDecorationFilteringWit
         return isEmptyOrFoundDomain && isEmptyOrFoundPath;
     });
 
-    if (!removedParameters.isEmpty() && trigger != LinkDecorationFilteringTrigger::Unspecified) {
+    if (removedParameters.isEmpty())
+        return { url, DidFilterLinkDecoration::No };
+
+    if (trigger != LinkDecorationFilteringTrigger::Unspecified) {
         if (trigger == LinkDecorationFilteringTrigger::Navigation)
             send(Messages::WebPageProxy::DidApplyLinkDecorationFiltering(url, sanitizedURL));
         auto removedParametersString = makeStringByJoining(removedParameters, ", "_s);
-        WEBPAGE_RELEASE_LOG(ResourceLoadStatistics, "applyLinkDecorationFilteringWithResult: Blocked known tracking query parameters: %s", removedParametersString.utf8().data());
+        WEBPAGE_RELEASE_LOG(ResourceLoadStatistics, "applyLinkDecorationFilteringWithResult: Blocked known tracking query parameters: %s", removedParametersString.utf8());
     }
 
     return { sanitizedURL, DidFilterLinkDecoration::Yes };
@@ -1382,7 +1420,7 @@ void WebPage::addSourceTextAnimationForActiveWritingToolsSession(const WTF::UUID
     m_textAnimationController->addSourceTextAnimationForActiveWritingToolsSession(sourceAnimationUUID, destinationAnimationUUID, finished, range, string, WTF::move(completionHandler));
 }
 
-void WebPage::addDestinationTextAnimationForActiveWritingToolsSession(const WTF::UUID& sourceAnimationUUID, const WTF::UUID& destinationAnimationUUID, const std::optional<CharacterRange>& range, const String& string)
+void WebPage::addDestinationTextAnimationForActiveWritingToolsSession(Markable<WTF::UUID> sourceAnimationUUID, Markable<WTF::UUID> destinationAnimationUUID, const std::optional<CharacterRange>& range, const String& string)
 {
     m_textAnimationController->addDestinationTextAnimationForActiveWritingToolsSession(sourceAnimationUUID, destinationAnimationUUID, range, string);
 }
@@ -1395,6 +1433,21 @@ void WebPage::saveSnapshotOfTextPlaceholderForAnimation(const WebCore::SimpleRan
 void WebPage::clearAnimationsForActiveWritingToolsSession()
 {
     m_textAnimationController->clearAnimationsForActiveWritingToolsSession();
+}
+
+void WebPage::showWritingToolsAffordance()
+{
+    send(Messages::WebPageProxy::ShowWritingToolsAffordance());
+}
+
+void WebPage::setWritingToolsAvailable(bool isAvailable)
+{
+    m_writingToolsAvailable = isAvailable;
+
+    RefPtr frame = corePage()->focusController().focusedOrMainFrame();
+    RefPtr document = frame ? frame->document() : nullptr;
+    if (CheckedPtr cache = document ? document->axObjectCache() : nullptr)
+        cache->setWritingToolsAvailable(isAvailable);
 }
 
 void WebPage::createTextIndicatorForTextAnimationID(const WTF::UUID& uuid, CompletionHandler<void(RefPtr<WebCore::TextIndicator>&&)>&& completionHandler)
@@ -1745,6 +1798,29 @@ void WebPage::getWebArchivesForFrames(const Vector<WebCore::FrameIdentifier>& fr
     completionHandler(WTF::move(result));
 }
 
+void WebPage::getContentsAsAttributedStringForFrames(const Vector<FrameIdentifier>& frameIdentifiers, CompletionHandler<void(HashMap<FrameIdentifier, AttributedString>&&)>&& completionHandler)
+{
+    HashMap<FrameIdentifier, AttributedString> result;
+    for (auto& frameIdentifier : frameIdentifiers) {
+        RefPtr frame = WebFrame::webFrame(frameIdentifier);
+        if (!frame)
+            continue;
+
+        RefPtr localFrame = frame->coreLocalFrame();
+        if (!localFrame)
+            continue;
+
+        RefPtr document = localFrame->document();
+        if (!document)
+            continue;
+
+        result.ensure(frameIdentifier, [&] {
+            return attributedString(makeRangeSelectingNodeContents(*document), IgnoreUserSelectNone::No, WebCore::MarkRemoteFrameContentPositions::Yes);
+        });
+    }
+    completionHandler(WTF::move(result));
+}
+
 void WebPage::getWebArchiveData(CompletionHandler<void(const std::optional<IPC::SharedBufferReference>&)>&& completionHandler)
 {
     RetainPtr<CFDataRef> data = m_mainFrame->webArchiveData(nullptr, nullptr);
@@ -1791,6 +1867,31 @@ WKAccessibilityWebPageObject* WebPage::accessibilityRemoteObject()
     return m_mockAccessibilityElement.get();
 }
 
+WKAccessibilityWebPageObject* WebPage::ensureRemoteFrameAccessibilityElement(WebCore::FrameIdentifier frameID)
+{
+    auto result = m_remoteFrameAccessibilityElements.ensure(frameID, [&] {
+        // The presenting process identifier is corrected by registerRemoteFrameAccessibilityTokens
+        // once the UI process binds this frame.
+        return createMockAccessibilityElementWithPresenter(0);
+    });
+    return result.iterator->value.get();
+}
+
+WKAccessibilityWebPageObject* WebPage::accessibilityRemoteObjectForFrame(WebCore::LocalFrame& frame)
+{
+    Ref rootFrame = frame.rootFrame();
+    // The main frame is served by the page-level element, whose token goes to the UI process.
+    if (rootFrame->isMainFrame())
+        return m_mockAccessibilityElement.get();
+
+    // Any other root frame is a cross-process frame hosted here, and gets its own element. Creating
+    // it on demand keeps its identity stable whether or not the UI process has bound the frame yet.
+    // otherwise an object asking early would cache the page-level element as its remote parent while
+    // the token handed to the parent process names a different element, and walking up from inside
+    // the frame would dead-end at an element with no parent.
+    return ensureRemoteFrameAccessibilityElement(rootFrame->frameID());
+}
+
 RetainPtr<PDFDocument> WebPage::pdfDocumentForPrintingFrame(LocalFrame* coreFrame)
 {
 #if ENABLE(PDF_PLUGIN)
@@ -1809,7 +1910,7 @@ void WebPage::drawToPDF(const std::optional<FloatRect>& rect, bool allowTranspar
     Ref frameView = *localMainFrame->view();
     auto snapshotRect = IntRect { rect.value_or(FloatRect { { }, frameView->contentsSize() }) };
 
-    RefPtr buffer = ImageBuffer::create(snapshotRect.size(), RenderingMode::PDFDocument, RenderingPurpose::Snapshot, 1, DestinationColorSpace::SRGB(), PixelFormat::BGRA8);
+    RefPtr buffer = ImageBuffer::create(snapshotRect.size(), RenderingMode::PDFDocument, RenderingPurpose::Snapshot, 1, ColorSpace::SRGB(), PixelFormat::BGRA8);
     if (!buffer)
         return;
 
@@ -1828,7 +1929,7 @@ void WebPage::drawRectToImage(FrameIdentifier frameID, const PrintInfo& printInf
 #if USE(CG)
     if (coreFrame) {
         ASSERT(coreFrame->document()->printing() || pdfDocumentForPrintingFrame(coreFrame.get()));
-        image = WebImage::create(imageSize, ImageOption::Local, DestinationColorSpace::SRGB(), &m_page->chrome().client());
+        image = WebImage::create(imageSize, ImageOption::Local, ColorSpace::SRGB(), &m_page->chrome().client());
         if (!image || !image->context()) {
             ASSERT_NOT_REACHED();
             return completionHandler({ });
@@ -1874,7 +1975,7 @@ void WebPage::drawPagesToPDFImpl(FrameIdentifier frameID, const PrintInfo& print
 
         FloatRect mediaBox = (m_printContext && m_printContext->pageCount()) ? m_printContext->pageRect(0) : FloatRect { 0, 0, printInfo.availablePaperWidth, printInfo.availablePaperHeight };
 
-        RefPtr buffer = ImageBuffer::create(mediaBox.size(), RenderingMode::PDFDocument, RenderingPurpose::Snapshot, 1, DestinationColorSpace::SRGB(), PixelFormat::BGRA8);
+        RefPtr buffer = ImageBuffer::create(mediaBox.size(), RenderingMode::PDFDocument, RenderingPurpose::Snapshot, 1, ColorSpace::SRGB(), PixelFormat::BGRA8);
         if (!buffer)
             return;
         GraphicsContext& context = buffer->context();
@@ -1934,9 +2035,9 @@ void WebPage::drawPrintingRectToSnapshot(RemoteSnapshotIdentifier snapshotIdenti
 
     Ref remoteRenderingBackend = ensureRemoteRenderingBackendProxy();
     m_remoteSnapshotState = {
-        snapshotIdentifier,
-        remoteRenderingBackend->createSnapshotRecorder(snapshotIdentifier),
-        MainRunLoopSuccessCallbackAggregator::create([completionHandler = WTF::move(completionHandler)] (bool success) mutable {
+        .identifier = snapshotIdentifier,
+        .recorder = remoteRenderingBackend->createSnapshotRecorder(rect, snapshotIdentifier),
+        .callback = MainRunLoopSuccessCallbackAggregator::create([completionHandler = WTF::move(completionHandler)] (bool success) mutable {
             completionHandler(success);
         })
     };
@@ -1983,9 +2084,9 @@ void WebPage::drawPrintingPagesToSnapshot(RemoteSnapshotIdentifier snapshotIdent
 
     Ref remoteRenderingBackend = ensureRemoteRenderingBackendProxy();
     m_remoteSnapshotState = {
-        snapshotIdentifier,
-        remoteRenderingBackend->createSnapshotRecorder(snapshotIdentifier),
-        MainRunLoopSuccessCallbackAggregator::create([completionHandler = WTF::move(completionHandler), snapshotSize = mediaBox.size()] (bool success) mutable {
+        .identifier = snapshotIdentifier,
+        .recorder = remoteRenderingBackend->createSnapshotRecorder(mediaBox, snapshotIdentifier),
+        .callback = MainRunLoopSuccessCallbackAggregator::create([completionHandler = WTF::move(completionHandler), snapshotSize = mediaBox.size()] (bool success) mutable {
             completionHandler(success ? std::optional<FloatSize>(snapshotSize) : std::nullopt);
         })
     };
@@ -2039,7 +2140,7 @@ void WebPage::insertTextAsync(const String& text, const EditingRange& replacemen
     if (!frame)
         return;
 
-    UserGestureIndicator gestureIndicator { options.processingUserGesture ? IsProcessingUserGesture::Yes : IsProcessingUserGesture::No, frame->document() };
+    UserGestureIndicator gestureIndicator { options.processingUserGesture ? IsProcessingUserGesture::Yes : IsProcessingUserGesture::No, protect(frame->document()) };
     std::optional<UserTypingGestureIndicator> userTypingGestureIndicator;
     if (options.processingUserGesture)
         userTypingGestureIndicator.emplace(*frame);
@@ -2168,7 +2269,7 @@ void WebPage::firstRectForCharacterRangeAsync(const EditingRange& editingRange, 
     if (!range)
         return completionHandler({ }, editingRange);
 
-    auto rect = RefPtr(frame->view())->contentsToWindow(protect(frame->editor())->firstRectForRange(*range));
+    auto rect = RefPtr(frame->view())->contentsToMainFrameView(protect(frame->editor())->firstRectForRange(*range));
     auto startPosition = makeContainerOffsetPosition(range->start);
 
     auto endPosition = endOfLine(startPosition);
@@ -2228,18 +2329,18 @@ void WebPage::confirmCompositionAsync()
     protect(frame->editor())->confirmComposition();
 }
 
-void WebPage::getInformationFromImageData(const Vector<uint8_t>& data, CompletionHandler<void(Expected<std::pair<String, Vector<IntSize>>, WebCore::ImageDecodingError>&&)>&& completionHandler)
+void WebPage::getInformationFromImageData(const Vector<uint8_t>& data, CompletionHandler<void(std::expected<std::pair<String, Vector<IntSize>>, WebCore::ImageDecodingError>&&)>&& completionHandler)
 {
     if (m_isClosed)
         return completionHandler(makeUnexpected(ImageDecodingError::Internal));
 
-    if (SVGImage::isDataDecodable(m_page->settings(), data.span()))
+    if (SVGImage::isDataDecodable(protect(m_page->settings()), data.span()))
         return completionHandler(std::make_pair(String { "public.svg-image"_s }, Vector<IntSize> { }));
 
     completionHandler(utiAndAvailableSizesFromImageData(data.span()));
 }
 
-void WebPage::getImageMetadata(const Vector<uint8_t>& data, CompletionHandler<void(Expected<Vector<std::pair<String, float>>, WebCore::ImageDecodingError>&&)>&& completionHandler)
+void WebPage::getImageMetadata(const Vector<uint8_t>& data, CompletionHandler<void(std::expected<Vector<std::pair<String, float>>, WebCore::ImageDecodingError>&&)>&& completionHandler)
 {
     if (m_isClosed)
         return completionHandler(makeUnexpected(ImageDecodingError::Internal));
@@ -2330,12 +2431,14 @@ void WebPage::willCommitMainFrameData(MainFrameData& data, const TransactionID& 
     data.minimumScaleFactor = m_viewportConfiguration.minimumScale();
     data.maximumScaleFactor = m_viewportConfiguration.maximumScale();
     data.initialScaleFactor = m_viewportConfiguration.initialScale();
-    data.viewportMetaTagInteractiveWidget = m_viewportConfiguration.viewportArguments().interactiveWidget;
+    data.viewportMetaTagInteractiveWidget = m_viewportConfiguration.viewportArguments().interactiveWidgetValue;
     data.viewportMetaTagWidth = m_viewportConfiguration.viewportArguments().width;
     data.viewportMetaTagWidthWasExplicit = m_viewportConfiguration.viewportArguments().widthWasExplicit;
     data.viewportMetaTagCameFromImageDocument = m_viewportConfiguration.viewportArguments().type == ViewportArguments::Type::ImageDocument;
     data.avoidsUnsafeArea = m_viewportConfiguration.avoidsUnsafeArea();
     data.isInStableState = m_isInStableState;
+    if (RefPtr document = mainFrameView->frame().document())
+        data.hasMainThreadScrollDrivenAnimations = document->hasProgressBasedScrollDrivenAnimation();
     data.allowsUserScaling = allowsUserScaling();
     if (m_pendingDynamicViewportSizeUpdateID) {
         data.dynamicViewportSizeUpdateID = *m_pendingDynamicViewportSizeUpdateID;
@@ -2376,8 +2479,8 @@ void WebPage::didFlushLayerTreeAtTime(MonotonicTime timestamp, bool flushSucceed
 #endif
 #if ENABLE(GPU_PROCESS)
     if (!flushSucceeded) {
-        if (RefPtr proxy = m_remoteRenderingBackendProxy)
-            proxy->didBecomeUnresponsive();
+        if (m_remoteRenderingBackendProxy)
+            m_remoteRenderingBackendProxy->didBecomeUnresponsive();
     }
 #endif
 }
@@ -2400,7 +2503,7 @@ bool WebPage::shouldAllowSingleClickToChangeSelection(WebCore::Node& targetNode,
     if (RefPtr editableRoot = newSelection.rootEditableElement(); editableRoot && editableRoot == targetNode.rootEditableElement()) {
         // FIXME: This logic should be made consistent for both macOS and iOS.
 #if PLATFORM(MAC)
-        return inputSource != WebCore::MouseEventInputSource::Automation;
+        return targetNode.shouldSelectOnMouseDown() || inputSource != WebCore::MouseEventInputSource::Automation;
 #else
         // Text interaction gestures will handle selection in the case where we are already editing the node. In the case where we're
         // just starting to focus an editable element by tapping on it, only change the selection if we weren't already showing an
@@ -2413,23 +2516,67 @@ bool WebPage::shouldAllowSingleClickToChangeSelection(WebCore::Node& targetNode,
     return true;
 }
 
-void WebPage::selectWithGesture(const IntPoint& point, GestureType gestureType, GestureRecognizerState gestureState, bool isInteractingWithFocusedElement, CompletionHandler<void(const WebCore::IntPoint&, GestureType, GestureRecognizerState, OptionSet<SelectionFlags>)>&& completionHandler)
+WebCore::IntPoint WebPage::mainFrameCoordinatesToRootView(WebCore::IntPoint point) const
+{
+    RefPtr frame = m_page->focusController().focusedOrMainFrame();
+    RefPtr view = frame ? frame->view() : nullptr;
+    if (!view || frame->localMainFrame()) {
+        // The main frame is in this process: rootViewToContents() on the focused frame's view already
+        // walks the (in-process) frame tree from the true root, so no extra conversion is needed here.
+        return point;
+    }
+
+    // The main frame is in another process. Convert the incoming main-frame root-view point into this
+    // frame's own root-view coordinates, applying the frame's offset within the top-level page as well
+    // as any CSS transforms on the remote ancestor frames -- a plain translation offset could not
+    // represent a scale. The caller re-applies this frame's own scroll via rootViewToContents().
+    return roundedIntPoint(view->convertFromRootViewAcrossIsolatedFrames(WebCore::FloatPoint { point }));
+}
+
+std::optional<WebCore::RemoteUserInputEventData> WebPage::remoteUserInputEventDataForSelectionGesture(WebCore::LocalFrame* localRootFrame, WebCore::IntPoint point)
+{
+    if (!localRootFrame)
+        return std::nullopt;
+
+    FloatPoint adjustedPoint;
+    RefPtr frameOwner = dynamicDowncast<HTMLFrameOwnerElement>(localRootFrame->nodeRespondingToClickEvents(point, adjustedPoint));
+    RefPtr remoteFrame = frameOwner ? dynamicDowncast<RemoteFrame>(frameOwner->contentFrame()) : nullptr;
+    if (!remoteFrame)
+        return std::nullopt;
+
+    RefPtr localRootView = localRootFrame->view();
+    RefPtr remoteFrameView = remoteFrame->view();
+    if (!localRootView || !remoteFrameView)
+        return std::nullopt;
+
+    RemoteFrameGeometryTransformer transformer(remoteFrameView.releaseNonNull(), localRootView.releaseNonNull(), remoteFrame->frameID());
+    return WebCore::RemoteUserInputEventData { remoteFrame->frameID(), transformer.transformToRemoteFrameCoordinates(FloatPoint { point }) };
+}
+
+void WebPage::selectWithGesture(std::optional<WebCore::FrameIdentifier> frameID, const IntPoint& point, GestureType gestureType, GestureRecognizerState gestureState, bool isInteractingWithFocusedElement, CompletionHandler<void(SelectWithGestureResult, std::optional<WebCore::RemoteUserInputEventData>)>&& completionHandler)
 {
     SetForScope userIsInteractingChange { m_userIsInteracting, true };
 
-    if (gestureState == GestureRecognizerState::Began)
-        updateFocusBeforeSelectingTextAtLocation(point);
+    RefPtr localRootFrame = this->localRootFrame(frameID);
 
-    RefPtr frame = m_page->focusController().focusedOrMainFrame();
+    if (auto remoteUserInputEventData = remoteUserInputEventDataForSelectionGesture(localRootFrame.get(), point)) {
+        completionHandler({ point, gestureType, gestureState, { } }, WTF::move(remoteUserInputEventData));
+        return;
+    }
+
+    if (gestureState == GestureRecognizerState::Began)
+        updateFocusBeforeSelectingTextAtLocation(frameID, point);
+
+    RefPtr<WebCore::LocalFrame> frame = frameID ? localRootFrame : RefPtr { m_page->focusController().focusedOrMainFrame() };
     if (!frame) {
-        completionHandler({ }, gestureType, gestureState, { });
+        completionHandler({ { }, gestureType, gestureState, { } }, std::nullopt);
         return;
     }
 
     VisiblePosition position = visiblePositionInFocusedNodeForPoint(*frame, point, isInteractingWithFocusedElement);
 
     if (position.isNull()) {
-        completionHandler(point, gestureType, gestureState, { });
+        completionHandler({ point, gestureType, gestureState, { } }, std::nullopt);
         return;
     }
     std::optional<SimpleRange> range;
@@ -2550,23 +2697,23 @@ void WebPage::selectWithGesture(const IntPoint& point, GestureType gestureType, 
     if (range)
         WTF::protect(frame->selection())->setSelectedRange(range, position.affinity(), WebCore::FrameSelection::ShouldCloseTyping::Yes, UserTriggered::Yes);
 
-    completionHandler(point, gestureType, gestureState, flags);
+    completionHandler({ point, gestureType, gestureState, flags }, std::nullopt);
 }
 
-void WebPage::updateFocusBeforeSelectingTextAtLocation(const IntPoint& point)
+void WebPage::updateFocusBeforeSelectingTextAtLocation(std::optional<WebCore::FrameIdentifier> frameID, const IntPoint& point)
 {
     static constexpr OptionSet hitType { HitTestRequest::Type::ReadOnly, HitTestRequest::Type::Active, HitTestRequest::Type::AllowVisibleChildFrameContentOnly };
-    RefPtr localMainFrame = m_page->localMainFrame();
-    if (!localMainFrame)
+    RefPtr localRootFrame = this->localRootFrame(frameID);
+    if (!localRootFrame)
         return;
 
-    auto result = localMainFrame->eventHandler().hitTestResultAtPoint(point, hitType);
+    auto result = localRootFrame->eventHandler().hitTestResultAtPoint(point, hitType);
     RefPtr hitNode = result.innerNode();
     if (!hitNode || !hitNode->renderer())
         return;
 
     RefPtr frame = result.innerNodeFrame();
-    m_page->focusController().setFocusedFrame(frame.get());
+    protect(m_page->focusController())->setFocusedFrame(frame.get());
 
     if (!result.isOverWidget())
         return;
@@ -2656,15 +2803,75 @@ VisiblePosition WebPage::visiblePositionInFocusedNodeForPoint(const LocalFrame& 
     return frame.visiblePositionForPoint(constrainedPoint);
 }
 
-InteractionInformationAtPosition WebPage::positionInformation(const InteractionInformationRequest& request)
+static void convertPositionInformationToMainFrameCoordinates(const LocalFrameView& localRootView, InteractionInformationAtPosition& information)
 {
-    return WebKit::positionInformationForWebPage(*this, request);
+    if (localRootView.frame().isMainFrame())
+        return;
+
+    auto convertRect = [&](auto rect) {
+        return localRootView.convertToRootViewAcrossIsolatedFrames(rect);
+    };
+    auto convertPoint = [&](WebCore::IntPoint point) {
+        return roundedIntPoint(localRootView.convertToRootViewAcrossIsolatedFrames(FloatPoint { point }));
+    };
+
+    information.request.point = convertPoint(information.request.point);
+    if (information.automationAdjustedInteractionLocation)
+        information.automationAdjustedInteractionLocation = convertPoint(*information.automationAdjustedInteractionLocation);
+
+    information.bounds = convertRect(information.bounds);
+    information.adjustedPointForNodeRespondingToClickEvents = localRootView.convertToRootViewAcrossIsolatedFrames(information.adjustedPointForNodeRespondingToClickEvents);
+    information.cursorContext.lineCaretExtent = convertRect(information.cursorContext.lineCaretExtent);
+#if PLATFORM(MACCATALYST)
+    information.caretRect = convertRect(information.caretRect);
+#endif
+#if ENABLE(DATA_DETECTION) && PLATFORM(IOS_FAMILY)
+    information.dataDetectorBounds = convertRect(information.dataDetectorBounds);
+#endif
+
+    if (RefPtr textIndicator = information.textIndicator) {
+        // textRectsInBoundingRectCoordinates() are relative to the bounding rect, so they follow it.
+        textIndicator->setSelectionRectInMainFrameViewCoordinates(convertRect(textIndicator->selectionRectInMainFrameViewCoordinates()));
+        textIndicator->setTextBoundingRectInRootViewCoordinates(convertRect(textIndicator->textBoundingRectInRootViewCoordinates()));
+        textIndicator->setContentImageWithoutSelectionRectInRootViewCoordinates(convertRect(textIndicator->contentImageWithoutSelectionRectInRootViewCoordinates()));
+    }
+
+    if (information.elementContext)
+        information.elementContext->boundingRect = convertRect(information.elementContext->boundingRect);
+
+    if (information.hostImageOrVideoElementContext)
+        information.hostImageOrVideoElementContext->boundingRect = convertRect(information.hostImageOrVideoElementContext->boundingRect);
 }
 
-void WebPage::requestPositionInformation(const InteractionInformationRequest& request)
+std::optional<InteractionInformationAtPosition> WebPage::positionInformation(WebCore::LocalFrame& localRoot, const InteractionInformationRequest& request)
+{
+    RefPtr localRootView = localRoot.view();
+    if (!localRootView)
+        return std::nullopt;
+
+    auto result = WebKit::positionInformationForWebPage(*this, localRoot, request);
+    return WTF::switchOn(WTF::move(result), [&](InteractionInformationAtPosition&& information) -> std::optional<InteractionInformationAtPosition> {
+        convertPositionInformationToMainFrameCoordinates(*localRootView, information);
+        return WTF::move(information);
+    }, [](const RemoteUserInputEventData&) {
+        return std::optional<InteractionInformationAtPosition>();
+    });
+}
+
+void WebPage::requestPositionInformation(std::optional<WebCore::FrameIdentifier> frameID, const InteractionInformationRequest& request, CompletionHandler<void(Variant<InteractionInformationAtPosition, RemoteUserInputEventData>&&)>&& completionHandler)
 {
     sendEditorStateUpdate();
-    send(Messages::WebPageProxy::DidReceivePositionInformation(positionInformation(request)));
+
+    RefPtr localRoot = localRootFrame(frameID);
+    RefPtr localRootView = localRoot ? localRoot->view() : nullptr;
+    if (!localRootView)
+        return completionHandler(InteractionInformationAtPosition::invalidInformation());
+
+    auto result = positionInformationForWebPage(*this, *localRoot, request);
+    if (auto* information = std::get_if<InteractionInformationAtPosition>(&result))
+        convertPositionInformationToMainFrameCoordinates(*localRootView, *information);
+
+    completionHandler(WTF::move(result));
 }
 
 bool WebPage::isAssistableElement(Element& element)
@@ -2700,7 +2907,7 @@ void WebPage::selectPositionAtPoint(WebCore::IntPoint point, bool isInteractingW
 {
     SetForScope userIsInteractingChange { m_userIsInteracting, true };
 
-    updateFocusBeforeSelectingTextAtLocation(point);
+    updateFocusBeforeSelectingTextAtLocation(std::nullopt, point);
 
     RefPtr frame = m_page->focusController().focusedOrMainFrame();
     if (!frame)
@@ -2740,11 +2947,11 @@ std::optional<SimpleRange> WebPage::rangeForGranularityAtPoint(LocalFrame& frame
     return std::nullopt;
 }
 
-void WebPage::setSelectionRange(WebCore::IntPoint point, WebCore::TextGranularity granularity, bool isInteractingWithFocusedElement)
+void WebPage::setSelectionRange(std::optional<WebCore::FrameIdentifier> frameID, WebCore::IntPoint point, WebCore::TextGranularity granularity, bool isInteractingWithFocusedElement)
 {
-    updateFocusBeforeSelectingTextAtLocation(point);
+    updateFocusBeforeSelectingTextAtLocation(frameID, point);
 
-    RefPtr frame = m_page->focusController().focusedOrMainFrame();
+    RefPtr<WebCore::LocalFrame> frame = frameID ? this->localRootFrame(frameID) : RefPtr { m_page->focusController().focusedOrMainFrame() };
     if (!frame)
         return;
 
@@ -2762,9 +2969,27 @@ void WebPage::setSelectionRange(WebCore::IntPoint point, WebCore::TextGranularit
     m_initialSelection = range;
 }
 
-void WebPage::updateSelectionWithExtentPointAndBoundary(WebCore::IntPoint point, WebCore::TextGranularity granularity, bool isInteractingWithFocusedElement, TextInteractionSource source, CompletionHandler<void(bool)>&& callback)
+static bool isPointOverLink(WebCore::LocalFrame& frame, const WebCore::IntPoint& pointInRootView)
+{
+    RefPtr view = frame.view();
+    if (!view)
+        return false;
+
+    static constexpr OptionSet hitType { HitTestRequest::Type::ReadOnly, HitTestRequest::Type::AllowVisibleChildFrameContentOnly };
+    return frame.eventHandler().hitTestResultAtPoint(view->rootViewToContents(pointInRootView), hitType).isOverLink();
+}
+
+void WebPage::updateSelectionWithExtentPointAndBoundary(WebCore::IntPoint point, WebCore::TextGranularity granularity, bool isInteractingWithFocusedElement, TextInteractionSource source, SelectionExtentAnchor anchor, CompletionHandler<void(bool)>&& callback)
 {
     SetForScope userIsInteractingChange { m_userIsInteracting, true };
+
+    if (anchor == SelectionExtentAnchor::CurrentSelection) {
+        // The previous gesture's initial range must not outlive this one, even if this update bails out early.
+        m_initialSelection = std::nullopt;
+
+        if (m_page->localMainFrame())
+            updateFocusBeforeSelectingTextAtLocation(std::nullopt, point);
+    }
 
     RefPtr frame = m_page->focusController().focusedOrMainFrame();
     if (!frame)
@@ -2772,15 +2997,34 @@ void WebPage::updateSelectionWithExtentPointAndBoundary(WebCore::IntPoint point,
 
 #if ENABLE(PDF_PLUGIN) && ENABLE(TWO_PHASE_CLICKS)
     if (RefPtr pluginView = focusedPluginViewForFrame(*frame)) {
-        auto movedEndpoint = pluginView->extendInitialSelection(point, granularity);
+        auto movedEndpoint = pluginView->extendInitialSelection(point, granularity, anchor);
         return callback(movedEndpoint == SelectionEndpoint::End);
     }
 #endif // ENABLE(PDF_PLUGIN) && ENABLE(TWO_PHASE_CLICKS)
 
-    auto position = visiblePositionInFocusedNodeForPoint(*frame, point, isInteractingWithFocusedElement);
-    auto newRange = rangeForGranularityAtPoint(*frame, point, granularity, isInteractingWithFocusedElement);
+    auto localPoint = mainFrameCoordinatesToRootView(point);
 
-    if (position.isNull() || !m_initialSelection || !newRange)
+    if (anchor == SelectionExtentAnchor::CurrentSelection && isPointOverLink(*frame, localPoint))
+        return callback(false);
+
+    auto position = visiblePositionInFocusedNodeForPoint(*frame, localPoint, isInteractingWithFocusedElement);
+    auto newRange = rangeForGranularityAtPoint(*frame, localPoint, granularity, isInteractingWithFocusedElement);
+
+    if (position.isNull() || !newRange)
+        return callback(false);
+
+    // A gesture that begins by extending has no gesture-start range to measure from; it anchors on the
+    // endpoint of the existing selection that a shift-click would keep. Collapsing the anchor down to
+    // that endpoint makes the extent logic below reproduce shift-click, both for this update and for any
+    // drag that follows.
+    if (anchor == SelectionExtentAnchor::CurrentSelection) {
+        auto anchorPosition = frame->selection().selection().endpointToPreserveWhenExtendedTo(position.deepEquivalent());
+        VisibleSelection anchorSelection { anchorPosition.isNotNull() ? anchorPosition : position.deepEquivalent(), Affinity::Upstream };
+        anchorSelection.expandUsingGranularity(granularity);
+        m_initialSelection = anchorSelection.firstRange();
+    }
+
+    if (!m_initialSelection)
         return callback(false);
 
 #if PLATFORM(IOS_FAMILY)
@@ -2792,13 +3036,24 @@ void WebPage::updateSelectionWithExtentPointAndBoundary(WebCore::IntPoint point,
 
     VisiblePosition selectionStart = initialSelectionStartPosition;
     VisiblePosition selectionEnd = initialSelectionEndPosition;
-    if (position > initialSelectionEndPosition)
+    bool endIsMoving = true;
+    if (position > initialSelectionEndPosition) {
         selectionEnd = makeDeprecatedLegacyPosition(newRange->end);
-    else if (position < initialSelectionStartPosition)
+    } else if (position < initialSelectionStartPosition) {
         selectionStart = makeDeprecatedLegacyPosition(newRange->start);
+        endIsMoving = false;
+    }
 
-    if (auto range = makeSimpleRange(selectionStart, selectionEnd))
-        protect(frame->selection())->setSelectedRange(range, Affinity::Upstream, WebCore::FrameSelection::ShouldCloseTyping::Yes, UserTriggered::Yes);
+    auto selectionStartBoundary = makeBoundaryPoint(selectionStart);
+    auto selectionEndBoundary = makeBoundaryPoint(selectionEnd);
+    if (selectionStartBoundary && selectionEndBoundary && &selectionStartBoundary->document() == &selectionEndBoundary->document()) {
+        VisibleSelection newSelection {
+            (endIsMoving ? selectionStart : selectionEnd).deepEquivalent(),
+            (endIsMoving ? selectionEnd : selectionStart).deepEquivalent(),
+            Affinity::Upstream
+        };
+        protect(frame->selection())->setSelectedVisibleSelection(newSelection, WebCore::FrameSelection::ShouldCloseTyping::Yes, UserTriggered::Yes);
+    }
 
 #if PLATFORM(MAC)
     // AppKit's selection gesture has no edge-autoscroll equivalent to UIKit's `UITextAutoscrolling`,
@@ -2813,11 +3068,11 @@ void WebPage::updateSelectionWithExtentPointAndBoundary(WebCore::IntPoint point,
     // hot-zone enter/exit within a drag because the else branch cancels via the EventHandler, not
     // `WebPage::cancelAutoscroll`.
     if (!m_selectionAutoscrollDragOrigin)
-        m_selectionAutoscrollDragOrigin = point;
+        m_selectionAutoscrollDragOrigin = localPoint;
 
-    if (frame->eventHandler().isPointNearSelectionAutoscrollEdge(point, *m_selectionAutoscrollDragOrigin)) {
+    if (frame->eventHandler().isPointNearSelectionAutoscrollEdge(localPoint, *m_selectionAutoscrollDragOrigin)) {
         if (CheckedPtr renderer = rendererForSelectionAutoscroll(*frame))
-            frame->eventHandler().startSelectionAutoscroll(renderer.get(), point);
+            frame->eventHandler().startSelectionAutoscroll(renderer.get(), localPoint);
     } else
         frame->eventHandler().cancelSelectionAutoscroll();
 #endif
@@ -2830,7 +3085,7 @@ void WebPage::updateSelectionWithExtentPointAndBoundary(WebCore::IntPoint point,
     }
 #endif // PLATFORM(IOS_FAMILY)
 
-    callback(selectionStart == initialSelectionStartPosition);
+    callback(endIsMoving);
 }
 
 void WebPage::updateSelectionWithExtentPoint(WebCore::IntPoint point, bool isInteractingWithFocusedElement, RespectSelectionAnchor respectSelectionAnchor, CompletionHandler<void(bool)>&& callback)
@@ -2839,7 +3094,7 @@ void WebPage::updateSelectionWithExtentPoint(WebCore::IntPoint point, bool isInt
     if (!frame)
         return callback(false);
 
-    auto position = visiblePositionInFocusedNodeForPoint(*frame, point, isInteractingWithFocusedElement);
+    auto position = visiblePositionInFocusedNodeForPoint(*frame, mainFrameCoordinatesToRootView(point), isInteractingWithFocusedElement);
 
     if (position.isNull())
         return callback(false);
@@ -2905,14 +3160,17 @@ RenderObject* WebPage::rendererForSelectionAutoscroll(LocalFrame& frame) const
     return range->start.container->renderer();
 }
 
-void WebPage::startAutoscrollAtPosition(const WebCore::FloatPoint& positionInWindow)
+void WebPage::startAutoscrollAtPosition(const WebCore::FloatPoint& positionInWindow, CompletionHandler<void(bool)>&& completionHandler)
 {
     RefPtr frame = m_page->focusController().focusedOrMainFrame();
     if (!frame)
-        return;
+        return completionHandler(false);
 
-    if (CheckedPtr renderer = rendererForSelectionAutoscroll(*frame))
-        frame->eventHandler().startSelectionAutoscroll(renderer.get(), positionInWindow);
+    CheckedPtr renderer = rendererForSelectionAutoscroll(*frame);
+    if (!renderer)
+        return completionHandler(false);
+
+    completionHandler(frame->eventHandler().startSelectionAutoscroll(renderer.get(), positionInWindow));
 }
 
 void WebPage::cancelAutoscroll()
@@ -2926,42 +3184,57 @@ void WebPage::cancelAutoscroll()
 #endif
 }
 
-void WebPage::selectTextWithGranularityAtPoint(WebCore::IntPoint point, WebCore::TextGranularity granularity, bool isInteractingWithFocusedElement, CompletionHandler<void()>&& completionHandler)
+void WebPage::selectTextWithGranularityAtPoint(std::optional<WebCore::FrameIdentifier> frameID, WebCore::IntPoint point, WebCore::TextGranularity granularity, bool isInteractingWithFocusedElement, CompletionHandler<void(std::optional<WebCore::RemoteUserInputEventData>)>&& completionHandler)
 {
     SetForScope userIsInteractingChange { m_userIsInteracting, true };
 
+    RefPtr localRootFrame = this->localRootFrame(frameID);
+
+    if (auto remoteUserInputEventData = remoteUserInputEventDataForSelectionGesture(localRootFrame.get(), point)) {
+        completionHandler(WTF::move(remoteUserInputEventData));
+        return;
+    }
+
 #if PLATFORM(IOS_FAMILY)
     if (!m_potentialTapNode) {
-        setSelectionRange(point, granularity, isInteractingWithFocusedElement);
-        completionHandler();
+        setSelectionRange(frameID, point, granularity, isInteractingWithFocusedElement);
+        completionHandler(std::nullopt);
         return;
     }
 
     if (auto selectionChangedHandler = std::exchange(m_selectionChangedHandler, { }))
         selectionChangedHandler();
 
-    m_selectionChangedHandler = [point, granularity, isInteractingWithFocusedElement, completionHandler = WTF::move(completionHandler), weakThis = WeakPtr { *this }]() mutable {
+    m_selectionChangedHandler = [frameID, point, granularity, isInteractingWithFocusedElement, completionHandler = WTF::move(completionHandler), weakThis = WeakPtr { *this }]() mutable {
         RefPtr protectedThis = weakThis.get();
         if (!protectedThis) {
-            completionHandler();
+            completionHandler(std::nullopt);
             return;
         }
-        protectedThis->setSelectionRange(point, granularity, isInteractingWithFocusedElement);
-        completionHandler();
+        protectedThis->setSelectionRange(frameID, point, granularity, isInteractingWithFocusedElement);
+        completionHandler(std::nullopt);
     };
 #else
-    setSelectionRange(point, granularity, isInteractingWithFocusedElement);
-    completionHandler();
+    setSelectionRange(frameID, point, granularity, isInteractingWithFocusedElement);
+    completionHandler(std::nullopt);
 #endif
 }
 
 #if ENABLE(TWO_PHASE_CLICKS)
 
+static IntPoint globalPositionForSyntheticMouseEvent(LocalFrame& localRootFrame, FloatPoint pointInLocalRootView)
+{
+    ASSERT(localRootFrame.isRootFrame());
+    RefPtr view = localRootFrame.view();
+    if (!view)
+        return roundedIntPoint(pointInLocalRootView);
+    return roundedIntPoint(view->convertToRootViewAcrossIsolatedFrames(pointInLocalRootView));
+}
+
 static void dispatchSyntheticMouseMove(LocalFrame& localFrame, const WebCore::FloatPoint& location, OptionSet<WebEventModifier> modifiers, WebCore::PointerID pointerId, WebCore::MouseEventInputSource inputSource)
 {
-    auto roundedAdjustedPoint = roundedIntPoint(location);
     auto mouseEvent = PlatformMouseEvent(
-        roundedAdjustedPoint, roundedAdjustedPoint,
+        roundedIntPoint(location), globalPositionForSyntheticMouseEvent(localFrame, location),
         MouseButton::None, PlatformEvent::Type::MouseMoved, 0,
         platform(modifiers), MonotonicTime::now(),
         WebCore::ForceAtClick, WebCore::SyntheticClickType::OneFingerTap,
@@ -3047,26 +3320,25 @@ void WebPage::handleSyntheticClick(std::optional<WebCore::FrameIdentifier> frame
     });
 }
 
-Awaitable<std::optional<WebCore::RemoteUserInputEventData>> WebPage::potentialTapAtPosition(std::optional<WebCore::FrameIdentifier> frameID, WebKit::TapIdentifier requestID, WebCore::FloatPoint position, bool shouldRequestMagnificationInformation, WebKit::WebEventInputSource inputSource)
+Awaitable<std::optional<WebCore::RemoteUserInputEventData>> WebPage::potentialTapAtPosition(std::optional<WebCore::FrameIdentifier> frameID, WebKit::TapIdentifier requestID, WebCore::FloatPoint positionInRootView, bool shouldRequestMagnificationInformation, WebKit::WebEventInputSource inputSource)
 {
     m_potentialTapInputSource = platform(inputSource);
 
     RefPtr localMainFrame = protect(*m_page)->localMainFrame();
 
-    if (RefPtr localRootFrame = this->localRootFrame(frameID))
-        m_potentialTapNode = localRootFrame->nodeRespondingToClickEvents(position, m_potentialTapLocation, m_potentialTapSecurityOrigin.get());
+    RefPtr localRootFrame = this->localRootFrame(frameID);
+    if (localRootFrame)
+        m_potentialTapNode = localRootFrame->nodeRespondingToClickEvents(positionInRootView, m_potentialTapLocation, m_potentialTapSecurityOrigin.get());
 
     RefPtr frameOwner = dynamicDowncast<HTMLFrameOwnerElement>(m_potentialTapNode.get());
     if (RefPtr remoteFrame = frameOwner ? dynamicDowncast<RemoteFrame>(frameOwner->contentFrame()) : nullptr) {
-        RefPtr localFrame = frameOwner->document().frame();
-        if (RefPtr frameView = localFrame ? localFrame->view() : nullptr) {
-            if (RefPtr remoteFrameView = remoteFrame->view()) {
-                RemoteFrameGeometryTransformer transformer(remoteFrameView.releaseNonNull(), frameView.releaseNonNull(), remoteFrame->frameID());
-                co_return WebCore::RemoteUserInputEventData {
-                    remoteFrame->frameID(),
-                    transformer.transformToRemoteFrameCoordinates(position)
-                };
-            }
+        RefPtr localRootView = localRootFrame ? localRootFrame->view() : nullptr;
+        if (RefPtr remoteFrameView = remoteFrame->view(); remoteFrameView && localRootView) {
+            RemoteFrameGeometryTransformer transformer(remoteFrameView.releaseNonNull(), localRootView.releaseNonNull(), remoteFrame->frameID());
+            co_return WebCore::RemoteUserInputEventData {
+                remoteFrame->frameID(),
+                transformer.transformToRemoteFrameCoordinates(positionInRootView)
+            };
         }
     }
 
@@ -3083,7 +3355,7 @@ Awaitable<std::optional<WebCore::RemoteUserInputEventData>> WebPage::potentialTa
             return false;
 
         static constexpr auto maxAllowedMovementSquared = 200 * 200;
-        if ((position - *lastTouchLocation).diagonalLengthSquared() <= maxAllowedMovementSquared)
+        if ((positionInRootView - *lastTouchLocation).diagonalLengthSquared() <= maxAllowedMovementSquared)
             return false;
 
         FloatPoint adjustedLocation;
@@ -3092,7 +3364,7 @@ Awaitable<std::optional<WebCore::RemoteUserInputEventData>> WebPage::potentialTa
     }();
 
     if (ignorePotentialTap) {
-        RELEASE_LOG(ViewGestures, "Ignoring potential tap (distance from last touch: %.0f)", (position - *lastTouchLocation).diagonalLength());
+        RELEASE_LOG(ViewGestures, "Ignoring potential tap (distance from last touch: %.0f)", (positionInRootView - *lastTouchLocation).diagonalLength());
         m_potentialTapNode = nullptr;
         co_return std::nullopt;
     }
@@ -3102,7 +3374,7 @@ Awaitable<std::optional<WebCore::RemoteUserInputEventData>> WebPage::potentialTa
     RefPtr viewGestureGeometryCollector = m_viewGestureGeometryCollector;
 
     if (shouldRequestMagnificationInformation && m_potentialTapNode && viewGestureGeometryCollector) {
-        FloatPoint origin = position;
+        FloatPoint origin = positionInRootView;
         FloatRect absoluteBoundingRect;
         bool fitEntireRect;
         double viewportMinimumScale;
@@ -3115,7 +3387,7 @@ Awaitable<std::optional<WebCore::RemoteUserInputEventData>> WebPage::potentialTa
         send(Messages::WebPageProxy::HandleSmartMagnificationInformationForPotentialTap(requestID, absoluteBoundingRect, fitEntireRect, viewportMinimumScale, viewportMaximumScale, nodeIsRootLevel, nodeIsPluginElement));
     }
 
-    sendTapHighlightForNodeIfNecessary(requestID, m_potentialTapNode.get(), position);
+    sendTapHighlightForNodeIfNecessary(requestID, m_potentialTapNode.get(), positionInRootView);
 #if ENABLE(TWO_PHASE_CLICKS)
     if (RefPtr potentialTapNode = m_potentialTapNode; potentialTapNode && !potentialTapNode->allowsDoubleTapGesture())
         send(Messages::WebPageProxy::DisableDoubleTapGesturesDuringTapIfNecessary(requestID));
@@ -3145,6 +3417,26 @@ Awaitable<std::optional<WebCore::FrameIdentifier>> WebPage::commitPotentialTap(s
 
     RefPtr localRootFrame = this->localRootFrame(frameID);
 
+    auto reportFailedTap = [&] {
+        if (localRootFrame) {
+            if (RefPtr focusedFrame = m_page->focusController().focusedFrame(); focusedFrame && focusedFrame->frameType() == WebCore::Frame::FrameType::Remote) {
+                protect(m_page->focusController())->setFocusedFrame(localRootFrame.get());
+                if (m_isClosed)
+                    return;
+            }
+        }
+#if ENABLE(FOCUS_ADJUSTMENT_IN_SYNTHETIC_CLICK)
+        if (localRootFrame) {
+            protect(m_page->focusController())->setFocusedElement(nullptr, localRootFrame.get(), { .trigger = FocusTrigger::Click });
+
+            // Clearing the focused element can run script that closes the page.
+            if (m_isClosed)
+                return;
+        }
+#endif // ENABLE(FOCUS_ADJUSTMENT_IN_SYNTHETIC_CLICK)
+        commitPotentialTapFailed();
+    };
+
     if (invalidTargetForSingleClick) {
 #if PLATFORM(IOS_FAMILY)
         if (localRootFrame) {
@@ -3155,7 +3447,7 @@ Awaitable<std::optional<WebCore::FrameIdentifier>> WebPage::commitPotentialTap(s
         }
 #endif
 
-        commitPotentialTapFailed();
+        reportFailedTap();
         co_return std::nullopt;
     }
 
@@ -3169,7 +3461,7 @@ Awaitable<std::optional<WebCore::FrameIdentifier>> WebPage::commitPotentialTap(s
     RefPtr frameRespondingToClick = nodeRespondingToClick ? nodeRespondingToClick->document().frame() : nullptr;
 
     if (!frameRespondingToClick) {
-        commitPotentialTapFailed();
+        reportFailedTap();
         co_return std::nullopt;
     }
 
@@ -3389,8 +3681,16 @@ void WebPage::completeSyntheticClick(std::optional<WebCore::FrameIdentifier> fra
 
     // FIXME: Pass caps lock state.
     auto platformModifiers = platform(modifiers);
+    auto globalPoint = globalPositionForSyntheticMouseEvent(*localRootFrame, location);
 
-    auto pressEvent = PlatformMouseEvent { roundedAdjustedPoint, roundedAdjustedPoint, MouseButton::Left, PlatformEvent::Type::MousePressed, 1, platformModifiers, MonotonicTime::now(), WebCore::ForceAtClick, syntheticClickType, m_potentialTapInputSource, pointerId };
+    auto pressEvent = PlatformMouseEvent { roundedAdjustedPoint, globalPoint, MouseButton::Left, PlatformEvent::Type::MousePressed, 1, platformModifiers, MonotonicTime::now(), WebCore::ForceAtClick, syntheticClickType, m_potentialTapInputSource, pointerId };
+
+    // FIXME: <https://webkit.org/b/314881> For input sources where pointer events may not have already been
+    // dispatched upstream by other compat paths, the pointer events that are dispatched in response to this
+    // synthetic click will not carry the correct `buttons` value, so we account for that here.
+    bool becomesPointerEvents = m_potentialTapInputSource == WebCore::MouseEventInputSource::Automation;
+    if (becomesPointerEvents)
+        pressEvent.setButtons(1);
     bool handledPress = localRootFrame->eventHandler().handleMousePressEvent(pressEvent).wasHandled();
     if (m_isClosed)
         return;
@@ -3402,7 +3702,7 @@ void WebPage::completeSyntheticClick(std::optional<WebCore::FrameIdentifier> fra
         clearSelectionAfterTapIfNeeded();
 #endif
 
-    auto releaseEvent = PlatformMouseEvent { roundedAdjustedPoint, roundedAdjustedPoint, MouseButton::Left, PlatformEvent::Type::MouseReleased, 1, platformModifiers, MonotonicTime::now(), ForceAtClick, syntheticClickType, m_potentialTapInputSource, pointerId };
+    auto releaseEvent = PlatformMouseEvent { roundedAdjustedPoint, globalPoint, MouseButton::Left, PlatformEvent::Type::MouseReleased, 1, platformModifiers, MonotonicTime::now(), 0.0, syntheticClickType, m_potentialTapInputSource, pointerId };
     bool handledRelease = localRootFrame->eventHandler().handleMouseReleaseEvent(releaseEvent).wasHandled();
     if (m_isClosed)
         return;
@@ -3415,10 +3715,13 @@ void WebPage::completeSyntheticClick(std::optional<WebCore::FrameIdentifier> fra
         // Dispatch mouseOut to dismiss tooltip content when tapping on the control bar buttons (cc, settings).
         if (document->quirks().needsYouTubeMouseOutQuirk()) {
             if (RefPtr frame = document->frame()) {
-                PlatformMouseEvent event { roundedAdjustedPoint, roundedAdjustedPoint, MouseButton::Left, PlatformEvent::Type::NoType, 0, platformModifiers, MonotonicTime::now(), 0, WebCore::SyntheticClickType::NoTap, m_potentialTapInputSource, pointerId };
+                PlatformMouseEvent event { roundedAdjustedPoint, globalPoint, MouseButton::Left, PlatformEvent::Type::NoType, 0, platformModifiers, MonotonicTime::now(), 0, WebCore::SyntheticClickType::NoTap, m_potentialTapInputSource, pointerId };
+                RefPtr<Element> newHoveredNode;
                 if (!nodeRespondingToClick.isConnected())
                     frame->eventHandler().dispatchSyntheticMouseMove(event);
-                frame->eventHandler().dispatchSyntheticMouseOut(event);
+                else
+                    newHoveredNode = nodeRespondingToClick.parentElementInComposedTree();
+                frame->eventHandler().dispatchSyntheticMouseOut(event, newHoveredNode.get());
             }
         }
     }
@@ -3448,6 +3751,53 @@ void WebPage::completeSyntheticClick(std::optional<WebCore::FrameIdentifier> fra
 #if PLATFORM(IOS_FAMILY)
     scheduleLayoutViewportHeightExpansionUpdate();
 #endif
+}
+
+void WebPage::handleDoubleTapForDoubleClickAtPoint(const IntPoint& point, OptionSet<WebEventModifier> modifiers, TransactionID lastLayerTreeTransactionId, WebEventInputSource inputSource, WebMouseEventSyntheticClickType webSyntheticClickType)
+{
+    FloatPoint adjustedPoint;
+    RefPtr localMainFrame = protect(*m_page)->localMainFrame();
+    RefPtr nodeRespondingToDoubleClick = localMainFrame ? localMainFrame->nodeRespondingToDoubleClickEvent(point, adjustedPoint) : nullptr;
+
+    RefPtr windowListeningToDoubleClickEvents = localMainFrame ? localMainFrame->windowWithDoubleClickEventListener() : nullptr;
+
+    if (!nodeRespondingToDoubleClick && !windowListeningToDoubleClickEvents)
+        return;
+
+    RefPtr<LocalFrame> frameRespondingToDoubleClick;
+    if (nodeRespondingToDoubleClick)
+        frameRespondingToDoubleClick = nodeRespondingToDoubleClick->document().frame();
+    else if (windowListeningToDoubleClickEvents) {
+        RefPtr document = windowListeningToDoubleClickEvents->documentIfLocal();
+        frameRespondingToDoubleClick = document ? document->frame() : nullptr;
+    }
+
+    if (!frameRespondingToDoubleClick)
+        return;
+
+    auto firstTransactionID = WebFrame::fromCoreFrame(*frameRespondingToDoubleClick)->firstLayerTreeTransactionIDAfterDidCommitLoad();
+    // FIXME: We should probably guard the comparison with a processIdentifier() equality
+    // check (as commitPotentialTap() does) so that a cross-process transaction ID doesn't
+    // yield a meaningless comparison.
+    if (!firstTransactionID || lastLayerTreeTransactionId.lessThanSameProcess(*firstTransactionID))
+        return;
+
+    SetForScope userIsInteractingChange { m_userIsInteracting, true };
+
+    auto platformModifiers = platform(modifiers);
+    auto platformInputSource = platform(inputSource);
+    auto syntheticClickType = coreSyntheticClickType(webSyntheticClickType);
+    auto roundedAdjustedPoint = roundedIntPoint(adjustedPoint);
+
+    bool becomesPointerEvents = platformInputSource == WebCore::MouseEventInputSource::Automation;
+    auto pressEvent = PlatformMouseEvent { roundedAdjustedPoint, roundedAdjustedPoint, MouseButton::Left, PlatformEvent::Type::MousePressed, 2, platformModifiers, MonotonicTime::now(), becomesPointerEvents ? WebCore::ForceAtClick : 0.0, syntheticClickType, platformInputSource };
+    if (becomesPointerEvents)
+        pressEvent.setButtons(1);
+
+    frameRespondingToDoubleClick->eventHandler().handleMousePressEvent(pressEvent);
+    if (m_isClosed)
+        return;
+    frameRespondingToDoubleClick->eventHandler().handleMouseReleaseEvent(PlatformMouseEvent(roundedAdjustedPoint, roundedAdjustedPoint, MouseButton::Left, PlatformEvent::Type::MouseReleased, 2, platformModifiers, MonotonicTime::now(), 0, syntheticClickType, platformInputSource));
 }
 
 #endif // ENABLE(TWO_PHASE_CLICKS)

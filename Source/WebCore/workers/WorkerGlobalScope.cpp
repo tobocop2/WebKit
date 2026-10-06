@@ -75,13 +75,13 @@
 #include "WorkerNavigator.h"
 #include "WorkerOrWorkletGlobalScope.h"
 #include "WorkerReportingProxy.h"
-#include "WorkerSTWParticipation.h"
 #include "WorkerSWClientConnection.h"
 #include "WorkerScriptLoader.h"
 #include "WorkerStorageConnection.h"
 #include "WorkerThread.h"
 #include <JavaScriptCore/ScriptArguments.h>
 #include <JavaScriptCore/ScriptCallStack.h>
+#include <JavaScriptCore/VMManager.h>
 #include <wtf/Lock.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/WorkQueue.h>
@@ -128,6 +128,7 @@ WorkerGlobalScope::WorkerGlobalScope(WorkerThreadType type, const WorkerParamete
     , m_workerType(params.workerType)
     , m_credentials(params.credentials)
     , m_agentClusterID(params.agentClusterID)
+    , m_networkLoadPolicy(params.networkLoadPolicy)
 {
     {
         Locker locker { allWorkerGlobalScopeIdentifiersLock };
@@ -543,7 +544,10 @@ std::optional<Vector<uint8_t>> WorkerGlobalScope::serializeAndWrapCryptoKey(Cryp
         wrappedKey = context.serializeAndWrapCryptoKey(WTF::move(keyData));
         semaphore.signal();
     });
-    waitWithSTWParticipation(semaphore, vm());
+    {
+        JSC::VMBlockingScope blockingScope(vm());
+        semaphore.wait();
+    }
     return wrappedKey;
 }
 
@@ -560,7 +564,10 @@ std::optional<Vector<uint8_t>> WorkerGlobalScope::unwrapCryptoKey(const Vector<u
         key = context.unwrapCryptoKey(wrappedKey);
         semaphore.signal();
     });
-    waitWithSTWParticipation(semaphore, vm());
+    {
+        JSC::VMBlockingScope blockingScope(vm());
+        semaphore.wait();
+    }
     return key;
 }
 

@@ -73,8 +73,9 @@ ALWAYS_INLINE bool RegExpObject::isSymbolSearchFastAndNonObservable()
 
     // RegExp.prototype[@@search] sets lastIndex to 0 and restores it afterwards. The fast
     // path skips both writes, which is only unobservable when lastIndex is a plain writable
-    // number; a non-writable lastIndex must throw in the generic path.
-    if (!lastIndexIsWritable())
+    // number, or, for a RegExp with immutable properties, when neither write would happen;
+    // otherwise a non-writable lastIndex must throw in the generic path.
+    if (!lastIndexIsWritable() && !canSearchWithoutWritingLastIndex())
         return false;
 
     if (!getLastIndex().isNumber())
@@ -125,6 +126,31 @@ ALWAYS_INLINE bool RegExpObject::isSymbolMatchAllFastAndNonObservable()
         return false;
 
     return true;
+}
+
+ALWAYS_INLINE bool RegExpObject::canShareLiteralAsReceiver(JSGlobalObject* globalObject, bool forTest)
+{
+    // "exec" (and with it everything the builtin test looks at) is the original, and so is "test" where the call goes through it.
+    if (globalObject->regExpPrimordialPropertiesWatchpointSet().state() != IsWatched)
+        return false;
+    return !forTest || globalObject->regExpPrototypeTestWatchpointSet().state() == IsWatched;
+}
+
+ALWAYS_INLINE JSObject* RegExpObject::literalAsReceiver(JSGlobalObject* globalObject, CodeBlock* codeBlock, RegExp* regExp, bool forTest, WriteBarrier<JSCell>& cachedObject)
+{
+    // The slot is only ever filled while the option is on.
+    if (JSCell* cached = cachedObject.get()) [[likely]] {
+        auto* object = uncheckedDowncast<RegExpObject>(cached);
+        if (canShareLiteralAsReceiver(globalObject, forTest) && object->isSharedLiteralInInitialState(globalObject->regExpStructure(), regExp)) [[likely]]
+            return object;
+    }
+    return literalAsReceiverSlow(globalObject, codeBlock, regExp, forTest, cachedObject);
+}
+
+inline RegExpObject* RegExpObject::copyOfSharedLiteral(VM& vm)
+{
+    ASSERT(isSharedLiteral());
+    return create(vm, realm()->regExpStructure(), regExp());
 }
 
 ALWAYS_INLINE bool RegExpObject::isSymbolReplaceFastAndNonObservable()

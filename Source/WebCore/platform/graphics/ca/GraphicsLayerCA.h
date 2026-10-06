@@ -48,6 +48,7 @@ class DisplayList;
 }
 
 class FloatRoundedRect;
+class FrameProcessIndicators;
 class GraphicsLayerAnimationValue;
 class GraphicsLayerKeyframeValueList;
 class HTMLVideoElement;
@@ -148,6 +149,8 @@ public:
     
     WEBCORE_EXPORT void setContentsRect(const FloatRect&) override;
     WEBCORE_EXPORT void setContentsClippingRect(const FloatRoundedRect&) override;
+    WEBCORE_EXPORT void setContentsClipShapePath(const Path&) override;
+    WEBCORE_EXPORT void setBackdropFiltersShapePath(const Path&) override;
     WEBCORE_EXPORT void setContentsRectClipsDescendants(bool) override;
 
     WEBCORE_EXPORT void setVideoGravity(MediaPlayerVideoGravity) override;
@@ -159,9 +162,6 @@ public:
 #if ENABLE(SCROLLING_THREAD)
     WEBCORE_EXPORT void setScrollingNodeID(std::optional<ScrollingNodeID>) override;
 #endif
-
-    WEBCORE_EXPORT void suspendAnimations(MonotonicTime) override;
-    WEBCORE_EXPORT void resumeAnimations() override;
 
     WEBCORE_EXPORT bool addAnimation(const GraphicsLayerKeyframeValueList&, const GraphicsLayerAnimation*, const String& animationName, double timeOffset) override;
     WEBCORE_EXPORT void pauseAnimation(const String& animationName, double timeOffset) override;
@@ -177,7 +177,7 @@ public:
 #if ENABLE(MODEL_CONTEXT) && !ENABLE(GPU_PROCESS_MODEL)
     WEBCORE_EXPORT void setContentsToModelContext(Ref<ModelContext>, ContentsLayerPurpose) override;
 #endif
-#if ENABLE(MODEL_ELEMENT_IMMERSIVE)
+#if ENABLE(MODEL_ELEMENT_IMMERSIVE) || ENABLE(SPATIAL_PORTAL)
     WEBCORE_EXPORT void removeModelContents() override;
 #endif
     WEBCORE_EXPORT void setContentsToVideoElement(HTMLVideoElement&, ContentsLayerPurpose) override;
@@ -199,7 +199,7 @@ public:
 
     WEBCORE_EXPORT void setDebugBackgroundColor(const Color&) override;
     WEBCORE_EXPORT void setDebugBorder(const Color&, float borderWidth) override;
-    WEBCORE_EXPORT void setShowFrameProcessBorders(bool) override;
+    WEBCORE_EXPORT void setShowFrameProcessBorders(bool, unsigned frameDepth = 0) override;
 
     WEBCORE_EXPORT void setCustomAppearance(CustomAppearance) override;
 
@@ -247,6 +247,8 @@ public:
     WEBCORE_EXPORT void setShadowPath(const Path&) override;
 
 private:
+    friend class FrameProcessIndicators;
+
     bool isGraphicsLayerCA() const override { return true; }
 
     // PlatformCALayerClient overrides
@@ -384,7 +386,7 @@ private:
     void setupContentsLayer(PlatformCALayer*, CompositingCoordinatesOrientation = defaultContentsOrientation);
     PlatformCALayer* contentsLayer() const { return m_contentsLayer.get(); }
 
-    void updateClippingStrategy(PlatformCALayer&, RefPtr<PlatformCALayer>& shapeMaskLayer, const FloatRoundedRect&);
+    void updateClippingStrategy(PlatformCALayer&, RefPtr<PlatformCALayer>& shapeMaskLayer, const FloatRoundedRect&, const Path& shapePath);
 
     WEBCORE_EXPORT void setReplicatedByLayer(RefPtr<GraphicsLayer>&&) override;
 
@@ -525,6 +527,7 @@ private:
     void updateContentsNeedsDisplay();
     void updateAcceleratesDrawing();
     void updateDebugIndicators();
+    void updateFrameProcessIndicators();
     void updateTiles();
     void updateRootRelativeScale();
     void updateContentsScale(float pageScaleFactor);
@@ -728,6 +731,7 @@ private:
 #ifdef VISIBLE_TILE_WASH
     RefPtr<PlatformCALayer> m_visibleTileWashLayer;
 #endif
+    std::unique_ptr<FrameProcessIndicators> m_frameProcessIndicators;
     FloatRect m_visibleRect;
     FloatRect m_previousCommittedVisibleRect;
     FloatRect m_coverageRect; // Area for which we should maintain backing store, in the coordinate space of this layer.

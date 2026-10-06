@@ -21,6 +21,7 @@
 
 #include "InlineIteratorSVGTextBox.h"
 #include "Path.h"
+#include "PathArcLengthMapper.h"
 #include "SVGTextChunkBuilder.h"
 #include "SVGTextFragment.h"
 #include "SVGTextLayoutAttributes.h"
@@ -68,6 +69,8 @@ private:
     void recordTextFragment(InlineIterator::SVGTextBoxIterator, const Vector<SVGTextMetrics>&);
     bool parentDefinesTextLength(RenderObject*) const;
 
+    float computeTextPathStartOffset(const RenderSVGTextPath&) const;
+
     void layoutTextOnLineOrPath(InlineIterator::SVGTextBoxIterator, const RenderSVGInlineText&, const Style::ComputedStyle&);
     void finalizeTransformMatrices(Vector<InlineIterator::SVGTextBoxIterator>&);
 
@@ -108,6 +111,7 @@ private:
 
     // Text on path layout
     Path m_textPath;
+    PathArcLengthMapper m_textPathMapper;
     float m_textPathLength { 0.0f };
     float m_textPathStartOffset { 0.0f };
     float m_textPathCurrentOffset { 0.0f };

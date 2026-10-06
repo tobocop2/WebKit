@@ -96,6 +96,10 @@ class WebAnimation;
 class AttachmentAssociatedElement;
 #endif
 
+#if ENABLE(SPATIAL_PORTAL)
+class SpatialPortalController;
+#endif
+
 enum CSSPropertyID : uint16_t;
 
 enum class AnimationImpact : uint8_t;
@@ -105,7 +109,7 @@ enum class FullscreenNavigationUI : uint8_t;
 enum class FullscreenKeyboardLock : uint8_t;
 enum class IsSyntheticClick : bool { No, Yes };
 enum class ParserContentPolicy : uint8_t;
-enum class PopoverState : uint8_t { None, Auto, Manual };
+enum class PopoverState : uint8_t { None, Auto, Manual, Hint };
 enum class ResolveURLs : uint8_t { No, NoExcludingURLsForPrivacy, Yes, YesExcludingURLsForPrivacy };
 enum class SelectionRestorationMode : uint8_t;
 enum class ShadowRootDelegatesFocus : bool { No, Yes };
@@ -346,6 +350,7 @@ public:
     WEBCORE_EXPORT IntRect boundsInRootViewSpace();
     // This does not update layout, and uses absoluteBoundingBoxRect().
     WEBCORE_EXPORT IntRect boundingBoxInRootViewCoordinates() const;
+    WEBCORE_EXPORT IntRect boundingBoxInMainFrameViewCoordinates() const;
 
     WEBCORE_EXPORT std::optional<std::pair<CheckedPtr<RenderElement>, FloatRect>> boundingAbsoluteRectWithoutLayout() const;
 
@@ -766,6 +771,7 @@ public:
     inline bool hasName() const;
     inline const SpaceSplitString& classNames() const;
     inline bool hasClassName(const AtomString& className) const;
+    inline bool hasClassNamePrefix(StringView prefix) const;
 
     ScrollPosition NODELETE savedLayerScrollPosition() const;
     void setSavedLayerScrollPosition(const ScrollPosition&);
@@ -845,7 +851,7 @@ public:
     void invalidateRenderer();
 
     void invalidateStyleForAnimation();
-    void invalidateForQueryContainerSizeChange();
+    void invalidateForQueryContainerChange();
     void invalidateForAnchorRectChange();
     void invalidateForResumingQueryContainerResolution();
     void invalidateForResumingAnchorPositionedElementResolution();
@@ -857,6 +863,7 @@ public:
 
     bool NODELETE hasDisplayContents() const;
     bool NODELETE hasDisplayNone() const;
+    bool computedStyleIsDisplayNone();
     void storeDisplayContentsOrNoneStyle(std::unique_ptr<Style::ComputedStyle>);
     void clearDisplayContentsOrNoneStyle();
 
@@ -923,12 +930,19 @@ public:
     bool NODELETE shouldNotifyTextManipulationControllerIfDisplayed() const;
     void NODELETE clearShouldNotifyTextManipulationControllerIfDisplayed();
 
+#if ENABLE(SPATIAL_PORTAL)
+    SpatialPortalController& ensureSpatialPortalController();
+    WEBCORE_EXPORT SpatialPortalController* spatialPortalController() const;
+    void clearSpatialPortalController();
+    WEBCORE_EXPORT bool establishesSpatialPortal() const;
+#endif
+
 protected:
     Element(const QualifiedName&, Document&, OptionSet<TypeFlag>);
 
     NeedsPostConnectionSteps insertionSteps(InsertionType, ContainerNode&) override;
     void removingSteps(RemovalType, ContainerNode&) override;
-    void movingSteps(bool, ContainerNode&) override;
+    void movingSteps(IsSubtreeRoot, ContainerNode&) override;
     void childrenChanged(const ChildChange&) override;
     void removeAllEventListeners() override;
 

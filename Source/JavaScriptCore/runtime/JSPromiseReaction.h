@@ -57,10 +57,10 @@ public:
     static JSValue tryGetContext(JSValue reactionsValue);
 
 protected:
-    JSPromiseReaction(VM& vm, Structure* structure, JSValue promise, JSPromiseReaction* next, InternalMicrotask task = InternalMicrotask::None)
+    JSPromiseReaction(VM& vm, Structure* structure, JSValue promise, JSPromiseReaction* next, uint8_t payload)
         : Base(vm, structure)
         , m_promise(promise, WriteBarrierEarlyInit)
-        , m_next(next, static_cast<uint8_t>(task))
+        , m_next(next, payload)
     {
     }
 
@@ -85,15 +85,25 @@ public:
 
     static JSSlimPromiseReaction* create(VM&, JSValue promise, JSValue handler, bool isFulfill, JSPromiseReaction* next);
     static JSSlimPromiseReaction* create(VM&, JSValue promise, InternalMicrotask, JSValue context, JSPromiseReaction* next);
+#if USE(BUN_JSC_ADDITIONS)
+    // An internal-microtask reaction whose task takes no cell argument keeps its
+    // captured async context (see AsyncContextSwapScope) in the otherwise-unused
+    // promise slot.
+    static JSSlimPromiseReaction* createWithAsyncContext(VM&, JSValue asyncContext, InternalMicrotask, JSValue context, JSPromiseReaction* next);
+    bool promiseSlotIsAsyncContext() const { return internalMicrotask() != InternalMicrotask::None && perCellBit(); }
+#endif
 
-    bool isFulfillHandler() const { return perCellBit(); }
+    static JSSlimPromiseReaction* createAsyncGeneratorRequest(VM&, JSValue settlementTarget, JSValue value, uint8_t resumeMode, JSPromiseReaction* next);
+    uint8_t asyncGeneratorResumeMode() const { return m_next.type(); }
+
+    bool isFulfillHandler() const { ASSERT(internalMicrotask() == InternalMicrotask::None); return perCellBit(); }
 
     JSValue handlerOrContext() const { return m_handlerOrContext.get(); }
     void setHandlerOrContext(VM& vm, JSValue value) { m_handlerOrContext.set(vm, this, value); }
 
 private:
-    JSSlimPromiseReaction(VM& vm, Structure* structure, JSValue promise, JSValue handlerOrContext, JSPromiseReaction* next, InternalMicrotask task, bool isFulfill)
-        : Base(vm, structure, promise, next, task)
+    JSSlimPromiseReaction(VM& vm, Structure* structure, JSValue promise, JSValue handlerOrContext, JSPromiseReaction* next, uint8_t payload, bool isFulfill)
+        : Base(vm, structure, promise, next, payload)
         , m_handlerOrContext(handlerOrContext, WriteBarrierEarlyInit)
     {
         if (isFulfill)
@@ -119,6 +129,12 @@ public:
     static Structure* createStructure(VM&, JSGlobalObject*, JSValue);
 
     static JSFullPromiseReaction* create(VM&, JSValue promise, JSValue onFulfilled, JSValue onRejected, JSValue context, JSPromiseReaction* next);
+#if USE(BUN_JSC_ADDITIONS)
+    // m_context is the async context captured by performPromiseThen (see
+    // AsyncContextSwapScope) rather than an embedder-supplied handler context.
+    static JSFullPromiseReaction* createWithAsyncContext(VM&, JSValue promise, JSValue onFulfilled, JSValue onRejected, JSValue asyncContext, JSPromiseReaction* next);
+    bool contextIsAsyncContext() const { return perCellBit(); }
+#endif
 
     JSValue onFulfilled() const { return m_onFulfilled.get(); }
     JSValue onRejected() const { return m_onRejected.get(); }
@@ -128,9 +144,10 @@ public:
     void setOnRejected(VM& vm, JSValue value) { m_onRejected.set(vm, this, value); }
     void setContext(VM& vm, JSValue value) { m_context.set(vm, this, value); }
 
+
 private:
     JSFullPromiseReaction(VM& vm, Structure* structure, JSValue promise, JSValue onFulfilled, JSValue onRejected, JSValue context, JSPromiseReaction* next)
-        : Base(vm, structure, promise, next)
+        : Base(vm, structure, promise, next, static_cast<uint8_t>(InternalMicrotask::None))
         , m_onFulfilled(onFulfilled, WriteBarrierEarlyInit)
         , m_onRejected(onRejected, WriteBarrierEarlyInit)
         , m_context(context, WriteBarrierEarlyInit)

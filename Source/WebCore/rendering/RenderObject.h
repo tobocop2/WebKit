@@ -28,6 +28,7 @@
 #include <WebCore/CachedImageClient.h>
 #include <WebCore/LayoutRect.h>
 #include <WebCore/PlatformLayerIdentifier.h>
+#include <WebCore/Position.h>
 #include <WebCore/RenderObjectEnums.h>
 #include <WebCore/RenderStyleConstants.h>
 #include <WebCore/RepaintRectCalculation.h>
@@ -89,6 +90,7 @@ struct PaintInfo;
 struct ScrollRectToVisibleOptions;
 struct SimpleRange;
 struct VisibleRectContext;
+struct VisibleRectState;
 
 namespace Layout {
 class Box;
@@ -97,7 +99,6 @@ class Box;
 namespace Style {
 class ComputedStyle;
 class PseudoElementRequest;
-enum class MarginTrimSide : uint8_t;
 }
 
 enum class Affinity : bool;
@@ -130,12 +131,12 @@ public:
         CombineText,
         Counter,
         DeprecatedFlexibleBox,
-        DetailsMarker,
         EmbeddedObject,
         FileUploadControl,
         FlexibleBox,
         Frame,
         FrameSet,
+        Glyph,
         Grid,
         HTMLCanvas,
         IFrame,
@@ -144,7 +145,7 @@ public:
         LineBreak,
         ListBox,
         ListItem,
-        ListMarker,
+        ListOutsideMarker,
         Media,
         MenuList,
         Meter,
@@ -242,7 +243,7 @@ public:
         IsBox = 1 << 2,
         IsBoxModelObject = 1 << 3,
         IsLayerModelObject = 1 << 4,
-        IsRenderInline = 1 << 5,
+        IsInlineBox = 1 << 5,
         IsRenderBlock = 1 << 6,
         IsFlexibleBox = 1 << 7,
     };
@@ -377,7 +378,6 @@ public:
 
     RenderElement* NODELETE firstNonAnonymousAncestor() const;
 
-#if ENABLE(TEXT_AUTOSIZING)
     // Minimal distance between the block with fixed height and overflowing content and the text block to apply text autosizing.
     // The greater this constant is the more potential places we have where autosizing is turned off.
     // So it should be as low as possible. There are sites that break at 2.
@@ -391,7 +391,6 @@ public:
 
     typedef BlockContentHeightType (*HeightTypeTraverseNextInclusionFunction)(const RenderObject&);
     RenderObject* traverseNext(const RenderObject* stayWithin, HeightTypeTraverseNextInclusionFunction, int& currentDepth, int& newFixedDepth) const;
-#endif
 
     WEBCORE_EXPORT RenderLayer* NODELETE enclosingLayer() const;
 
@@ -433,16 +432,16 @@ public:
     bool isRenderBoxModelObject() const { return m_typeFlags.contains(TypeFlag::IsBoxModelObject); }
     bool isRenderBlock() const { return m_typeFlags.contains(TypeFlag::IsRenderBlock); }
     bool isRenderBlockFlow() const { return m_typeSpecificFlags.kind() == TypeSpecificFlags::Kind::BlockFlow; }
-    bool isRenderInline() const { return m_typeFlags.contains(TypeFlag::IsRenderInline); }
+    bool isInlineBox() const { return m_typeFlags.contains(TypeFlag::IsInlineBox); }
     bool isRenderLayerModelObject() const { return m_typeFlags.contains(TypeFlag::IsLayerModelObject); }
 
     inline bool isAtomicInlineLevelBox() const; // Defined in RenderObjectStyle.h
     inline bool isNonReplacedAtomicInlineLevelBox() const;
 
     bool isRenderCounter() const { return type() == Type::Counter; }
+    bool isRenderGlyph() const { return type() == Type::Glyph; }
     bool isRenderQuote() const { return type() == Type::Quote; }
 
-    bool isRenderDetailsMarker() const { return type() == Type::DetailsMarker; }
     bool isRenderEmbeddedObject() const { return type() == Type::EmbeddedObject; }
     bool NODELETE isFieldset() const;
     bool isRenderFileUploadControl() const { return type() == Type::FileUploadControl; }
@@ -451,7 +450,7 @@ public:
     virtual bool isImage() const { return false; }
     bool isRenderListBox() const { return type() == Type::ListBox; }
     bool isRenderListItem() const { return type() == Type::ListItem; }
-    bool isRenderListMarker() const { return type() == Type::ListMarker; }
+    bool isRenderListOutsideMarker() const { return type() == Type::ListOutsideMarker; }
     bool isRenderMedia() const { return isRenderReplaced() && m_typeSpecificFlags.replacedFlags().contains(ReplacedFlag::IsMedia); }
     bool isRenderMenuList() const { return type() == Type::MenuList; }
     bool isRenderMeter() const { return type() == Type::Meter; }
@@ -598,6 +597,7 @@ public:
     bool isRenderOrLegacyRenderSVGImage() const { return isRenderSVGImage() || isLegacyRenderSVGImage(); }
     bool isRenderOrLegacyRenderSVGRect() const { return isRenderSVGRect() || isLegacyRenderSVGRect(); }
     bool isRenderOrLegacyRenderSVGForeignObject() const { return isRenderSVGForeignObject() || isLegacyRenderSVGForeignObject(); }
+    bool isRenderOrLegacyRenderSVGHiddenContainer() const { return isRenderSVGHiddenContainer() || isLegacyRenderSVGHiddenContainer(); }
     bool isRenderOrLegacyRenderSVGModelObject() const { return isRenderSVGModelObject() || isLegacyRenderSVGModelObject(); }
     bool isRenderOrLegacyRenderSVGResourceFilterPrimitive() const { return isRenderSVGResourceFilterPrimitive() || isLegacyRenderSVGResourceFilterPrimitive(); }
     bool isSVGLayerAwareRenderer() const { return isRenderSVGRoot() || isRenderSVGModelObject() || isRenderSVGText() || isRenderSVGInline() || isRenderSVGForeignObject(); }
@@ -687,6 +687,7 @@ public:
     bool isExcludedFromNormalLayout() const { return m_stateBitfields.hasFlag(StateFlag::IsExcludedFromNormalLayout); }
     void setIsExcludedFromNormalLayout(bool excluded) { m_stateBitfields.setFlag(StateFlag::IsExcludedFromNormalLayout, excluded); }
     bool isExcludedAndPlacedInBorder() const { return isExcludedFromNormalLayout() && isLegend(); }
+    bool isExcludedMarker() const;
 
     bool isYouTubeReplacement() const { return hasRareData() && rareData().isYouTubeReplacement; }
     void markIsYouTubeReplacement();
@@ -761,6 +762,8 @@ public:
     void clearNeedsLayout(HadSkippedLayout = HadSkippedLayout::No);
     void invalidateContentLogicalWidths(MarkingBehavior = MarkingBehavior::MarkContainingBlockChain, const RenderBlock* ancestorUpdateBoundary = nullptr);
     void clearContentLogicalWidthsInvalidation() { m_stateBitfields.setFlag(StateFlag::ContentLogicalWidthsInvalidated, { }); }
+
+    void notifyInspectorOfLayoutInvalidate();
     
     inline void setNeedsLayoutAndInvalidateContentLogicalWidths();
 
@@ -801,7 +804,7 @@ public:
     PositionWithAffinity createPositionWithAffinity(int offset, Affinity) const;
     PositionWithAffinity createPositionWithAffinity(const Position&) const;
 
-    WEBCORE_EXPORT VisiblePosition visiblePositionForPoint(const LayoutPoint&, HitTestSource);
+    WEBCORE_EXPORT VisiblePosition visiblePositionForPoint(const LayoutPoint&, HitTestSource, AllowUserSelectNone = AllowUserSelectNone::No);
 
     // Returns the containing block level element for this element.
     WEBCORE_EXPORT RenderBlock* containingBlock() const;
@@ -857,6 +860,7 @@ public:
     WEBCORE_EXPORT static Vector<IntRect> absoluteTextRects(const SimpleRange&, OptionSet<BoundingRectBehavior> = { });
     WEBCORE_EXPORT static Vector<FloatRect> absoluteBorderAndTextRects(const SimpleRange&, OptionSet<BoundingRectBehavior> = { });
     static Vector<FloatRect> clientBorderAndTextRects(const SimpleRange&);
+    static Vector<FloatRect> clientTextRects(const SimpleRange&);
 
     // the rect that will be painted if this object is passed as the subtree paint root
     enum class RespectTransforms : bool { No, Yes };
@@ -880,7 +884,9 @@ public:
     RepaintContainerStatus containerForRepaint() const;
     // Actually do the repaint of rect r for this object which has been computed in the coordinate space
     // of repaintContainer. If repaintContainer is nullptr, repaint via the view.
-    void repaintUsingContainer(SingleThreadWeakPtr<const RenderLayerModelObject>&& repaintContainer, const LayoutRect&, bool shouldClipToLayer = true) const;
+    enum class ClipRepaintToLayer : bool { No, Yes };
+    enum class RepaintRectIsPartial : bool { No, Yes };
+    void repaintUsingContainer(SingleThreadWeakPtr<const RenderLayerModelObject>&& repaintContainer, const LayoutRect&, ClipRepaintToLayer = ClipRepaintToLayer::Yes, RepaintRectIsPartial = RepaintRectIsPartial::No) const;
 
     // Repaint the entire object.  Called when, e.g., the color of a border changes, or when a border
     // style changes.
@@ -890,7 +896,6 @@ public:
     // Repaint a specific subrectangle within a given object.  The rect |r| is in the object's coordinate space.
     WEBCORE_EXPORT void repaintRectangle(const LayoutRect&, bool shouldClipToLayer = true) const;
 
-    enum class ClipRepaintToLayer : bool { No, Yes };
     void repaintRectangle(const LayoutRect&, ClipRepaintToLayer, ForceRepaint, std::optional<LayoutBoxExtent> additionalRepaintOutsets = std::nullopt) const;
 
     // Repaint a slow repaint object, which, at this time, means we are repainting an object with background-attachment:fixed.
@@ -982,14 +987,14 @@ public:
 
     WEBCORE_EXPORT IntRect pixelSnappedAbsoluteClippedOverflowRect() const;
 
-    virtual LayoutRect clippedOverflowRect(const RenderLayerModelObject* repaintContainer, VisibleRectContext) const;
+    virtual LayoutRect clippedOverflowRect(const RenderLayerModelObject* repaintContainer, const VisibleRectContext&) const;
     inline LayoutRect clippedOverflowRectForRepaint(const RenderLayerModelObject* repaintContainer) const;
     virtual LayoutRect rectWithOutlineForRepaint(const RenderLayerModelObject* repaintContainer, LayoutUnit outlineWidth) const;
     virtual LayoutRect outlineBoundsForRepaint(const RenderLayerModelObject* /*repaintContainer*/, const RenderGeometryMap* = nullptr) const { return { }; }
 
     // Given a rect in the object's coordinate space, compute a rect  in the coordinate space
     // of repaintContainer suitable for the given VisibleRectContext.
-    RepaintRects computeRects(const RepaintRects&, const RenderLayerModelObject* repaintContainer, VisibleRectContext) const;
+    RepaintRects computeRects(const RepaintRects&, const RenderLayerModelObject* repaintContainer, const VisibleRectContext&) const;
 
     inline LayoutRect computeRectForRepaint(const LayoutRect& rect, const RenderLayerModelObject* repaintContainer) const;
     FloatRect computeFloatRectForRepaint(const FloatRect&, const RenderLayerModelObject* repaintContainer) const;
@@ -999,8 +1004,8 @@ public:
     // Given a rect in the object's coordinate space, compute the location in container space where this rect is visible,
     // when clipping and scrolling as specified by the context. When using edge-inclusive intersection, return std::nullopt
     // rather than an empty rect if the rect is completely clipped out in container space.
-    virtual std::optional<RepaintRects> computeVisibleRectsInContainer(const RepaintRects&, const RenderLayerModelObject* repaintContainer, VisibleRectContext) const;
-    virtual std::optional<FloatRect> computeFloatVisibleRectInContainer(const FloatRect&, const RenderLayerModelObject* repaintContainer, VisibleRectContext) const;
+    virtual std::optional<RepaintRects> computeVisibleRectsInContainer(const RepaintRects&, const RenderLayerModelObject* repaintContainer, const VisibleRectContext&, VisibleRectState) const;
+    virtual std::optional<FloatRect> computeFloatVisibleRectInContainer(const FloatRect&, const RenderLayerModelObject* repaintContainer, const VisibleRectContext&, VisibleRectState) const;
 
     WEBCORE_EXPORT bool hasEmptyVisibleRectRespectingParentFrames() const;
 
@@ -1032,7 +1037,7 @@ public:
     virtual bool shouldPaintSelectionGaps() const { return false; }
 
     // When performing a global document tear-down, or when going into the back/forward cache, the renderer of the document is cleared.
-    bool renderTreeBeingDestroyed() const; // Defined in RenderObjectInlines.h
+    bool renderTreeBeingDestroyed() const; // Defined in RenderObjectDocument.h
 
     void destroy();
 
@@ -1290,7 +1295,6 @@ private:
         // Dirty bit was set with MarkingBehavior::MarkOnlyThis
         bool contentLogicalWidthsInvalidationIsMarkOnlyThis { false };
         bool isYouTubeReplacement { false };
-        EnumSet<Style::MarginTrimSide> trimmedMargins;
 
         // From RenderElement
         std::unique_ptr<ReferencedSVGResources> referencedSVGResources;

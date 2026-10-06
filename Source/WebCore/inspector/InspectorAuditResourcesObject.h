@@ -32,10 +32,12 @@
 #include "CachedSVGDocumentClient.h"
 #include "CachedStyleSheetClient.h"
 #include <JavaScriptCore/InspectorAuditAgent.h>
+#include <wtf/CheckedRef.h>
 #include <wtf/Forward.h>
 #include <wtf/Ref.h>
 #include <wtf/RefCounted.h>
 #include <wtf/RobinHoodHashMap.h>
+#include <wtf/WeakHashMap.h>
 
 namespace WebCore {
 
@@ -71,7 +73,7 @@ private:
 
     Ref<CachedResourceClient> NODELETE clientForResource(const CachedResource&);
 
-    Inspector::InspectorAuditAgent& m_auditAgent;
+    const CheckedRef<Inspector::InspectorAuditAgent> m_auditAgent;
 
     class InspectorAuditCachedResourceClient : public CachedResourceClient {
     public:
@@ -163,7 +165,8 @@ private:
     };
     InspectorAuditCachedStyleSheetClient m_cachedStyleSheetClient;
 
-    MemoryCompactRobinHoodHashMap<String, CachedResource*> m_resources;
+    MemoryCompactRobinHoodHashMap<String, WeakPtr<CachedResource>> m_resources;
+    WeakHashMap<CachedResource, String> m_resourceIdentifiers;
 };
 
 } // namespace WebCore

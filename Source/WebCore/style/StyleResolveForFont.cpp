@@ -229,13 +229,13 @@ static ResolvedFontSize fontSizeFromUnresolvedFontSize(const CSSPropertyParserHe
 
             case CSSValueLarger:
                 return {
-                    .size = parentSize * 1.02f,
+                    .size = parentSize * 1.2f,
                     .keyword = CSSValueInvalid
                 };
 
             case CSSValueSmaller:
                 return {
-                    .size = parentSize / 1.02f,
+                    .size = parentSize / 1.2f,
                     .keyword = CSSValueInvalid
                 };
 
@@ -275,7 +275,7 @@ static ResolvedFontSize fontSizeFromUnresolvedFontSize(const CSSPropertyParserHe
 
                             RefPtr document = dynamicDowncast<Document>(context);
                             return {
-                                .size = static_cast<float>(Style::computeUnzoomedNonCalcLengthDouble(lengthPercentage.value, lengthUnit, CSSPropertyFontSize, &fontCascade, CSS::RangeZoomOptions::Default, document ? document->renderView() : nullptr)),
+                                .size = static_cast<float>(Style::resolveLength(lengthPercentage.value, lengthUnit, CSSPropertyFontSize, fontCascade, document ? document->renderView() : nullptr)),
                                 .keyword = CSSValueInvalid
                             };
                         }
@@ -287,7 +287,7 @@ static ResolvedFontSize fontSizeFromUnresolvedFontSize(const CSSPropertyParserHe
                         return { .size = 0.0f, .keyword = CSSValueInvalid };
 
                     return {
-                        .size = Style::evaluate<float>(Style::toStyleNoConversionDataRequired(calc), parentSize, Style::ZoomNeeded { }),
+                        .size = Style::evaluate<float>(Style::toStyleNoConversionDataRequired(calc), parentSize, Style::ZoomFactor::none()),
                         .keyword = CSSValueInvalid
                     };
                 }
@@ -356,7 +356,7 @@ std::optional<FontCascade> resolveForUnresolvedFont(const CSSPropertyParserHelpe
     ASSERT(protectedContext->cssFontSelector());
 
     // Map the font property longhands into the style.
-    float parentSize = fontDescription.specifiedSize();
+    float parentSize = fontDescription.computedSize();
 
     auto useFixedDefaultSize = [](const FontCascadeDescription& fontDescription) {
         return fontDescription.familyCount() == 1
@@ -376,8 +376,8 @@ std::optional<FontCascade> resolveForUnresolvedFont(const CSSPropertyParserHelpe
     if (useFixedDefaultSize(fontDescription) != oldFamilyUsedFixedDefaultSize) {
         if (auto sizeIdentifier = fontDescription.keywordSizeAsIdentifier()) {
             auto size = Style::fontSizeForKeyword(sizeIdentifier, !oldFamilyUsedFixedDefaultSize, protectedContext->settingsValues());
-            fontDescription.setSpecifiedSize(size);
-            fontDescription.setComputedSize(Style::computedFontSizeFromSpecifiedSize(size, fontDescription.isAbsoluteSize(), 1.0, MinimumFontSizeRule::None, protectedContext->settingsValues()));
+            fontDescription.setComputedSize(size);
+            fontDescription.setUsedSize(usedFontSizeFromComputedSize(size, fontDescription.isAbsoluteSize(), 1.0, MinimumFontSizeRule::None, protectedContext->settingsValues()));
         }
     }
 
@@ -394,8 +394,8 @@ std::optional<FontCascade> resolveForUnresolvedFont(const CSSPropertyParserHelpe
     auto resolvedSize = fontSizeFromUnresolvedFontSize(unresolvedFont.size, parentSize, fontDescription, protectedContext);
     fontDescription.setKeywordSizeFromIdentifier(resolvedSize.keyword);
     if (resolvedSize.size > 0) {
-        fontDescription.setSpecifiedSize(resolvedSize.size);
         fontDescription.setComputedSize(resolvedSize.size);
+        fontDescription.setUsedSize(resolvedSize.size);
     }
 
     // As there is no line-height on FontCascade, there's no need to resolve it, even

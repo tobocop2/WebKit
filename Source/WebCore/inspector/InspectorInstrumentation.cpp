@@ -45,6 +45,7 @@
 #include "FrameDebuggerAgent.h"
 #include "FrameInspectorController.h"
 #include "FrameRuntimeAgent.h"
+#include "GPUCanvasContext.h"
 #include "InspectorAnimationAgent.h"
 #include "InspectorCSSAgent.h"
 #include "InspectorCanvasAgent.h"
@@ -90,14 +91,17 @@
 #include <JavaScriptCore/InspectorDebuggerAgent.h>
 #include <JavaScriptCore/ScriptArguments.h>
 #include <JavaScriptCore/ScriptCallStack.h>
+#include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
 
 namespace WebCore {
 
 using namespace Inspector;
 
-namespace {
-static HashSet<InstrumentingAgents*>* s_instrumentingAgentsSet = nullptr;
+static HashSet<InstrumentingAgents*>& instrumentingAgentsSet()
+{
+    static NeverDestroyed<HashSet<InstrumentingAgents*>> set;
+    return set;
 }
 
 void InspectorInstrumentation::firstFrontendCreated()
@@ -117,11 +121,11 @@ void InspectorInstrumentation::didClearWindowObjectInWorldImpl(InstrumentingAgen
     // connects, so enabledPageDebuggerAgent() returns null. Same-site frames stay in the main frame's
     // process and use PageDebuggerAgent — FrameDebuggerAgent is only created when site isolation is
     // enabled, which guarantees cross-origin frames are in their own process.
-    if (auto* pageDebuggerAgent = instrumentingAgents.enabledPageDebuggerAgent())
+    if (CheckedPtr pageDebuggerAgent = instrumentingAgents.enabledPageDebuggerAgent())
         pageDebuggerAgent->didClearWindowObjectInWorld(frame, world);
 
-    if (auto* frameRuntimeAgent = frame.inspectorController().instrumentingAgents().enabledFrameRuntimeAgent()) {
-        if (auto* frameDebuggerAgent = frame.inspectorController().instrumentingAgents().enabledFrameDebuggerAgent())
+    if (CheckedPtr frameRuntimeAgent = frame.inspectorController().instrumentingAgents().enabledFrameRuntimeAgent()) {
+        if (CheckedPtr frameDebuggerAgent = frame.inspectorController().instrumentingAgents().enabledFrameDebuggerAgent())
             frameDebuggerAgent->didClearWindowObjectInWorld(world);
         frameRuntimeAgent->didClearWindowObjectInWorld(world);
         if (CheckedPtr pageAgent = instrumentingAgents.enabledPageAgent())
@@ -129,7 +133,7 @@ void InspectorInstrumentation::didClearWindowObjectInWorldImpl(InstrumentingAgen
         return;
     }
 
-    if (auto* pageRuntimeAgent = instrumentingAgents.enabledPageRuntimeAgent())
+    if (CheckedPtr pageRuntimeAgent = instrumentingAgents.enabledPageRuntimeAgent())
         pageRuntimeAgent->didClearWindowObjectInWorld(frame, world);
 
     if (CheckedPtr pageAgent = instrumentingAgents.enabledPageAgent())
@@ -158,7 +162,7 @@ void InspectorInstrumentation::addEventListenersToNodeImpl(InstrumentingAgents& 
 
 void InspectorInstrumentation::willInsertDOMNodeImpl(InstrumentingAgents& instrumentingAgents, Node& parent)
 {
-    if (auto* pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
+    if (CheckedPtr pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
         pageDOMDebuggerAgent->willInsertDOMNode(parent);
 }
 
@@ -174,7 +178,7 @@ void InspectorInstrumentation::didInsertDOMNodeImpl(InstrumentingAgents& instrum
 
 void InspectorInstrumentation::willRemoveDOMNodeImpl(InstrumentingAgents& instrumentingAgents, Node& node)
 {
-    if (auto* pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
+    if (CheckedPtr pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
         pageDOMDebuggerAgent->willRemoveDOMNode(node);
 }
 
@@ -184,7 +188,7 @@ void InspectorInstrumentation::didRemoveDOMNodeImpl(InstrumentingAgents& instrum
         if (CheckedPtr frameDOMAgent = frame->inspectorController().instrumentingAgents().persistentFrameDOMAgent())
             frameDOMAgent->didRemoveDOMNode(node);
     }
-    if (auto* pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
+    if (CheckedPtr pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
         pageDOMDebuggerAgent->didRemoveDOMNode(node);
     if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
         domAgent->didRemoveDOMNode(node);
@@ -196,7 +200,7 @@ void InspectorInstrumentation::willDestroyDOMNodeImpl(InstrumentingAgents& instr
         if (CheckedPtr frameDOMAgent = frame->inspectorController().instrumentingAgents().persistentFrameDOMAgent())
             frameDOMAgent->willDestroyDOMNode(node);
     }
-    if (auto* pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
+    if (CheckedPtr pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
         pageDOMDebuggerAgent->willDestroyDOMNode(node);
     if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
         domAgent->willDestroyDOMNode(node);
@@ -232,7 +236,7 @@ void InspectorInstrumentation::didAddOrRemoveScrollbarsImpl(InstrumentingAgents&
 
 void InspectorInstrumentation::willModifyDOMAttrImpl(InstrumentingAgents& instrumentingAgents, Element& element, const AtomString& oldValue, const AtomString& newValue)
 {
-    if (auto* pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
+    if (CheckedPtr pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
         pageDOMDebuggerAgent->willModifyDOMAttr(element);
     if (RefPtr frame = element.document().frame()) {
         if (CheckedPtr frameDOMAgent = frame->inspectorController().instrumentingAgents().persistentFrameDOMAgent())
@@ -264,7 +268,7 @@ void InspectorInstrumentation::didRemoveDOMAttrImpl(InstrumentingAgents& instrum
 
 void InspectorInstrumentation::willInvalidateStyleAttrImpl(InstrumentingAgents& instrumentingAgents, Element& element)
 {
-    if (auto* pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
+    if (CheckedPtr pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
         pageDOMDebuggerAgent->willInvalidateStyleAttr(element);
 }
 
@@ -297,7 +301,7 @@ void InspectorInstrumentation::frameWindowDiscardedImpl(InstrumentingAgents& ins
     if (!window)
         return;
 
-    if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+    if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
         consoleAgent->frameWindowDiscarded(*window);
 }
 
@@ -325,12 +329,20 @@ void InspectorInstrumentation::activeStyleSheetsUpdatedImpl(InstrumentingAgents&
 
 void InspectorInstrumentation::didPushShadowRootImpl(InstrumentingAgents& instrumentingAgents, Element& host, ShadowRoot& root)
 {
+    if (RefPtr frame = host.document().frame()) {
+        if (CheckedPtr frameDOMAgent = frame->inspectorController().instrumentingAgents().persistentFrameDOMAgent())
+            frameDOMAgent->didPushShadowRoot(host, root);
+    }
     if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
         domAgent->didPushShadowRoot(host, root);
 }
 
 void InspectorInstrumentation::willPopShadowRootImpl(InstrumentingAgents& instrumentingAgents, Element& host, ShadowRoot& root)
 {
+    if (RefPtr frame = host.document().frame()) {
+        if (CheckedPtr frameDOMAgent = frame->inspectorController().instrumentingAgents().persistentFrameDOMAgent())
+            frameDOMAgent->willPopShadowRoot(host, root);
+    }
     if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
         domAgent->willPopShadowRoot(host, root);
 }
@@ -349,21 +361,33 @@ void InspectorInstrumentation::didChangeAssignedNodesImpl(InstrumentingAgents& i
 
 void InspectorInstrumentation::didChangeCustomElementStateImpl(InstrumentingAgents& instrumentingAgents, Element& element)
 {
+    if (RefPtr frame = element.document().frame()) {
+        if (CheckedPtr frameDOMAgent = frame->inspectorController().instrumentingAgents().persistentFrameDOMAgent())
+            frameDOMAgent->didChangeCustomElementState(element);
+    }
     if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
         domAgent->didChangeCustomElementState(element);
 }
 
 void InspectorInstrumentation::pseudoElementCreatedImpl(InstrumentingAgents& instrumentingAgents, PseudoElement& pseudoElement)
 {
+    if (RefPtr frame = pseudoElement.document().frame()) {
+        if (CheckedPtr frameDOMAgent = frame->inspectorController().instrumentingAgents().persistentFrameDOMAgent())
+            frameDOMAgent->pseudoElementCreated(pseudoElement);
+    }
     if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
         domAgent->pseudoElementCreated(pseudoElement);
 }
 
 void InspectorInstrumentation::pseudoElementDestroyedImpl(InstrumentingAgents& instrumentingAgents, PseudoElement& pseudoElement)
 {
+    if (RefPtr frame = pseudoElement.document().frame()) {
+        if (CheckedPtr frameDOMAgent = frame->inspectorController().instrumentingAgents().persistentFrameDOMAgent())
+            frameDOMAgent->pseudoElementDestroyed(pseudoElement);
+    }
     if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
         domAgent->pseudoElementDestroyed(pseudoElement);
-    if (auto* layerTreeAgent = instrumentingAgents.enabledLayerTreeAgent())
+    if (CheckedPtr layerTreeAgent = instrumentingAgents.enabledLayerTreeAgent())
         layerTreeAgent->pseudoElementDestroyed(pseudoElement);
 }
 
@@ -417,36 +441,36 @@ void InspectorInstrumentation::characterDataModifiedImpl(InstrumentingAgents& in
 
 void InspectorInstrumentation::willSendXMLHttpRequestImpl(InstrumentingAgents& instrumentingAgents, const String& url)
 {
-    if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
-        domDebuggerAgent->willSendXMLHttpRequest(url);
+    if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+        domDebuggerAgent->willSendXMLHttpRequest(instrumentingAgents.enabledWebDebuggerAgent(), url);
 }
 
 void InspectorInstrumentation::willFetchImpl(InstrumentingAgents& instrumentingAgents, const String& url)
 {
-    if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
-        domDebuggerAgent->willFetch(url);
+    if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+        domDebuggerAgent->willFetch(instrumentingAgents.enabledWebDebuggerAgent(), url);
 }
 
 void InspectorInstrumentation::didInstallTimerImpl(InstrumentingAgents& instrumentingAgents, int timerId, Seconds timeout, bool singleShot, ScriptExecutionContext& context)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->didScheduleAsyncCall(context.globalObject(), InspectorDebuggerAgent::AsyncCallType::DOMTimer, timerId, singleShot);
 
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didInstallTimer(timerId, timeout, singleShot);
 }
 
 void InspectorInstrumentation::didRemoveTimerImpl(InstrumentingAgents& instrumentingAgents, int timerId)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->didCancelAsyncCall(InspectorDebuggerAgent::AsyncCallType::DOMTimer, timerId);
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didRemoveTimer(timerId);
 }
 
 void InspectorInstrumentation::didAddEventListenerImpl(InstrumentingAgents& instrumentingAgents, EventTarget& target, const AtomString& eventType, EventListener& listener, bool capture)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->didAddEventListener(target, eventType, listener, capture);
     if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
         domAgent->didAddEventListener(target);
@@ -456,7 +480,7 @@ void InspectorInstrumentation::didAddEventListenerImpl(InstrumentingAgents& inst
 
 void InspectorInstrumentation::willRemoveEventListenerImpl(InstrumentingAgents& instrumentingAgents, EventTarget& target, const AtomString& eventType, EventListener& listener, bool capture)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->willRemoveEventListener(target, eventType, listener, capture);
     if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
         domAgent->willRemoveEventListener(target, eventType, listener, capture);
@@ -477,86 +501,86 @@ bool InspectorInstrumentation::isEventListenerDisabledImpl(InstrumentingAgents& 
 
 int InspectorInstrumentation::willPostMessageImpl(InstrumentingAgents& instrumentingAgents)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         return webDebuggerAgent->willPostMessage();
     return 0;
 }
 
 void InspectorInstrumentation::didPostMessageImpl(InstrumentingAgents& instrumentingAgents, int postMessageIdentifier, JSC::JSGlobalObject& state)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->didPostMessage(postMessageIdentifier, state);
 }
 
 void InspectorInstrumentation::didFailPostMessageImpl(InstrumentingAgents& instrumentingAgents, int postMessageIdentifier)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->didFailPostMessage(postMessageIdentifier);
 }
 
 void InspectorInstrumentation::willDispatchPostMessageImpl(InstrumentingAgents& instrumentingAgents, int postMessageIdentifier)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->willDispatchPostMessage(postMessageIdentifier);
 }
 
 void InspectorInstrumentation::didDispatchPostMessageImpl(InstrumentingAgents& instrumentingAgents, int postMessageIdentifier)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->didDispatchPostMessage(postMessageIdentifier);
 }
 
 void InspectorInstrumentation::willCallFunctionImpl(InstrumentingAgents& instrumentingAgents, const String& scriptName, int scriptLine, int scriptColumn)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->willCallFunction(scriptName, scriptLine, scriptColumn);
 }
 
 void InspectorInstrumentation::didCallFunctionImpl(InstrumentingAgents& instrumentingAgents)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didCallFunction();
 }
 
 void InspectorInstrumentation::willDispatchEventImpl(InstrumentingAgents& instrumentingAgents, const Event& event)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->willDispatchEvent(event);
 }
 
 void InspectorInstrumentation::willHandleEventImpl(InstrumentingAgents& instrumentingAgents, ScriptExecutionContext& context, Event& event, const RegisteredEventListener& listener)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->willHandleEvent(listener);
 
-    if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+    if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
         domDebuggerAgent->willHandleEvent(context, event, listener);
 }
 
 void InspectorInstrumentation::didHandleEventImpl(InstrumentingAgents& instrumentingAgents, ScriptExecutionContext& context, Event& event, const RegisteredEventListener& listener)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->didHandleEvent(listener);
 
-    if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+    if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
         domDebuggerAgent->didHandleEvent(context, event, listener);
 }
 
 void InspectorInstrumentation::didDispatchEventImpl(InstrumentingAgents& instrumentingAgents, const Event& event)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didDispatchEvent(event.defaultPrevented());
 }
 
 void InspectorInstrumentation::willDispatchEventOnWindowImpl(InstrumentingAgents& instrumentingAgents, const Event& event)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->willDispatchEvent(event);
 }
 
 void InspectorInstrumentation::didDispatchEventOnWindowImpl(InstrumentingAgents& instrumentingAgents, const Event& event)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didDispatchEvent(event.defaultPrevented());
 }
 
@@ -568,40 +592,48 @@ void InspectorInstrumentation::eventDidResetAfterDispatchImpl(InstrumentingAgent
 
 void InspectorInstrumentation::willEvaluateScriptImpl(InstrumentingAgents& instrumentingAgents, const String& url, int lineNumber, int columnNumber)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->willEvaluateScript(url, lineNumber, columnNumber);
 }
 
 void InspectorInstrumentation::didEvaluateScriptImpl(InstrumentingAgents& instrumentingAgents)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didEvaluateScript();
 }
 
 void InspectorInstrumentation::willFireTimerImpl(InstrumentingAgents& instrumentingAgents, int timerId, bool oneShot)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent();
+    if (webDebuggerAgent)
         webDebuggerAgent->willDispatchAsyncCall(InspectorDebuggerAgent::AsyncCallType::DOMTimer, timerId);
-    if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
-        domDebuggerAgent->willFireTimer(oneShot);
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+        domDebuggerAgent->willFireTimer(webDebuggerAgent.get(), oneShot);
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->willFireTimer(timerId);
 }
 
 void InspectorInstrumentation::didFireTimerImpl(InstrumentingAgents& instrumentingAgents, int timerId, bool oneShot)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent();
+    if (webDebuggerAgent)
         webDebuggerAgent->didDispatchAsyncCall(InspectorDebuggerAgent::AsyncCallType::DOMTimer, timerId);
-    if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
-        domDebuggerAgent->didFireTimer(oneShot);
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+        domDebuggerAgent->didFireTimer(webDebuggerAgent.get(), oneShot);
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didFireTimer();
 }
 
-void InspectorInstrumentation::didInvalidateLayoutImpl(InstrumentingAgents& instrumentingAgents, const RenderElement& layoutRoot)
+void InspectorInstrumentation::willInvalidateLayoutImpl(InstrumentingAgents& instrumentingAgents, const RenderObject& renderer)
 {
     if (CheckedPtr pageTimelineAgent = instrumentingAgents.trackingPageTimelineAgent())
-        pageTimelineAgent->didInvalidateLayout(layoutRoot);
+        pageTimelineAgent->willInvalidateLayout(renderer);
+}
+
+void InspectorInstrumentation::didScheduleLayoutImpl(InstrumentingAgents& instrumentingAgents, const RenderElement& layoutRoot)
+{
+    if (CheckedPtr pageTimelineAgent = instrumentingAgents.trackingPageTimelineAgent())
+        pageTimelineAgent->didScheduleLayout(layoutRoot);
 }
 
 void InspectorInstrumentation::willLayoutImpl(InstrumentingAgents& instrumentingAgents)
@@ -643,6 +675,11 @@ void InspectorInstrumentation::didPaintImpl(InstrumentingAgents& instrumentingAg
 
     if (CheckedPtr pageAgent = instrumentingAgents.enabledPageAgent())
         pageAgent->didPaint(renderer, rect);
+
+    // Under Site Isolation a cross-origin subframe process has no enabled InspectorPageAgent; its
+    // per-frame PageAgentProxy draws paint rects instead.
+    if (CheckedPtr pageProxy = instrumentingAgents.enabledPageProxy())
+        pageProxy->didPaint(renderer, rect);
 }
 
 void InspectorInstrumentation::willRecalculateStyleImpl(InstrumentingAgents& instrumentingAgents)
@@ -701,8 +738,8 @@ void InspectorInstrumentation::willSendRequestImpl(InstrumentingAgents& instrume
         networkAgent->willSendRequest(identifier, loader, request, redirectResponse, cachedResource, resourceLoader);
     if (CheckedPtr networkProxy = instrumentingAgents.enabledNetworkProxy())
         networkProxy->willSendRequest(identifier, loader, request, redirectResponse, cachedResource, resourceLoader);
-    if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
-        domDebuggerAgent->willSendRequest(request);
+    if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+        domDebuggerAgent->willSendRequest(instrumentingAgents.enabledWebDebuggerAgent(), request);
 }
 
 void InspectorInstrumentation::willSendRequestOfTypeImpl(InstrumentingAgents& instrumentingAgents, ResourceLoaderIdentifier identifier, DocumentLoader* loader, ResourceRequest& request, Inspector::UncachedLoadType loadType)
@@ -711,8 +748,8 @@ void InspectorInstrumentation::willSendRequestOfTypeImpl(InstrumentingAgents& in
         networkAgent->willSendRequestOfType(identifier, loader, request, loadType);
     if (CheckedPtr networkProxy = instrumentingAgents.enabledNetworkProxy())
         networkProxy->willSendRequestOfType(identifier, loader, request, loadType);
-    if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
-        domDebuggerAgent->willSendRequestOfType(request);
+    if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+        domDebuggerAgent->willSendRequestOfType(instrumentingAgents.enabledWebDebuggerAgent(), request);
 }
 
 void InspectorInstrumentation::didLoadResourceFromMemoryCacheImpl(InstrumentingAgents& instrumentingAgents, DocumentLoader* loader, CachedResource* cachedResource)
@@ -735,7 +772,7 @@ void InspectorInstrumentation::didReceiveResourceResponseImpl(InstrumentingAgent
         networkAgent->didReceiveResponse(identifier, loader, response, resourceLoader);
     if (CheckedPtr networkProxy = instrumentingAgents.enabledNetworkProxy())
         networkProxy->didReceiveResponse(identifier, loader, response, resourceLoader);
-    if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+    if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
         consoleAgent->didReceiveResponse(identifier, response); // This should come AFTER resource notification, front-end relies on this.
 }
 
@@ -770,7 +807,7 @@ void InspectorInstrumentation::didFailLoadingImpl(InstrumentingAgents& instrumen
         networkAgent->didFailLoading(identifier, loader, error);
     if (CheckedPtr networkProxy = instrumentingAgents.enabledNetworkProxy())
         networkProxy->didFailLoading(identifier, loader, error);
-    if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+    if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
         consoleAgent->didFailLoading(identifier, error); // This should come AFTER resource notification, front-end relies on this.
 }
 
@@ -794,7 +831,7 @@ void InspectorInstrumentation::scriptImportedImpl(InstrumentingAgents& instrumen
 
 void InspectorInstrumentation::scriptExecutionBlockedByCSPImpl(InstrumentingAgents& instrumentingAgents, const String& directiveText)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->scriptExecutionBlockedByCSP(directiveText);
 }
 
@@ -850,9 +887,7 @@ void InspectorInstrumentation::didCommitLoadImpl(InstrumentingAgents& instrument
         if (CheckedPtr networkAgent = instrumentingAgents.enabledNetworkAgent())
             networkAgent->mainFrameNavigated(*loader);
 
-        // The Web Inspector frontend relies on `networkAgent->mainFrameNavigated` being called first to establish the
-        // type of navigation that has occured.
-        if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+        if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
             consoleAgent->mainFrameNavigated();
 
         if (CheckedPtr cssAgent = instrumentingAgents.enabledCSSAgent())
@@ -861,28 +896,31 @@ void InspectorInstrumentation::didCommitLoadImpl(InstrumentingAgents& instrument
         if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
             domAgent->setDocument(protect(frame.document()));
 
-        if (auto* layerTreeAgent = instrumentingAgents.enabledLayerTreeAgent())
+        if (CheckedPtr layerTreeAgent = instrumentingAgents.enabledLayerTreeAgent())
             layerTreeAgent->reset();
 
-        if (auto* pageDebuggerAgent = instrumentingAgents.enabledPageDebuggerAgent())
+        if (CheckedPtr pageDebuggerAgent = instrumentingAgents.enabledPageDebuggerAgent())
             pageDebuggerAgent->mainFrameNavigated();
 
-        if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+        if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
             domDebuggerAgent->mainFrameNavigated();
 
         if (CheckedPtr enabledPageHeapAgent = instrumentingAgents.enabledPageHeapAgent())
             enabledPageHeapAgent->mainFrameNavigated();
     }
 
-    if (CheckedPtr pageAgent = instrumentingAgents.enabledPageAgent())
-        pageAgent->frameNavigated(frame);
-
-    // Under Site Isolation the cross-process proxy (PageAgentProxy) forwards this to the
-    // UIProcess ProxyingPageAgent, so frames hosted in non-main processes are reported too.
+    // Only one provider may report a commit: a second report makes the frontend re-initialize the
+    // frame, discarding the child frames and resources it learned about after the first. The proxy
+    // supersedes the in-process agent because it also covers frames hosted in other processes.
+    //
+    // Both getters resolve here because didCommitLoad passes the frame's InstrumentingAgents, where
+    // the proxy is registered, and its getters fall back to the page's instance, where the agent is.
     if (CheckedPtr pageProxy = instrumentingAgents.enabledPageProxy())
         pageProxy->frameNavigated(frame);
+    else if (CheckedPtr pageAgent = instrumentingAgents.enabledPageAgent())
+        pageAgent->frameNavigated(frame);
 
-    if (auto* pageRuntimeAgent = instrumentingAgents.enabledPageRuntimeAgent())
+    if (CheckedPtr pageRuntimeAgent = instrumentingAgents.enabledPageRuntimeAgent())
         pageRuntimeAgent->frameNavigated(frame);
 
     if (CheckedPtr pageCanvasAgent = instrumentingAgents.enabledPageCanvasAgent())
@@ -911,7 +949,7 @@ void InspectorInstrumentation::frameDocumentUpdatedImpl(InstrumentingAgents& ins
     if (CheckedPtr domAgent = instrumentingAgents.persistentDOMAgent())
         domAgent->frameDocumentUpdated(frame);
 
-    if (auto* pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
+    if (CheckedPtr pageDOMDebuggerAgent = instrumentingAgents.enabledPageDOMDebuggerAgent())
         pageDOMDebuggerAgent->frameDocumentUpdated(frame);
 }
 
@@ -924,7 +962,7 @@ void InspectorInstrumentation::loaderDetachedFromFrameImpl(InstrumentingAgents& 
 void InspectorInstrumentation::frameStartedLoadingImpl(InstrumentingAgents& instrumentingAgents, LocalFrame& frame)
 {
     if (frame.isMainFrame()) {
-        if (auto* pageDebuggerAgent = instrumentingAgents.enabledPageDebuggerAgent())
+        if (CheckedPtr pageDebuggerAgent = instrumentingAgents.enabledPageDebuggerAgent())
             pageDebuggerAgent->mainFrameStartedLoading();
         if (CheckedPtr pageTimelineAgent = instrumentingAgents.enabledPageTimelineAgent())
             pageTimelineAgent->mainFrameStartedLoading();
@@ -940,7 +978,7 @@ void InspectorInstrumentation::didCompleteRenderingFrameImpl(InstrumentingAgents
 void InspectorInstrumentation::frameStoppedLoadingImpl(InstrumentingAgents& instrumentingAgents, LocalFrame& frame)
 {
     if (frame.isMainFrame()) {
-        if (auto* pageDebuggerAgent = instrumentingAgents.enabledPageDebuggerAgent())
+        if (CheckedPtr pageDebuggerAgent = instrumentingAgents.enabledPageDebuggerAgent())
             pageDebuggerAgent->mainFrameStoppedLoading();
     }
 }
@@ -961,10 +999,7 @@ void InspectorInstrumentation::defaultAppearanceDidChangeImpl(InstrumentingAgent
 
 void InspectorInstrumentation::willDestroyCachedResourceImpl(CachedResource& cachedResource)
 {
-    if (!s_instrumentingAgentsSet)
-        return;
-
-    for (RefPtr instrumentingAgent : *s_instrumentingAgentsSet) {
+    for (RefPtr instrumentingAgent : instrumentingAgentsSet()) {
         if (CheckedPtr inspectorNetworkAgent = instrumentingAgent->enabledNetworkAgent())
             inspectorNetworkAgent->willDestroyCachedResource(cachedResource);
     }
@@ -1018,10 +1053,10 @@ void InspectorInstrumentation::addMessageToConsoleImpl(InstrumentingAgents& inst
     MessageType type = message->type();
     String messageText = message->message();
 
-    if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+    if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
         consoleAgent->addMessageToConsole(WTF::move(message));
     // FIXME: This should just pass the message on to the debugger agent. JavaScriptCore InspectorDebuggerAgent should know Console MessageTypes.
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent()) {
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent()) {
         if (isConsoleAssertMessage(source, type))
             webDebuggerAgent->handleConsoleAssert(messageText);
     }
@@ -1032,7 +1067,7 @@ void InspectorInstrumentation::consoleCountImpl(InstrumentingAgents& instrumenti
     if (!instrumentingAgents.developerExtrasEnabled()) [[likely]]
         return;
 
-    if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+    if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
         consoleAgent->count(state, label);
 }
 
@@ -1041,7 +1076,7 @@ void InspectorInstrumentation::consoleCountResetImpl(InstrumentingAgents& instru
     if (!instrumentingAgents.developerExtrasEnabled()) [[likely]]
         return;
 
-    if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+    if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
         consoleAgent->countReset(state, label);
 }
 
@@ -1053,7 +1088,7 @@ void InspectorInstrumentation::takeHeapSnapshotImpl(InstrumentingAgents& instrum
             return;
 
         auto [timestamp, snapshotData] = WTF::move(result.value());
-        if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+        if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
             consoleAgent->reportHeapSnapshot(timestamp, snapshotData, title);
     }
 }
@@ -1063,9 +1098,9 @@ void InspectorInstrumentation::startConsoleTimingImpl(InstrumentingAgents& instr
     if (!instrumentingAgents.developerExtrasEnabled()) [[likely]]
         return;
 
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->time(label);
-    if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+    if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
         consoleAgent->startTiming(exec, label);
 }
 
@@ -1074,7 +1109,7 @@ void InspectorInstrumentation::logConsoleTimingImpl(InstrumentingAgents& instrum
     if (!instrumentingAgents.developerExtrasEnabled()) [[likely]]
         return;
 
-    if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+    if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
         consoleAgent->logTiming(exec, label, WTF::move(arguments));
 }
 
@@ -1083,15 +1118,15 @@ void InspectorInstrumentation::stopConsoleTimingImpl(InstrumentingAgents& instru
     if (!instrumentingAgents.developerExtrasEnabled()) [[likely]]
         return;
 
-    if (auto* consoleAgent = instrumentingAgents.webConsoleAgent())
+    if (CheckedPtr consoleAgent = instrumentingAgents.webConsoleAgent())
         consoleAgent->stopTiming(exec, label);
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->timeEnd(label);
 }
 
 void InspectorInstrumentation::consoleTimeStampImpl(InstrumentingAgents& instrumentingAgents, Ref<ScriptArguments>&& arguments)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent()) {
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent()) {
         String message;
         arguments->getFirstArgumentAsString(message);
         timelineAgent->didTimeStamp(message);
@@ -1100,31 +1135,31 @@ void InspectorInstrumentation::consoleTimeStampImpl(InstrumentingAgents& instrum
 
 void InspectorInstrumentation::startProfilingImpl(InstrumentingAgents& instrumentingAgents, const String& title)
 {
-    if (auto* timelineAgent = instrumentingAgents.enabledTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.enabledTimelineAgent())
         timelineAgent->startFromConsole(title);
 }
 
 void InspectorInstrumentation::stopProfilingImpl(InstrumentingAgents& instrumentingAgents, const String& title)
 {
-    if (auto* timelineAgent = instrumentingAgents.enabledTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.enabledTimelineAgent())
         timelineAgent->stopFromConsole(title);
 }
 
 void InspectorInstrumentation::performanceMarkImpl(InstrumentingAgents& instrumentingAgents, const String& label, std::optional<MonotonicTime> timestamp)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didPerformanceMark(label, timestamp);
 }
 
 void InspectorInstrumentation::didEnqueueFirstContentfulPaintImpl(InstrumentingAgents& instrumentingAgents)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didEnqueueFirstContentfulPaint();
 }
 
 void InspectorInstrumentation::didEnqueueLargestContentfulPaintImpl(InstrumentingAgents& instrumentingAgents, const LargestContentfulPaint& entry)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didEnqueueLargestContentfulPaint(protect(entry.element()), entry.size());
 }
 
@@ -1134,15 +1169,27 @@ void InspectorInstrumentation::consoleStartRecordingCanvasImpl(InstrumentingAgen
         canvasAgent->consoleStartRecordingCanvas(context, exec, options);
 }
 
+void InspectorInstrumentation::consoleStartRecordingCanvasImpl(InstrumentingAgents& instrumentingAgents, GPUDevice& device, JSC::JSGlobalObject& exec, JSC::JSObject* options)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        canvasAgent->consoleStartRecordingCanvas(device, exec, options);
+}
+
 void InspectorInstrumentation::consoleStopRecordingCanvasImpl(InstrumentingAgents& instrumentingAgents, CanvasRenderingContext& context)
 {
     if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
         canvasAgent->consoleStopRecordingCanvas(context);
 }
 
+void InspectorInstrumentation::consoleStopRecordingCanvasImpl(InstrumentingAgents& instrumentingAgents, GPUDevice& device)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        canvasAgent->consoleStopRecordingCanvas(device);
+}
+
 void InspectorInstrumentation::didDispatchDOMStorageEventImpl(InstrumentingAgents& instrumentingAgents, const String& key, const String& oldValue, const String& newValue, StorageType storageType, const SecurityOrigin& securityOrigin)
 {
-    if (auto* domStorageAgent = instrumentingAgents.enabledDOMStorageAgent())
+    if (CheckedPtr domStorageAgent = instrumentingAgents.enabledDOMStorageAgent())
         domStorageAgent->didDispatchDOMStorageEvent(key, oldValue, newValue, storageType, securityOrigin);
 }
 
@@ -1215,7 +1262,22 @@ void InspectorInstrumentation::didSendWebSocketFrameImpl(InstrumentingAgents& in
 
 void InspectorInstrumentation::didChangeCSSCanvasClientNodesImpl(InstrumentingAgents& instrumentingAgents, CanvasBase& canvasBase)
 {
-    if (CheckedPtr pageCanvasAgent = instrumentingAgents.enabledPageCanvasAgent())
+    CheckedPtr<PageCanvasAgent> pageCanvasAgent;
+
+    if (RefPtr gpuCanvasContext = dynamicDowncast<GPUCanvasContext>(canvasBase.renderingContext())) {
+        RefPtr device = gpuCanvasContext->device();
+        if (!device)
+            return;
+
+        RefPtr agents = InspectorInstrumentation::instrumentingAgents(protect(device->scriptExecutionContext()));
+        if (!agents)
+            return;
+
+        pageCanvasAgent = agents->enabledPageCanvasAgent();
+    } else
+        pageCanvasAgent = instrumentingAgents.enabledPageCanvasAgent();
+
+    if (pageCanvasAgent)
         pageCanvasAgent->didChangeCSSCanvasClientNodes(canvasBase);
 }
 
@@ -1227,7 +1289,22 @@ void InspectorInstrumentation::didCreateCanvasRenderingContextImpl(Instrumenting
 
 void InspectorInstrumentation::didChangeCanvasSizeImpl(InstrumentingAgents& instrumentingAgents, CanvasRenderingContext& context)
 {
-    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+    CheckedPtr<InspectorCanvasAgent> canvasAgent;
+
+    if (RefPtr gpuCanvasContext = dynamicDowncast<GPUCanvasContext>(context)) {
+        RefPtr device = gpuCanvasContext->device();
+        if (!device)
+            return;
+
+        RefPtr agents = InspectorInstrumentation::instrumentingAgents(protect(device->scriptExecutionContext()));
+        if (!agents)
+            return;
+
+        canvasAgent = agents->enabledCanvasAgent();
+    } else
+        canvasAgent = instrumentingAgents.enabledCanvasAgent();
+
+    if (canvasAgent)
         canvasAgent->didChangeCanvasSize(context);
 }
 
@@ -1284,6 +1361,68 @@ bool InspectorInstrumentation::isWebGLProgramHighlightedImpl(InstrumentingAgents
 }
 #endif
 
+void InspectorInstrumentation::didCreateWebGPUDeviceImpl(InstrumentingAgents& instrumentingAgents, GPUDevice& device)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        canvasAgent->didCreateWebGPUDevice(device);
+}
+
+void InspectorInstrumentation::willDestroyWebGPUDeviceImpl(InstrumentingAgents& instrumentingAgents, GPUDevice& device)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        canvasAgent->willDestroyWebGPUDevice(device);
+}
+
+void InspectorInstrumentation::didChangeGPUDeviceClientNodesImpl(InstrumentingAgents& instrumentingAgents, GPUDevice& device)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        canvasAgent->didChangeGPUDeviceClientNodes(device);
+}
+
+void InspectorInstrumentation::didChangeWebGPUMemoryImpl(InstrumentingAgents& instrumentingAgents, GPUDevice& device)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        canvasAgent->didChangeWebGPUMemory(device);
+}
+
+void InspectorInstrumentation::didCreateWebGPUComputePipelineImpl(InstrumentingAgents& instrumentingAgents, GPUDevice& device, GPUComputePipeline& pipeline)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        canvasAgent->didCreateWebGPUComputePipeline(device, pipeline);
+}
+
+void InspectorInstrumentation::willDestroyWebGPUComputePipelineImpl(InstrumentingAgents& instrumentingAgents, GPUComputePipeline& pipeline)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        canvasAgent->willDestroyWebGPUComputePipeline(pipeline);
+}
+
+void InspectorInstrumentation::didCreateWebGPURenderPipelineImpl(InstrumentingAgents& instrumentingAgents, GPUDevice& device, GPURenderPipeline& pipeline)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        canvasAgent->didCreateWebGPURenderPipeline(device, pipeline);
+}
+
+void InspectorInstrumentation::willDestroyWebGPURenderPipelineImpl(InstrumentingAgents& instrumentingAgents, GPURenderPipeline& pipeline)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        canvasAgent->willDestroyWebGPURenderPipeline(pipeline);
+}
+
+bool InspectorInstrumentation::isWebGPURenderPipelineDisabledImpl(InstrumentingAgents& instrumentingAgents, GPURenderPipeline& pipeline)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        return canvasAgent->isWebGPURenderPipelineDisabled(pipeline);
+    return false;
+}
+
+RefPtr<WebGPU::RenderPipeline> InspectorInstrumentation::renderPipelineForWebGPUHighlightingImpl(InstrumentingAgents& instrumentingAgents, GPURenderPipeline& pipeline, unsigned canvasColorAttachmentMask)
+{
+    if (CheckedPtr canvasAgent = instrumentingAgents.enabledCanvasAgent())
+        return canvasAgent->renderPipelineForWebGPUHighlighting(pipeline, canvasColorAttachmentMask);
+    return nullptr;
+}
+
 void InspectorInstrumentation::willApplyKeyframeEffectImpl(InstrumentingAgents& instrumentingAgents, const Styleable& target, KeyframeEffect& effect, const ComputedEffectTiming& computedTiming)
 {
     if (CheckedPtr animationAgent = instrumentingAgents.trackingAnimationAgent())
@@ -1333,7 +1472,7 @@ void InspectorInstrumentation::willDestroyWebAnimationImpl(InstrumentingAgents& 
 #if ENABLE(RESOURCE_USAGE)
 void InspectorInstrumentation::didHandleMemoryPressureImpl(InstrumentingAgents& instrumentingAgents, Critical critical)
 {
-    if (auto* memoryAgent = instrumentingAgents.enabledMemoryAgent())
+    if (CheckedPtr memoryAgent = instrumentingAgents.enabledMemoryAgent())
         memoryAgent->didHandleMemoryPressure(critical);
 }
 #endif
@@ -1358,72 +1497,64 @@ bool InspectorInstrumentation::timelineAgentTracking(ScriptExecutionContext* scr
 
 void InspectorInstrumentation::didRequestAnimationFrameImpl(InstrumentingAgents& instrumentingAgents, int callbackId, ScriptExecutionContext& scriptExecutionContext)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent()) {
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent()) {
         if (auto* globalObject = scriptExecutionContext.globalObject())
             webDebuggerAgent->didRequestAnimationFrame(callbackId, *globalObject);
     }
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didRequestAnimationFrame(callbackId);
 }
 
 void InspectorInstrumentation::didCancelAnimationFrameImpl(InstrumentingAgents& instrumentingAgents, int callbackId)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    if (CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
         webDebuggerAgent->didCancelAnimationFrame(callbackId);
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didCancelAnimationFrame(callbackId);
 }
 
 void InspectorInstrumentation::willFireAnimationFrameImpl(InstrumentingAgents& instrumentingAgents, int callbackId)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent();
+    if (webDebuggerAgent)
         webDebuggerAgent->willFireAnimationFrame(callbackId);
-    if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
-        domDebuggerAgent->willFireAnimationFrame();
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+        domDebuggerAgent->willFireAnimationFrame(webDebuggerAgent.get());
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->willFireAnimationFrame(callbackId);
 }
 
 void InspectorInstrumentation::didFireAnimationFrameImpl(InstrumentingAgents& instrumentingAgents, int callbackId)
 {
-    if (auto* webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent())
+    CheckedPtr webDebuggerAgent = instrumentingAgents.enabledWebDebuggerAgent();
+    if (webDebuggerAgent)
         webDebuggerAgent->didFireAnimationFrame(callbackId);
-    if (auto* domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
-        domDebuggerAgent->didFireAnimationFrame();
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr domDebuggerAgent = instrumentingAgents.enabledDOMDebuggerAgent())
+        domDebuggerAgent->didFireAnimationFrame(webDebuggerAgent.get());
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didFireAnimationFrame();
 }
 
 void InspectorInstrumentation::willFireObserverCallbackImpl(InstrumentingAgents& instrumentingAgents, const String& callbackType)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->willFireObserverCallback(callbackType);
 }
 
 void InspectorInstrumentation::didFireObserverCallbackImpl(InstrumentingAgents& instrumentingAgents)
 {
-    if (auto* timelineAgent = instrumentingAgents.trackingTimelineAgent())
+    if (CheckedPtr timelineAgent = instrumentingAgents.trackingTimelineAgent())
         timelineAgent->didFireObserverCallback();
 }
 
 void InspectorInstrumentation::registerInstrumentingAgents(InstrumentingAgents& instrumentingAgents)
 {
-    if (!s_instrumentingAgentsSet)
-        s_instrumentingAgentsSet = new HashSet<InstrumentingAgents*>();
-
-    s_instrumentingAgentsSet->add(&instrumentingAgents);
+    instrumentingAgentsSet().add(&instrumentingAgents);
 }
 
 void InspectorInstrumentation::unregisterInstrumentingAgents(InstrumentingAgents& instrumentingAgents)
 {
-    if (!s_instrumentingAgentsSet)
-        return;
-
-    s_instrumentingAgentsSet->remove(&instrumentingAgents);
-    if (s_instrumentingAgentsSet->isEmpty()) {
-        delete s_instrumentingAgentsSet;
-        s_instrumentingAgentsSet = nullptr;
-    }
+    instrumentingAgentsSet().remove(&instrumentingAgents);
 }
 
 InstrumentingAgents& InspectorInstrumentation::instrumentingAgents(const RenderObject& renderer)
@@ -1433,13 +1564,13 @@ InstrumentingAgents& InspectorInstrumentation::instrumentingAgents(const RenderO
 
 void InspectorInstrumentation::layerTreeDidChangeImpl(InstrumentingAgents& instrumentingAgents)
 {
-    if (auto* layerTreeAgent = instrumentingAgents.enabledLayerTreeAgent())
+    if (CheckedPtr layerTreeAgent = instrumentingAgents.enabledLayerTreeAgent())
         layerTreeAgent->layerTreeDidChange();
 }
 
 void InspectorInstrumentation::renderLayerDestroyedImpl(InstrumentingAgents& instrumentingAgents, const RenderLayer& renderLayer)
 {
-    if (auto* layerTreeAgent = instrumentingAgents.enabledLayerTreeAgent())
+    if (CheckedPtr layerTreeAgent = instrumentingAgents.enabledLayerTreeAgent())
         layerTreeAgent->renderLayerDestroyed(renderLayer);
 }
 

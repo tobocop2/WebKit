@@ -239,7 +239,7 @@ TextRun LegacyInlineTextBox::createTextRun() const
 {
     CheckedRef style = lineStyle();
     TextRun textRun { text(), textPos(), 0, ExpansionBehavior::forbidAll(), direction(), style->rtlOrdering() == Order::Visual, !renderer().canUseSimpleFontCodePath() };
-    textRun.setTabSize(!style->collapseWhiteSpace(), Style::toPlatform(style->tabSize()));
+    textRun.setTabSize(!style->collapseWhiteSpace(), Style::toPlatform(style->tabSize(), style->usedZoomForLength()));
     return textRun;
 }
 
@@ -275,7 +275,7 @@ void LegacyInlineTextBox::outputLineBox(TextStream& stream, bool mark, int depth
     value = value.substring(start(), len());
     value = makeStringByReplacingAll(value, '\\', "\\\\"_s);
     value = makeStringByReplacingAll(value, '\n', "\\n"_s);
-    stream << boxName() << " "_s << FloatRect(x(), y(), width(), height()) << " ("_s << this << ") renderer->("_s << &renderer() << ") run("_s << start() << ", "_s << start() + len() << ") \""_s << value.utf8().data() << '"';
+    stream << boxName() << " "_s << FloatRect(x(), y(), width(), height()) << " ("_s << this << ") renderer->("_s << &renderer() << ") run("_s << start() << ", "_s << start() + len() << ") \""_s << value << '"';
     stream.nextLine();
 }
 

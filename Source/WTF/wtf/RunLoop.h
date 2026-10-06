@@ -175,16 +175,27 @@ public:
     WTF_EXPORT_PRIVATE Kind kind() const { return m_genericState ? Kind::Generic : Kind::Bun; }
 #endif
 
+    // A RunLoop::Timer is owned by the thread whose run loop it is constructed with: it fires on that
+    // run loop's thread, and stop() and the destructor must run on that thread. Stopping or destroying
+    // a timer from another thread races with an in-flight callback and is a use-after-free; both assert
+    // RunLoop::isCurrent() in debug builds (see assertIsCurrent()). Starting/re-arming a timer from
+    // another thread is allowed -- it only schedules onto the run loop and never frees the timer -- which
+    // is how RunLoop::dispatch()/dispatchAfter() and cross-thread timer schedulers (e.g. JSRunLoopTimer)
+    // work.
     class TimerBase {
         friend class RunLoop;
     public:
         WTF_EXPORT_PRIVATE explicit TimerBase(Ref<RunLoop>&&, ASCIILiteral description);
+        // Must run on the run loop's thread if the timer is active (asserted in debug); see class comment.
         WTF_EXPORT_PRIVATE virtual ~TimerBase();
 
+        // May be called from any thread; (re)schedules the timer onto its run loop's thread.
         void startRepeating(Seconds interval) { start(std::max(interval, 0_s), true); }
         void startOneShot(Seconds interval) { start(std::max(interval, 0_s), false); }
 
+        // Must be called on the run loop's thread when the timer is active (asserted in debug).
         WTF_EXPORT_PRIVATE void stop();
+
         WTF_EXPORT_PRIVATE bool isActive() const;
         WTF_EXPORT_PRIVATE Seconds secondsUntilFire() const;
 
@@ -262,7 +273,7 @@ public:
         WTF_DEPRECATED_MAKE_FAST_ALLOCATED(Timer);
     public:
         template <typename TimerFiredClass>
-        requires (WTF::HasThreadSafeWeakPtrFunctions<TimerFiredClass>::value)
+        requires (WTF::HasThreadSafeWeakPtrFunctions<TimerFiredClass>)
         Timer(Ref<RunLoop>&& runLoop, ASCIILiteral description, TimerFiredClass* object, void (TimerFiredClass::*function)())
             : Timer(WTF::move(runLoop), description, [weakObject = ThreadSafeWeakPtr { *object }, function] {
                 if (RefPtr object = weakObject.get())
@@ -272,7 +283,7 @@ public:
         }
 
         template <typename TimerFiredClass>
-        requires (!WTF::HasThreadSafeWeakPtrFunctions<TimerFiredClass>::value && WTF::HasWeakPtrFunctions<TimerFiredClass>::value && WTF::HasRefPtrMemberFunctions<TimerFiredClass>::value)
+        requires (!WTF::HasThreadSafeWeakPtrFunctions<TimerFiredClass> && WTF::HasWeakPtrFunctions<TimerFiredClass> && WTF::HasRefPtrMemberFunctions<TimerFiredClass>)
         Timer(Ref<RunLoop>&& runLoop, ASCIILiteral description, TimerFiredClass* object, void (TimerFiredClass::*function)())
             : Timer(WTF::move(runLoop), description, [weakObject = WeakPtr { *object }, function] {
                 if (RefPtr object = weakObject.get())
@@ -282,7 +293,7 @@ public:
         }
 
         template <typename TimerFiredClass>
-        requires (!WTF::HasThreadSafeWeakPtrFunctions<TimerFiredClass>::value && WTF::HasWeakPtrFunctions<TimerFiredClass>::value && !WTF::HasRefPtrMemberFunctions<TimerFiredClass>::value && WTF::HasCheckedPtrMemberFunctions<TimerFiredClass>::value)
+        requires (!WTF::HasThreadSafeWeakPtrFunctions<TimerFiredClass> && WTF::HasWeakPtrFunctions<TimerFiredClass> && !WTF::HasRefPtrMemberFunctions<TimerFiredClass> && WTF::HasCheckedPtrMemberFunctions<TimerFiredClass>)
         Timer(Ref<RunLoop>&& runLoop, ASCIILiteral description, TimerFiredClass* object, void (TimerFiredClass::*function)())
             : Timer(WTF::move(runLoop), description, [weakObject = WeakPtr { *object }, function] {
                 if (CheckedPtr object = weakObject)
@@ -292,7 +303,7 @@ public:
         }
 
         template <typename TimerFiredClass>
-        requires (!WTF::HasThreadSafeWeakPtrFunctions<TimerFiredClass>::value && !WTF::HasWeakPtrFunctions<TimerFiredClass>::value && WTF::HasCheckedPtrMemberFunctions<TimerFiredClass>::value)
+        requires (!WTF::HasThreadSafeWeakPtrFunctions<TimerFiredClass> && !WTF::HasWeakPtrFunctions<TimerFiredClass> && WTF::HasCheckedPtrMemberFunctions<TimerFiredClass>)
         Timer(Ref<RunLoop>&& runLoop, ASCIILiteral description, TimerFiredClass* object, void (TimerFiredClass::*function)())
             : Timer(WTF::move(runLoop), description, [object = CheckedRef { *object }, function] {
                 (object.ptr()->*function)();
@@ -309,7 +320,7 @@ public:
 #if !PLATFORM(COCOA)
         // FIXME: This constructor isn't as safe as the other ones and should be removed.
         template <typename TimerFiredClass>
-        requires (!WTF::HasRefPtrMemberFunctions<TimerFiredClass>::value && !WTF::HasCheckedPtrMemberFunctions<TimerFiredClass>::value)
+        requires (!WTF::HasRefPtrMemberFunctions<TimerFiredClass> && !WTF::HasCheckedPtrMemberFunctions<TimerFiredClass>)
         Timer(Ref<RunLoop>&& runLoop, ASCIILiteral description, TimerFiredClass* object, void (TimerFiredClass::*function)())
             : Timer(WTF::move(runLoop), description, std::bind(function, object))
         {
@@ -361,7 +372,7 @@ private:
 #else
     mutable Lock m_registeredTimerLock;
 #endif
-    HashSet<TimerBase *> m_registeredTimers;
+    HashSet<TimerBase *> m_registeredTimers WTF_GUARDED_BY_LOCK(m_registeredTimerLock);
 
     Deque<Function<void()>> m_currentIteration;
 
@@ -385,6 +396,9 @@ private:
     Deque<TimerBase*> m_timers;
 
     Lock m_loopLock;
+    // Due timers with a FireTimerMessage posted but not yet dispatched. The message carries no
+    // TimerBase* (the timer may be stopped/destroyed first); wndProc() takes the next live one here.
+    Deque<TimerBase*> m_timersToFire WTF_GUARDED_BY_LOCK(m_loopLock);
     WindowsMessageHandler m_windowsMessageHandler;
 #elif USE(COCOA_EVENT_LOOP)
     static void performWork(void*);
@@ -497,11 +511,14 @@ private:
 
 inline void assertIsCurrent(const RunLoop& runLoop) WTF_ASSERTS_ACQUIRED_CAPABILITY(runLoop)
 {
-    ASSERT_UNUSED(runLoop, runLoop.isCurrent());
+    RELEASE_ASSERT(runLoop.isCurrent());
 }
+
+WTF_EXPORT_PRIVATE void callOnRunLoop(RunLoop&, Function<void()>&&);
 
 } // namespace WTF
 
 using WTF::RunLoop;
 using WTF::RunLoopMode;
 using WTF::assertIsCurrent;
+using WTF::callOnRunLoop;

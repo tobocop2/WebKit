@@ -34,6 +34,7 @@
 #include "TextIterator.h"
 #include "TextIteratorBehavior.h"
 #include "dom/BoundaryPoint.h"
+#include <wtf/StdLibExtras.h>
 #include <wtf/text/StringBuilder.h>
 
 namespace WebCore {
@@ -45,6 +46,17 @@ static inline FindOptions matchAffectingOptions(FindOptions options)
 }
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(CachedMatchFinder);
+
+static std::optional<unsigned>& maximumRunCountForTesting()
+{
+    static std::optional<unsigned> value;
+    return value;
+}
+
+void CachedMatchFinder::setMaximumRunCountForTesting(std::optional<unsigned> limit)
+{
+    maximumRunCountForTesting() = limit;
+}
 
 CachedMatchFinder::CachedMatchFinder(Document& document)
     : m_document(document)
@@ -158,10 +170,15 @@ std::optional<SimpleRange> CachedMatchFinder::findNextMatch(StringView buffer, c
     return result;
 }
 
-std::optional<SimpleRange> CachedMatchFinder::findNextMatchInShadowIncludingAncestorTree(ShadowRoot& startingShadowRoot, const SimpleRange& selectionRange, const String& target, FindOptions options)
+std::expected<std::optional<SimpleRange>, CachedMatchFinder::CacheUnusable> CachedMatchFinder::findNextMatchInShadowIncludingAncestorTree(ShadowRoot& startingShadowRoot, const SimpleRange& selectionRange, const String& target, FindOptions options)
 {
     RefPtr shadowRoot = &startingShadowRoot;
-    auto [shadowBuffer, shadowRuns] = textForScope(*shadowRoot, options);
+    String shadowBuffer;
+    Vector<TextRun> shadowRuns;
+    if (auto built = textForScope(*shadowRoot, options))
+        std::tie(shadowBuffer, shadowRuns) = *built;
+    else
+        return WTF::makeUnexpected(CacheUnusable::Oversized);
 
     unsigned startOffset = startingOffsetForSelection(shadowBuffer, shadowRuns, selectionRange, options);
     if (auto result = findNextMatch(shadowBuffer, shadowRuns, startOffset, target, options, selectionRange))
@@ -177,30 +194,39 @@ std::optional<SimpleRange> CachedMatchFinder::findNextMatchInShadowIncludingAnce
         RefPtr parentShadow = host->containingShadowRoot();
         if (!parentShadow) {
             auto& cached = bufferForOptions(options);
+            if (cached.oversized)
+                return WTF::makeUnexpected(CacheUnusable::Oversized);
             unsigned docOffset = bufferOffsetForBoundaryPoint(cached.text, cached.runs, *afterHost, options);
             if (auto result = findNextMatch(cached.text, cached.runs, docOffset, target, options))
                 return result;
             if (options.contains(FindOption::WrapAround))
                 return findNextMatch(cached.text, cached.runs, 0, target, options);
-            return std::nullopt;
+            return std::optional<SimpleRange> { };
         }
 
-        std::tie(shadowBuffer, shadowRuns) = textForScope(*parentShadow, options);
+        if (auto built = textForScope(*parentShadow, options))
+            std::tie(shadowBuffer, shadowRuns) = *built;
+        else
+            return WTF::makeUnexpected(CacheUnusable::Oversized);
+
         unsigned parentOffset = bufferOffsetForBoundaryPoint(shadowBuffer, shadowRuns, *afterHost, options);
         if (auto result = findNextMatch(shadowBuffer, shadowRuns, parentOffset, target, options))
             return result;
         shadowRoot = parentShadow;
     }
 
-    return std::nullopt;
+    return std::optional<SimpleRange> { };
 }
 
-std::optional<SimpleRange> CachedMatchFinder::findMatchFrom(const std::optional<SimpleRange>& selectionRange, const String& target, FindOptions options)
+std::expected<std::optional<SimpleRange>, CachedMatchFinder::CacheUnusable> CachedMatchFinder::findMatchFrom(const std::optional<SimpleRange>& selectionRange, const String& target, FindOptions options)
 {
     if (!isTextBufferCacheValid()) {
         if (!clearTextBufferCache())
-            return std::nullopt;
+            return std::optional<SimpleRange> { };
     }
+
+    if (bufferForOptions(options).oversized)
+        return makeUnexpected(CacheUnusable::Oversized);
 
     RefPtr shadowRoot = selectionRange ? selectionRange->startContainer().containingShadowRoot() : nullptr;
     if (shadowRoot && options.contains(FindOption::DoNotTraverseFlatTree))
@@ -221,18 +247,20 @@ std::optional<SimpleRange> CachedMatchFinder::findMatchFrom(const std::optional<
         return findNextMatch(cached.text, cached.runs, wrapOffset, target, options);
     }
 
-    return std::nullopt;
+    return std::optional<SimpleRange> { };
 }
 
-Vector<SimpleRange> CachedMatchFinder::findMatches(const std::optional<SimpleRange>& searchRange, const String& target, FindOptions options, std::optional<unsigned> limit)
+std::expected<Vector<SimpleRange>, CachedMatchFinder::CacheUnusable> CachedMatchFinder::findMatches(const std::optional<SimpleRange>& searchRange, const String& target, FindOptions options, std::optional<unsigned> limit)
 {
     if (!isTextBufferCacheValid()) {
         if (!clearTextBufferCache())
-            return { };
+            return Vector<SimpleRange> { };
     } else if (isSearchResultCacheValid(target, options, limit) && m_matchCache)
         return *m_matchCache;
 
     auto& cached = bufferForOptions(options);
+    if (cached.oversized)
+        return makeUnexpected(CacheUnusable::Oversized);
 
     unsigned startOffset = searchRange ? bufferOffsetForBoundaryPoint(cached.text, cached.runs, searchRange->start, options) : 0;
     Vector<SimpleRange> results;
@@ -243,21 +271,24 @@ Vector<SimpleRange> CachedMatchFinder::findMatches(const std::optional<SimpleRan
 
     m_matchCache = results;
     m_countCache = results.size();
+    m_matchesMarked = false;
     m_searchResultCacheKeys.targetString = target;
     m_searchResultCacheKeys.limit = limit;
     m_searchResultCacheKeys.options = matchAffectingOptions(options);
     return results;
 }
 
-unsigned CachedMatchFinder::countMatches(const std::optional<SimpleRange>& searchRange, const String& target, FindOptions options, std::optional<unsigned> limit)
+std::expected<unsigned, CachedMatchFinder::CacheUnusable> CachedMatchFinder::countMatches(const std::optional<SimpleRange>& searchRange, const String& target, FindOptions options, std::optional<unsigned> limit)
 {
     if (!isTextBufferCacheValid()) {
         if (!clearTextBufferCache())
-            return 0;
+            return 0u;
     } else if (isSearchResultCacheValid(target, options, limit) && m_countCache)
         return *m_countCache;
 
     auto& cached = bufferForOptions(options);
+    if (cached.oversized)
+        return makeUnexpected(CacheUnusable::Oversized);
 
     unsigned count { 0 };
     unsigned startOffset = searchRange ? bufferOffsetForBoundaryPoint(cached.text, cached.runs, searchRange->start, options) : 0;
@@ -273,17 +304,40 @@ unsigned CachedMatchFinder::countMatches(const std::optional<SimpleRange>& searc
     return count;
 }
 
+void CachedMatchFinder::TextRun::resolveOffsets() const
+{
+    if (!textIteratorPosition.offsetBaseNode)
+        return;
+    unsigned index = textIteratorPosition.offsetBaseNode->computeNodeIndex();
+    textIteratorPosition.startOffset += index;
+    textIteratorPosition.endOffset += index;
+    textIteratorPosition.offsetBaseNode = nullptr;
+}
+
+BoundaryPoint CachedMatchFinder::TextRun::start() const
+{
+    resolveOffsets();
+    return { textIteratorPosition.container.copyRef(), textIteratorPosition.startOffset };
+}
+
+SimpleRange CachedMatchFinder::TextRun::range() const
+{
+    resolveOffsets();
+    return { { textIteratorPosition.container.copyRef(), textIteratorPosition.startOffset }, { textIteratorPosition.container.copyRef(), textIteratorPosition.endOffset } };
+}
+
 unsigned CachedMatchFinder::bufferOffsetForBoundaryPoint(StringView buffer, const Vector<TextRun>& runs, const BoundaryPoint& point, FindOptions options)
 {
     std::optional<unsigned> lastChunkEnd;
     for (auto [i, run] : indexedRange(runs)) {
-        if (&run.range.start.container.get() != &point.container.get())
+        if (run.textIteratorPosition.container.ptr() != point.container.ptr())
             continue;
-        if (point.offset < run.range.start.offset)
+        run.resolveOffsets();
+        if (point.offset < run.textIteratorPosition.startOffset)
             continue;
 
-        if (point.offset <= run.range.end.offset)
-            return run.offset + (point.offset - run.range.start.offset);
+        if (point.offset <= run.textIteratorPosition.endOffset)
+            return run.offset + (point.offset - run.textIteratorPosition.startOffset);
 
         lastChunkEnd = i + 1 < runs.size() ? runs[i + 1].offset : buffer.length();
     }
@@ -293,8 +347,8 @@ unsigned CachedMatchFinder::bufferOffsetForBoundaryPoint(StringView buffer, cons
 
     for (const auto& run : runs) {
         auto order = options.contains(FindOption::DoNotTraverseFlatTree)
-            ? treeOrder<ShadowIncludingTree>(run.range.start, point)
-            : treeOrder<ComposedTree>(run.range.start, point);
+            ? treeOrder<ShadowIncludingTree>(run.start(), point)
+            : treeOrder<ComposedTree>(run.start(), point);
         if (std::is_gteq(order))
             return run.offset;
     }
@@ -333,6 +387,7 @@ bool CachedMatchFinder::clearTextBufferCache()
         m_searchResultCacheKeys.options = std::nullopt;
         m_matchCache = std::nullopt;
         m_countCache = std::nullopt;
+        m_matchesMarked = false;
         return false;
     }
 
@@ -345,6 +400,7 @@ bool CachedMatchFinder::clearTextBufferCache()
     m_docBuffer.dirty = true;
     m_matchCache = std::nullopt;
     m_countCache = std::nullopt;
+    m_matchesMarked = false;
     return true;
 }
 
@@ -352,22 +408,32 @@ CachedMatchFinder::TextRunCache& CachedMatchFinder::bufferForOptions(FindOptions
 {
     auto& cache = options.contains(FindOption::DoNotTraverseFlatTree) ? m_docBuffer : m_flatTreeBuffer;
     if (RefPtr document = m_document.get(); cache.dirty) {
-        std::tie(cache.text, cache.runs) = textForScope(*document, options);
+        if (auto built = textForScope(*document, options)) {
+            std::tie(cache.text, cache.runs) = WTF::move(*built);
+            cache.oversized = false;
+        } else {
+            cache.text = { };
+            cache.runs = { };
+            cache.oversized = true;
+        }
         cache.dirty = false;
     }
     return cache;
 }
 
-auto CachedMatchFinder::textForScope(ContainerNode& scope, FindOptions options) -> std::pair<String, Vector<TextRun>> {
+auto CachedMatchFinder::textForScope(ContainerNode& scope, FindOptions options) -> std::optional<std::pair<String, Vector<TextRun>>> {
     protect(scope.document())->updateLayoutIgnorePendingStylesheets({ LayoutOptions::TreatContentVisibilityAutoAsVisible, LayoutOptions::TreatRevealedWhenFoundAsVisible });
     SimpleRange range = makeRangeSelectingNodeContents(scope);
     TextIterator it(range, findIteratorOptions(options));
 
-    StringBuilder builder;
+    StringBuilder builder { WTF::OverflowPolicy::RecordOverflow };
     Vector<TextRun> runs;
     for (; !it.atEnd(); it.advance()) {
-        auto textRunRange = it.range();
-        runs.append(TextRun { static_cast<unsigned>(builder.length()), textRunRange });
+        if (auto limit = maximumRunCountForTesting(); limit && runs.size() >= *limit)
+            return std::nullopt;
+        auto position = it.position();
+        if (!runs.tryAppend(TextRun { static_cast<unsigned>(builder.length()), TextIteratorPosition { WTF::move(position.container), WTF::move(position.offsetBaseNode), position.startOffset, position.endOffset } }))
+            return std::nullopt;
         auto text = it.text();
         if (text.is8Bit()) {
             for (auto character : text.span8())
@@ -376,9 +442,11 @@ auto CachedMatchFinder::textForScope(ContainerNode& scope, FindOptions options) 
             for (auto character : text.span16())
                 builder.append(foldQuoteMarkAndReplaceNoBreakSpace(character));
         }
+        if (builder.hasOverflowed())
+            return std::nullopt;
     }
 
-    return { builder.toString(), runs };
+    return std::pair { builder.toString(), WTF::move(runs) };
 }
 
 BoundaryPoint CachedMatchFinder::boundaryForOffset(const Vector<CachedMatchFinder::TextRun>& runs, unsigned position, BoundaryEdge boundaryEdge)
@@ -393,9 +461,10 @@ BoundaryPoint CachedMatchFinder::boundaryForOffset(const Vector<CachedMatchFinde
 
     auto& run = runs[index];
     RELEASE_ASSERT(run.offset <= position);
+    run.resolveOffsets();
     unsigned offsetWithinChunk = static_cast<unsigned>(position - run.offset);
-    unsigned domOffset = std::min(run.range.start.offset + offsetWithinChunk, run.range.end.offset);
-    return { run.range.start.container.copyRef(), domOffset };
+    unsigned domOffset = std::min(run.textIteratorPosition.startOffset + offsetWithinChunk, run.textIteratorPosition.endOffset);
+    return { run.textIteratorPosition.container.copyRef(), domOffset };
 }
 
 SimpleRange CachedMatchFinder::bufferRangeToSimpleRange(const Vector<TextRun>& runs, size_t start, size_t end)
@@ -417,6 +486,21 @@ bool CachedMatchFinder::isSearchResultCacheValid(const String& target, FindOptio
         && target == *m_searchResultCacheKeys.targetString
         && m_searchResultCacheKeys.limit == limit
         && m_searchResultCacheKeys.options == matchAffectingOptions(options);
+}
+
+void CachedMatchFinder::setMatchesMarked()
+{
+    m_matchesMarked = true;
+}
+
+void CachedMatchFinder::clearMatchesMarked()
+{
+    m_matchesMarked = false;
+}
+
+bool CachedMatchFinder::matchesAreMarked(const String& target, FindOptions options, std::optional<unsigned> limit) const
+{
+    return m_matchesMarked && isSearchResultCacheValid(target, options, limit);
 }
 
 } // namespace WebCore

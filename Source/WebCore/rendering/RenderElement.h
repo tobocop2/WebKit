@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
- * Copyright (C) 2003-2022 Apple Inc. All rights reserved.
+ * Copyright (C) 2003-2026 Apple Inc. All rights reserved.
  * Copyright (C) 2010, 2012 Google Inc. All rights reserved.
  *
  * This library is free software; you can redistribute it and/or
@@ -22,6 +22,7 @@
 
 #pragma once
 
+#include <WebCore/BoxExtents.h>
 #include <WebCore/HitTestRequest.h>
 #include <WebCore/RenderObject.h>
 #include <WebCore/RenderPtr.h>
@@ -110,6 +111,7 @@ public:
     inline bool canContainFixedPositionObjects(const Style::ComputedStyle* styleToUse = nullptr) const; // Defined in RenderElementStyleInlines.h.
     inline bool canContainAbsolutelyPositionedObjects(const Style::ComputedStyle* styleToUse = nullptr) const; // Defined in RenderElementStyleInlines.h.
     bool canEstablishContainingBlockWithTransform() const;
+    RenderBlock* nearestNonAnonymousContainingBlockIncludingSelf() const;
 
     inline bool shouldApplyLayoutContainment() const; // Defined in RenderElementStyleInlines.h
     inline bool shouldApplySizeContainment() const; // Defined in RenderElementStyleInlines.h
@@ -121,7 +123,7 @@ public:
 
     bool hasEligibleContainmentForSizeQuery() const;
 
-    std::unique_ptr<Style::ComputedStyle> selectionPseudoStyle() const;
+    const Style::ComputedStyle* selectionPseudoStyle() const LIFETIME_BOUND;
 
     // Obtains the selection colors that should be used when painting a selection.
     Color selectionBackgroundColor() const;
@@ -153,7 +155,7 @@ public:
     virtual void dirtyLineFromChangedChild() { }
 
     void setChildNeedsLayout(MarkingBehavior = MarkingBehavior::MarkContainingBlockChain);
-    void NODELETE setOutOfFlowChildNeedsStaticPositionLayout();
+    void setOutOfFlowChildNeedsStaticPositionLayout();
     void NODELETE clearChildNeedsLayout();
     void setNeedsOutOfFlowMovementLayout(const Style::ComputedStyle* oldStyle);
     void setNeedsLayoutForStyleDifference(Style::Difference, const Style::ComputedStyle* oldStyle);
@@ -188,6 +190,7 @@ public:
 
     // Returns true if this renderer requires a new stacking context.
     static bool createsGroupForStyle(const Style::ComputedStyle&); // Defined in RenderElementStyleInlines.h.
+    static bool createsGroupForStyleExcludingClipPathAndMask(const Style::ComputedStyle&); // Defined in RenderElementStyleInlines.h.
     bool createsGroup() const { return createsGroupForStyle(style()); }
 
     inline bool isTransparent() const; // FIXME: This function is incorrectly named. It's isNotOpaque, sometimes called hasOpacity, not isEntirelyTransparent. Defined in RenderElementStyleInlines.h.
@@ -224,6 +227,8 @@ public:
     inline bool hasBlendMode() const; // Defined in RenderElementStyleInlines.h.
     inline bool hasShapeOutside() const; // Defined in RenderElementStyleInlines.h.
 
+    IntBoxExtent computeFilterOutsets() const;
+
 #if HAVE(CORE_MATERIAL)
     inline bool hasAppleVisualEffect() const; // Defined in RenderElementStyleInlines.h.
     inline bool hasAppleVisualEffectRequiringBackdropFilter() const; // Defined in RenderElementStyleInlines.h.
@@ -255,10 +260,8 @@ public:
     bool hasCounterNodeMap() const { return m_hasCounterNodeMap; }
     void setHasCounterNodeMap(bool f) { m_hasCounterNodeMap = f; }
 
-#if ENABLE(TEXT_AUTOSIZING)
-    void adjustComputedFontSizesOnBlocks(float size, float visibleWidth);
+    void adjustFontSizesOnBlocks(float size, float visibleWidth);
     WEBCORE_EXPORT void resetTextAutosizing();
-#endif
 
     WEBCORE_EXPORT ImageOrientation imageOrientation() const;
 
@@ -287,13 +290,13 @@ public:
     // https://www.w3.org/TR/css-transforms-1/#reference-box
     virtual FloatRect referenceBoxRect(CSSBoxType) const;
 
-    virtual void suspendAnimations(MonotonicTime = MonotonicTime()) { }
     std::unique_ptr<Style::ComputedStyle> animatedStyle();
 
     SingleThreadWeakPtr<RenderBlockFlow> pseudoElementRenderer(PseudoElementType) const;
     void setPseudoElementRenderer(PseudoElementType, RenderBlockFlow&);
 
     ReferencedSVGResources& ensureReferencedSVGResources();
+    ReferencedSVGResources* referencedSVGResources() const;
 
     Overflow NODELETE effectiveOverflowX() const;
     Overflow NODELETE effectiveOverflowY() const;
@@ -454,32 +457,29 @@ private:
     template<typename> Color selectionColor() const;
 
     SingleThreadPackedWeakPtr<RenderObject> m_firstChild;
-    unsigned m_hasInitializedStyle : 1;
+    SingleThreadPackedWeakPtr<RenderObject> m_lastChild;
 
-    unsigned m_hasPausedImageAnimations : 1;
-    unsigned m_hasCounterNodeMap : 1;
+    unsigned m_hasInitializedStyle : 1 { false };
+    unsigned m_hasPausedImageAnimations : 1 { false };
+    unsigned m_hasCounterNodeMap : 1 { false };
 #if HAVE(SUPPORT_HDR_DISPLAY)
-    unsigned m_hasHDRImages : 1;
+    unsigned m_hasHDRImages : 1 { false };
 #endif
-
-    unsigned m_isFirstLetter : 1;
-    unsigned m_renderBlockHasMarginBeforeQuirk : 1;
-    unsigned m_renderBlockHasMarginAfterQuirk : 1;
-    unsigned m_renderBlockShouldForceRelayoutChildren : 1;
+    unsigned m_isFirstLetter : 1 { false };
+    unsigned m_renderBlockHasMarginBeforeQuirk : 1 { false };
+    unsigned m_renderBlockHasMarginAfterQuirk : 1 { false };
+    unsigned m_renderBlockShouldForceRelayoutChildren : 1 { false };
     unsigned m_renderBlockHasRareData : 1 { false };
     unsigned m_renderBoxHasShapeOutsideInfo : 1 { false };
     unsigned m_hasCachedSVGResource : 1 { false };
-    unsigned m_renderBlockFlowLineLayoutPath : 3;
+    unsigned m_renderBlockFlowLineLayoutPath : 3 { 0 }; // RenderBlockFlow::UndeterminedPath
     unsigned m_mayHaveLayerInSubtree : 1 { false };
-
-    SingleThreadPackedWeakPtr<RenderObject> m_lastChild;
-
-    unsigned m_isRegisteredForVisibleInViewportCallback : 1;
-    unsigned m_visibleInViewportState : 2;
-    unsigned m_didContributeToVisuallyNonEmptyPixelCount : 1;
+    unsigned m_isRegisteredForVisibleInViewportCallback : 1 { false };
+    unsigned m_visibleInViewportState : 2 { static_cast<unsigned>(VisibleInViewportState::Unknown) };
+    unsigned m_didContributeToVisuallyNonEmptyPixelCount : 1 { false };
     unsigned m_scrollAnchoringSuppressionStyleChanged : 1 { false };
     unsigned m_isInPendingSVGTransformAttributeUpdates : 1 { false };
-    // 10 bits free.
+    // 11 bits free.
 
     Style::ComputedStyle m_style;
 };

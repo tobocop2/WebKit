@@ -29,7 +29,10 @@
 #include <JavaScriptCore/ExceptionHelpers.h>
 #include <JavaScriptCore/FunctionExecutable.h>
 #include <JavaScriptCore/JSFunction.h>
+#include <memory>
 #include <wtf/ForbidHeapAllocation.h>
+#include <wtf/MathExtras.h>
+#include <wtf/TZoneMalloc.h>
 
 namespace JSC {
 
@@ -42,7 +45,7 @@ class MicrotaskCall final : public CallLinkInfoBase {
 public:
     static constexpr unsigned maxCallArguments = 6;
 
-    explicit MicrotaskCall(VM&)
+    MicrotaskCall()
         : CallLinkInfoBase(CallSiteType::MicrotaskCall)
     { }
 
@@ -56,19 +59,7 @@ public:
     template<typename... Args> requires (std::is_convertible_v<Args, JSValue> && ...)
     JSValue tryCallWithArguments(VM&, JSFunction*, JSValue thisValue, JSCell* context, Args...);
 
-    ALWAYS_INLINE bool canUseCall(JSValue functionObject) const
-    {
-        if (!m_functionExecutable) [[unlikely]]
-            return false;
-        if (!functionObject.isCell()) [[unlikely]]
-            return false;
-        auto* cell = functionObject.asCell();
-        if (cell->type() != JSFunctionType) [[unlikely]]
-            return false;
-        return m_functionExecutable == uncheckedDowncast<JSFunction>(cell)->executable();
-    }
-
-    bool isInitializedFor(FunctionExecutable* executable) const
+    bool isInitializedFor(ExecutableBase* executable) const
     {
         return m_functionExecutable == executable;
     }
@@ -78,12 +69,80 @@ public:
     void unlinkOrUpgradeImpl(VM&, CodeBlock* oldCodeBlock, CodeBlock* newCodeBlock);
     void relink(VM&, JSFunction*);
 
+    void clear();
+    void reconcileWeakReferencesAtGCEnd(VM&);
+
 private:
     CodeBlock* m_codeBlock { nullptr };
     FunctionExecutable* m_functionExecutable { nullptr };
     void* m_addressForCall { nullptr };
     unsigned m_numParameters { 0 };
     friend class Interpreter;
+};
+
+class MicrotaskCallCache final {
+    WTF_MAKE_NONCOPYABLE(MicrotaskCallCache);
+    WTF_MAKE_TZONE_ALLOCATED(MicrotaskCallCache);
+public:
+    static constexpr unsigned cacheSize = 8;
+    static_assert(hasOneBitSet(cacheSize));
+
+    // The cache lives on the stack, where the conservative scan reads whole words. A MicrotaskCall has
+    // padding (after CallLinkInfoBase's one-byte type) that its constructor does not write, so an entry
+    // built over a slot an earlier frame left a cell pointer in would keep all but the low byte of it,
+    // and the scan takes that for a pointer into the cell. The entries are built over zeroed storage.
+    MicrotaskCallCache()
+    {
+        zeroBytes(m_storage);
+        for (unsigned i = 0; i < cacheSize; ++i)
+            std::construct_at(&entries()[i]);
+    }
+
+    ~MicrotaskCallCache()
+    {
+        for (auto& entry : entries())
+            std::destroy_at(&entry);
+    }
+
+    ALWAYS_INLINE MicrotaskCall* find(JSValue functionObject)
+    {
+        if (!functionObject.isCell()) [[unlikely]]
+            return nullptr;
+        auto* cell = functionObject.asCell();
+        if (cell->type() != JSFunctionType) [[unlikely]]
+            return nullptr;
+        auto* executable = uncheckedDowncast<JSFunction>(cell)->executable();
+        for (auto& entry : entries()) {
+            if (entry.isInitializedFor(executable))
+                return &entry;
+        }
+        return nullptr;
+    }
+
+    ALWAYS_INLINE MicrotaskCall* nextEntryToReplace()
+    {
+        auto* result = &entries()[m_nextEntryIndex];
+        m_nextEntryIndex = (m_nextEntryIndex + 1) & (cacheSize - 1);
+        return result;
+    }
+
+    void clear()
+    {
+        for (auto& entry : entries())
+            entry.clear();
+    }
+
+    void reconcileWeakReferencesAtGCEnd(VM& vm)
+    {
+        for (auto& entry : entries())
+            entry.reconcileWeakReferencesAtGCEnd(vm);
+    }
+
+private:
+    std::span<MicrotaskCall, cacheSize> entries() { return std::span<MicrotaskCall, cacheSize> { std::bit_cast<MicrotaskCall*>(&m_storage[0]), cacheSize }; }
+
+    alignas(MicrotaskCall) std::array<uint8_t, sizeof(MicrotaskCall) * cacheSize> m_storage;
+    unsigned m_nextEntryIndex { 0 };
 };
 
 } // namespace JSC

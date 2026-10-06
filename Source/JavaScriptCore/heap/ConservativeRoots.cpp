@@ -31,6 +31,7 @@
 #include "CodeBlockSetInlines.h"
 #include "JITStubRoutineSet.h"
 #include "JSCast.h"
+#include "JSCellButterfly.h"
 #include "JSString.h"
 #include "MarkedBlockInlines.h"
 #include "WasmCallee.h"
@@ -65,6 +66,17 @@ void ConservativeRoots::grow()
     m_roots = newRoots;
 }
 
+// A Butterfly* can point up to sizeof(IndexingHeader) past the end of the allocation it refers to, so
+// such a pointer lands on whatever follows that allocation. An Auxiliary allocation is a butterfly, so
+// this is possible at any size. A JSCellWithIndexingHeader cell is a JSCellButterfly. Its Butterfly* is
+// the cell plus JSCellButterfly::offsetOfData(), which is inside the cell unless the cell has no elements.
+static ALWAYS_INLINE bool mayBeReferencedByButterflyEndPointer(HeapCell::Kind cellKind, size_t cellSize)
+{
+    if (cellKind == HeapCell::JSCellWithIndexingHeader)
+        return cellSize <= JSCellButterfly::offsetOfData();
+    return mayHaveIndexingHeader(cellKind);
+}
+
 // This function must be run after stopThePeriphery() is called and
 // before liveness data is cleared to be accurate.
 template<bool lookForWasmCallees, typename MarkHook>
@@ -89,7 +101,7 @@ inline void ConservativeRoots::genericAddPointer(char* pointer, HeapVersion mark
     ASSERT(m_heap.objectSpace().isMarking());
     static constexpr bool isMarking = true;
 
-#if ENABLE(WEBASSEMBLY) && USE(JSVALUE64)
+#if ENABLE(WEBASSEMBLY)
     if constexpr (lookForWasmCallees) {
         CalleeBits calleeBits = std::bit_cast<CalleeBits>(pointer);
         // No point in even checking the hash set if the pointer doesn't even look like a native callee.
@@ -117,8 +129,14 @@ inline void ConservativeRoots::genericAddPointer(char* pointer, HeapVersion mark
                 [] (PreciseAllocation** ptr) -> PreciseAllocation* { return *ptr; });
             if (result) {
                 auto attemptLarge = [&] (PreciseAllocation* allocation) {
-                    if (allocation->contains(pointer) && allocation->hasValidCell())
-                        markFoundGCPointer(allocation->cell(), allocation->attributes().cellKind);
+                    // contains() accepts up to sizeof(IndexingHeader) past the end for butterfly end
+                    // pointers; for a cell that no such pointer can refer to accept at most one-past-the-end.
+                    HeapCell::Kind kind = allocation->attributes().cellKind;
+                    bool inBounds = mayBeReferencedByButterflyEndPointer(kind, allocation->cellSize())
+                        ? allocation->contains(pointer)
+                        : (allocation->aboveLowerBound(pointer) && pointer <= std::bit_cast<char*>(allocation->cell()) + allocation->cellSize());
+                    if (inBounds && allocation->hasValidCell())
+                        markFoundGCPointer(allocation->cell(), kind);
                 };
 
                 if (result > m_heap.objectSpace().preciseAllocationsForThisCollectionBegin())
@@ -138,7 +156,7 @@ inline void ConservativeRoots::genericAddPointer(char* pointer, HeapVersion mark
         MarkedBlock* previousCandidate = MarkedBlock::blockFor(previousPointer);
         if (!jsGCFilter.ruleOut(std::bit_cast<uintptr_t>(previousCandidate))
             && set.contains(previousCandidate)
-            && mayHaveIndexingHeader(previousCandidate->handle().cellKind())) {
+            && mayBeReferencedByButterflyEndPointer(previousCandidate->handle().cellKind(), previousCandidate->cellSize())) {
             previousPointer = static_cast<char*>(previousCandidate->handle().cellAlign(previousPointer));
             if (previousCandidate->handle().isLiveCell(markingVersion, newlyAllocatedVersion, isMarking, previousPointer))
                 markFoundGCPointer(previousPointer, previousCandidate->handle().cellKind());
@@ -186,8 +204,9 @@ inline void ConservativeRoots::genericAddPointer(char* pointer, HeapVersion mark
         return;
 
     // Also, a butterfly could point at the end of an object plus sizeof(IndexingHeader). In that
-    // case, this is pointing to the object to the right of the one we should be marking.
-    if (candidate->candidateAtomNumber(alignedPointer) > 0 && pointer <= alignedPointer + sizeof(IndexingHeader))
+    // case, this is pointing to the object to the right of the one we should be marking. As with the
+    // previous-block case above, only blocks whose cells a butterfly end pointer can refer to have such pointers.
+    if (mayBeReferencedByButterflyEndPointer(cellKind, candidate->cellSize()) && candidate->candidateAtomNumber(alignedPointer) > 0 && pointer <= alignedPointer + sizeof(IndexingHeader))
         tryPointer(alignedPointer - candidate->cellSize());
 }
 
@@ -213,15 +232,21 @@ void ConservativeRoots::genericAddSpan(void* begin, void* end, MarkHook& markHoo
 #if ENABLE(WEBASSEMBLY)
     if (boxedWasmCalleeFilter.bits()) {
         constexpr bool lookForWasmCallees = true;
-        for (char** it = static_cast<char**>(begin); it != static_cast<char**>(end); ++it)
+        for (char** it = static_cast<char**>(begin); it != static_cast<char**>(end); ++it) {
+            if (isPoisonedForConservativeScan(it))
+                continue;
             genericAddPointer<lookForWasmCallees>(*it, markingVersion, newlyAllocatedVersion, jsGCFilter, boxedWasmCalleeFilter, markHook);
+        }
     } else {
 #else
     {
 #endif
         constexpr bool lookForWasmCallees = false;
-        for (char** it = static_cast<char**>(begin); it != static_cast<char**>(end); ++it)
+        for (char** it = static_cast<char**>(begin); it != static_cast<char**>(end); ++it) {
+            if (isPoisonedForConservativeScan(it))
+                continue;
             genericAddPointer<lookForWasmCallees>(*it, markingVersion, newlyAllocatedVersion, jsGCFilter, boxedWasmCalleeFilter, markHook);
+        }
     }
 }
 

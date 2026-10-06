@@ -36,11 +36,12 @@ namespace JSC {
 
 const ClassInfo ModuleRegistryEntry::s_info = { "ModuleRegistryEntry"_s, nullptr, nullptr, nullptr, CREATE_METHOD_TABLE(ModuleRegistryEntry) };
 
-ModuleRegistryEntry::ModuleRegistryEntry(VM& vm, Structure* structure, Identifier key, ScriptFetchParameters::Type type, RefPtr<ScriptFetcher> scriptFetcher)
+ModuleRegistryEntry::ModuleRegistryEntry(VM& vm, Structure* structure, JSModuleLoader* loader, Identifier key, ScriptFetchParameters::Type type, RefPtr<ScriptFetcher> scriptFetcher)
     : Base(vm, structure)
     , m_key(WTF::move(key))
     , m_type(type)
     , m_scriptFetcher(WTF::move(scriptFetcher))
+    , m_loader(loader, WriteBarrierEarlyInit)
 {
 }
 
@@ -62,6 +63,7 @@ void ModuleRegistryEntry::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     auto* thisObject = uncheckedDowncast<ModuleRegistryEntry>(cell);
     ASSERT_GC_OBJECT_INHERITS(thisObject, info());
     Base::visitChildren(thisObject, visitor);
+    visitor.append(thisObject->m_loader);
     visitor.append(thisObject->m_record);
     visitor.append(thisObject->m_fetchPromise);
     visitor.append(thisObject->m_modulePromise);
@@ -71,16 +73,16 @@ void ModuleRegistryEntry::visitChildrenImpl(JSCell* cell, Visitor& visitor)
 
 DEFINE_VISIT_CHILDREN(ModuleRegistryEntry);
 
-ModuleRegistryEntry* ModuleRegistryEntry::create(VM& vm, Structure* structure, Identifier key, ScriptFetchParameters::Type type, RefPtr<ScriptFetcher> scriptFetcher)
+ModuleRegistryEntry* ModuleRegistryEntry::create(VM& vm, Structure* structure, JSModuleLoader* loader, Identifier key, ScriptFetchParameters::Type type, RefPtr<ScriptFetcher> scriptFetcher)
 {
-    ModuleRegistryEntry* instance = new (NotNull, allocateCell<ModuleRegistryEntry>(vm)) ModuleRegistryEntry(vm, structure, WTF::move(key), type, WTF::move(scriptFetcher));
+    ModuleRegistryEntry* instance = new (NotNull, allocateCell<ModuleRegistryEntry>(vm)) ModuleRegistryEntry(vm, structure, loader, WTF::move(key), type, WTF::move(scriptFetcher));
     instance->finishCreation(vm);
     return instance;
 }
 
-ModuleRegistryEntry* ModuleRegistryEntry::create(VM& vm, Identifier key, ScriptFetchParameters::Type type, RefPtr<ScriptFetcher> scriptFetcher)
+ModuleRegistryEntry* ModuleRegistryEntry::create(VM& vm, JSModuleLoader* loader, Identifier key, ScriptFetchParameters::Type type, RefPtr<ScriptFetcher> scriptFetcher)
 {
-    return create(vm, vm.moduleRegistryEntryStructure.get(), WTF::move(key), type, WTF::move(scriptFetcher));
+    return create(vm, vm.moduleRegistryEntryStructure.get(), loader, WTF::move(key), type, WTF::move(scriptFetcher));
 }
 
 const Identifier& ModuleRegistryEntry::key() const
@@ -110,6 +112,10 @@ JSPromise* ModuleRegistryEntry::ensureFetchPromise(JSGlobalObject* globalObject)
 
     if (m_status == Status::FetchFailed && m_error)
         promise->reject(vm, m_error.get());
+#if USE(BUN_JSC_ADDITIONS)
+    else if (m_record)
+        promise->fulfill(vm, m_record.get()); // provideModule(): already fetched and instantiated
+#endif
 
     m_fetchPromise.set(vm, this, promise);
     return promise;
@@ -127,6 +133,12 @@ JSPromise* ModuleRegistryEntry::ensureModulePromise(JSGlobalObject* globalObject
     JSPromise* modulePromise = JSPromise::create(vm, globalObject->promiseStructure());
     modulePromise->markAsHandled();
     m_modulePromise.set(vm, this, modulePromise);
+#if USE(BUN_JSC_ADDITIONS)
+    if (m_record) {
+        modulePromise->fulfill(vm, m_record.get());
+        return modulePromise;
+    }
+#endif
 
     JSPromise* fetchPromise = ensureFetchPromise(globalObject);
     fetchPromise->performPromiseThenWithInternalMicrotask(vm, InternalMicrotask::ModuleRegistryFetchSettled, modulePromise, this);
@@ -233,6 +245,40 @@ void ModuleRegistryEntry::provideFetch(JSGlobalObject* globalObject, JSSourceCod
     m_status = Status::Fetching;
     m_fetchPromise->fulfill(vm, jsSourceCode);
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+void ModuleRegistryEntry::provideModule(VM& vm, AbstractModuleRecord* record)
+{
+    ASSERT(!m_record);
+    ASSERT(m_status == Status::New || m_status == Status::Fetching);
+    m_record.set(vm, this, record);
+    m_status = Status::Fetched;
+    // Promises some in-flight load already created for this entry are settled now (with the record standing in for
+    // the source: moduleLoadTopSettled has nothing to provide for it); their pending reactions see the settled module
+    // promise and bail.
+    if (m_fetchPromise && m_fetchPromise->status() == JSPromise::Status::Pending)
+        m_fetchPromise->fulfillPromise(vm, record);
+    if (m_modulePromise && m_modulePromise->status() == JSPromise::Status::Pending)
+        m_modulePromise->fulfill(vm, record);
+}
+
+bool ModuleRegistryEntry::isLoaded() const
+{
+    return m_isLoaded || (m_loadPromise && m_loadPromise->status() == JSPromise::Status::Fulfilled);
+}
+
+JSPromise* ModuleRegistryEntry::loadedPromise(JSGlobalObject* globalObject)
+{
+    if (!m_loadPromise && m_isLoaded) {
+        VM& vm = globalObject->vm();
+        JSPromise* promise = JSPromise::create(vm, globalObject->promiseStructure());
+        promise->markAsHandled();
+        promise->fulfill(vm, m_record.get());
+        m_loadPromise.set(vm, this, promise);
+    }
+    return m_loadPromise.get();
+}
+#endif
 
 void ModuleRegistryEntry::fetchComplete(JSGlobalObject* globalObject, AbstractModuleRecord* record)
 {

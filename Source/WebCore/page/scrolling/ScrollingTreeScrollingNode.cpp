@@ -346,6 +346,13 @@ std::optional<RubberbandingState> ScrollingTreeScrollingNode::captureRubberbandi
 }
 #endif
 
+Vector<PlatformLayerContainer, 2> ScrollingTreeScrollingNode::hitTestableScrollbarLayers() const
+{
+    if (m_delegate)
+        return m_delegate->hitTestableScrollbarLayers();
+    return { };
+}
+
 void ScrollingTreeScrollingNode::willStartAnimatedScroll()
 {
     scrollingTree()->scrollingTreeNodeWillStartAnimatedScroll(*this);
@@ -527,6 +534,11 @@ void ScrollingTreeScrollingNode::wasScrolledByDelegatedScrolling(const FloatPoin
 
     scrollingTree()->notifyRelatedNodesAfterScrollPositionChange(*this);
     scrollingTree()->scrollingTreeNodeDidScroll(*this, scrollingLayerPositionAction);
+}
+
+float ScrollingTreeScrollingNode::rubberbandHyperbolicCoefficientForTesting() const
+{
+    return m_delegate ? m_delegate->rubberbandHyperbolicCoefficientForTesting() : 0;
 }
 
 void ScrollingTreeScrollingNode::dumpProperties(TextStream& ts, OptionSet<ScrollingStateTreeAsTextBehavior> behavior) const

@@ -58,7 +58,7 @@ public:
     String NODELETE label() const;
     void setLabel(String&&);
 
-    using MapAsyncPromise = DOMPromiseDeferred<IDLNull>;
+    using MapAsyncPromise = DOMPromiseDeferred<void>;
     void mapAsync(GPUMapModeFlags, GPUSize64 offset, std::optional<GPUSize64> sizeForMap, MapAsyncPromise&&);
     ExceptionOr<Ref<JSC::ArrayBuffer>> getMappedRange(GPUSize64 offset, std::optional<GPUSize64> rangeSize);
     void unmap(ScriptExecutionContext&);
@@ -68,12 +68,17 @@ public:
     WebGPU::Buffer& backing() { return m_backing; }
     const WebGPU::Buffer& backing() const { return m_backing; }
 
+    GPUDevice* device() const;
+
     GPUSize64 size() const { return static_cast<GPUSize64>(m_bufferSize); }
     GPUBufferUsageFlags usage() const { return m_usage; }
 
     GPUBufferMapState mapState() const { return m_mapState; };
 
     ~GPUBuffer();
+
+    bool hasActiveInspectorCanvasCallTracer() const;
+
 private:
     GPUBuffer(Ref<WebGPU::Buffer>&&, size_t, GPUBufferUsageFlags, bool, GPUDevice&);
     void internalUnmap(ScriptExecutionContext&);

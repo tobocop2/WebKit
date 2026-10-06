@@ -56,7 +56,7 @@ WorkQueue& MediaSourcePrivateAVFObjC::queueSingleton()
     static std::once_flag onceKey;
     static LazyNeverDestroyed<Ref<WorkQueue>> workQueue;
     std::call_once(onceKey, [] {
-        workQueue.construct(WorkQueue::create("MediaSourcePrivateAVFObjC"_s));
+        workQueue.construct(hasPlatformStrategies() && platformStrategies()->mediaStrategy()->hasThreadSafeMediaSourceSupport() ? WorkQueue::create("MediaSourcePrivateAVFObjC"_s) : Ref { WorkQueue::mainSingleton() });
     });
     return workQueue.get();
 }
@@ -246,7 +246,7 @@ RefPtr<MediaPlayerPrivateMediaSourceAVFObjC> MediaSourcePrivateAVFObjC::platform
     return m_player.get();
 }
 
-MediaTime MediaSourcePrivateAVFObjC::currentTime() const
+MediaTime MediaSourcePrivateAVFObjC::platformCurrentTime() const
 {
     RefPtr renderer = m_renderer.get();
     return renderer ? renderer->currentTime() : MediaTime::zeroTime();

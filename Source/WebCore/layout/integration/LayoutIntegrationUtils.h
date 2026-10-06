@@ -44,14 +44,22 @@ class IntegrationUtils {
 public:
     IntegrationUtils(const LayoutState&);
 
-    void layoutWithFormattingContextForBox(const ElementBox&, std::optional<LayoutUnit> widthConstraint = { }, std::optional<LayoutUnit> heightConstraint = { }) const;
+    void layoutWithFormattingContextForBox(const ElementBox&, std::optional<LayoutUnit> overridingBorderBoxLogicalWidth = { }, std::optional<LayoutUnit> overridingBorderBoxLogicalHeight = { }) const;
+    std::pair<LayoutUnit, LayoutUnit> borderAndPaddingForGridItem(const ElementBox&, LayoutUnit gridAreaInlineSize) const;
+    void layoutGridItem(const ElementBox&, std::optional<LayoutUnit> overridingBorderBoxLogicalWidth, std::optional<LayoutUnit> overridingBorderBoxLogicalHeight, LayoutUnit gridAreaInlineSize) const;
     LayoutUnit maxContentWidth(const ElementBox&) const;
+    LayoutUnit maxContentWidthForGridItem(const ElementBox&, LayoutUnit gridAreaInlineSize) const;
     LayoutUnit minContentWidth(const ElementBox&) const;
     LayoutUnit minContentHeight(const ElementBox&) const;
-    LayoutUnit minContentHeight(const ElementBox&, LayoutUnit inlineConstraint) const;
+    LayoutUnit minContentWidthForGridItem(const ElementBox&, LayoutUnit gridAreaInlineSize) const;
+    LayoutUnit minContentHeightForGridItem(const ElementBox&, LayoutUnit inlineAxisConstraint) const;
+    LayoutUnit maxContentHeightForGridItem(const ElementBox&, LayoutUnit inlineAxisConstraint) const;
+    LayoutUnit minContentContributionHeightForGridItem(const ElementBox&, LayoutUnit inlineAxisConstraint) const;
+    LayoutUnit maxContentContributionHeightForGridItem(const ElementBox&, LayoutUnit inlineAxisConstraint) const;
     LayoutUnit minContentLogicalWidthContribution(const ElementBox&) const;
     LayoutUnit maxContentLogicalWidthContribution(const ElementBox&) const;
     void layoutWithFormattingContextForBlockInInline(const ElementBox& block, LayoutPoint blockLineLogicalTopLeft, const InlineLayoutState&) const;
+    static const Style::ComputedStyle& firstNonAnonymousAncestorStyle(const Box&);
 
     static BlockLayoutState::MarginState NODELETE toMarginState(const RenderBlockFlow::MarginInfo&);
     static RenderBlockFlow::MarginInfo toMarginInfo(const Layout::BlockLayoutState::MarginState&);

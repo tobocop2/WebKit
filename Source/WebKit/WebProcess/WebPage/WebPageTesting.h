@@ -57,6 +57,7 @@ private:
 
     void isLayerTreeFrozen(CompletionHandler<void(bool)>&&);
     void numberOfLiveDocuments(CompletionHandler<void(uint64_t)>&&);
+    void preferredRenderingUpdateIntervalInMilliseconds(CompletionHandler<void(double)>&&);
     void setPermissionLevel(const String& origin, bool allowed);
     void isEditingCommandEnabled(const String& commandName, CompletionHandler<void(bool)>&&);
     void resetStateBetweenTests();
@@ -72,7 +73,7 @@ private:
 
     void clearWheelEventTestMonitor();
     void startMonitoringWheelEventsForTesting(CompletionHandler<void()>&&);
-    void waitForWheelEventsToCompleteForTesting(CompletionHandler<void()>&&);
+    void waitForWheelEventsToCompleteForTesting(bool expectMomentumEnd, CompletionHandler<void()>&&);
 
     WeakPtr<WebPage> m_page;
     WebCore::PageIdentifier m_pageIdentifier;

@@ -241,7 +241,12 @@ bool AXCoreObject::isButton() const
 
 bool AXCoreObject::isTextControl() const
 {
-    switch (role()) {
+    return isTextControl(role());
+}
+
+bool AXCoreObject::isTextControl(AccessibilityRole role)
+{
+    switch (role) {
     case AccessibilityRole::ComboBox:
     case AccessibilityRole::SearchField:
     case AccessibilityRole::TextArea:
@@ -317,7 +322,7 @@ AXCoreObject::AccessibilityChildrenVector AXCoreObject::unignoredChildren(bool u
     // NOTE: The per-object properties read below (role, IsExposableTable, IsIgnored) participate
     // in AXIsolatedTree's cache invalidation for stitchedUnignoredChildren. If a new property
     // becomes a dependency of this walk, update the trigger list in
-    // AXIsolatedTree::applyPendingChangesFromSnapshot.
+    // AXIsolatedTree::applyCommittedChanges.
 
     if (onlyAddsUnignoredChildren())
         return children(updateChildrenIfNeeded);
@@ -407,6 +412,19 @@ AXCoreObject::AccessibilityChildrenVector AXCoreObject::stitchedUnignoredChildre
 size_t AXCoreObject::stitchedUnignoredChildrenCount()
 {
     return stitchedUnignoredChildren().size();
+}
+
+RefPtr<AXCoreObject> AXCoreObject::stitchRepresentativeOrSelf()
+{
+    std::optional<AXID> representativeID = stitchedIntoID();
+    if (!representativeID || *representativeID == objectID())
+        return this;
+    // The AXTextMarker is not a text position here (offset 0 is unused); it is the idiomatic way to
+    // resolve an { treeID, AXID } pair to its object on whichever tree we are on, dispatching to the
+    // isolated tree off the main thread or the main-thread cache on it.
+    if (RefPtr representative = AXTextMarker { treeID(), *representativeID, 0 }.object())
+        return representative;
+    return this;
 }
 
 AXCoreObject::AccessibilityChildrenVector AXCoreObject::crossFrameUnignoredChildrenInRange(size_t start, size_t maxCount)
@@ -839,25 +857,6 @@ RefPtr<AXCoreObject> AXCoreObject::previousSiblingIncludingIgnored(bool updateCh
         return nullptr;
 
     return siblings[indexOfThis - 1].copyRef();
-}
-
-AXCoreObject* AXCoreObject::nextUnignoredSibling(bool updateChildrenIfNeeded, AXCoreObject* unignoredParent) const
-{
-    // In some contexts, we may have already computed the `unignoredParent`, which is what this parameter is.
-    // Ensure this is actually our parent.
-    AX_ASSERT(unignoredParent == parentObjectUnignored());
-
-    RefPtr parent = unignoredParent ? unignoredParent : parentObjectUnignored();
-    if (!parent)
-        return nullptr;
-    const auto& siblings = parent->unignoredChildren(updateChildrenIfNeeded);
-    size_t indexOfThis = siblings.findIf([this] (const Ref<AXCoreObject>& object) {
-        return object.ptr() == this;
-    });
-    if (indexOfThis == notFound)
-        return nullptr;
-
-    return indexOfThis + 1 < siblings.size() ? siblings[indexOfThis + 1].unsafePtr() : nullptr;
 }
 
 AXCoreObject* AXCoreObject::nextSiblingIncludingIgnoredOrParent() const
@@ -1479,17 +1478,6 @@ bool AXCoreObject::isTableCellInSameRowGroup(AXCoreObject& otherTableCell)
     return ancestorID && *ancestorID == otherTableCell.rowGroupAncestorID();
 }
 
-bool AXCoreObject::isTableCellInSameColGroup(AXCoreObject* tableCell)
-{
-    if (!tableCell)
-        return false;
-
-    auto columnRange = columnIndexRange();
-    auto otherColumnRange = tableCell->columnIndexRange();
-
-    return columnRange.first <= otherColumnRange.first + otherColumnRange.second;
-}
-
 bool AXCoreObject::isReplacedElement() const
 {
     // FIXME: Should this include <legend> and form control elements like TextIterator::isRendererReplacedElement does?
@@ -1653,21 +1641,7 @@ unsigned AXCoreObject::headingLevel() const
         if (level > 0)
             return level;
     }
-
-    auto elementName = this->elementName();
-    if (elementName == ElementName::HTML_h1)
-        return 1;
-    if (elementName == ElementName::HTML_h2)
-        return 2;
-    if (elementName == ElementName::HTML_h3)
-        return 3;
-    if (elementName == ElementName::HTML_h4)
-        return 4;
-    if (elementName == ElementName::HTML_h5)
-        return 5;
-    if (elementName == ElementName::HTML_h6)
-        return 6;
-    return 0;
+    return computedHeadingLevel();
 }
 
 unsigned AXCoreObject::hierarchicalLevel() const
@@ -1684,10 +1658,12 @@ unsigned AXCoreObject::hierarchicalLevel() const
     // We measure tree hierarchy by the number of groups that the item is within.
     level = 1;
     for (RefPtr ancestor = parentObject(); ancestor; ancestor = ancestor->parentObject()) {
-        auto ancestorRole = ancestor->role();
-        if (ancestorRole == AccessibilityRole::Group)
+        // Only an explicitly-authored role="group" establishes a tree grouping level. A native list
+        // (e.g. a plain <ul>) that the list heuristic demoted to a generic Group role is not an
+        // authored grouping and must not add a level, nor should any other implicit Group.
+        if (ancestor->hasExplicitGroupRole())
             level++;
-        else if (ancestorRole == AccessibilityRole::Tree)
+        else if (ancestor->role() == AccessibilityRole::Tree)
             break;
     }
 
@@ -2347,7 +2323,7 @@ bool performCustomActionPress(AXTreeID treeID, AXID targetID)
     return retrieveValueFromMainThreadWithTimeoutAndDefault([treeID, targetID] () -> bool {
         if (WeakPtr<AXObjectCache> cache = AXTreeStore<AXObjectCache>::axObjectCacheForID(treeID)) {
             if (RefPtr object = cache->objectForID(targetID))
-                return object->press();
+                return object->pressPreservingFocus();
         }
         return false;
     }, InteractiveTimeout, false);

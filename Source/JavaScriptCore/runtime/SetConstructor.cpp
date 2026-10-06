@@ -35,6 +35,7 @@
 namespace JSC {
 
 const ClassInfo SetConstructor::s_info = { "Function"_s, &Base::s_info, nullptr, nullptr, CREATE_METHOD_TABLE(SetConstructor) };
+CLASSINFO_KEEP_ADDRESS_UNIQUE(SetConstructor);
 
 void SetConstructor::finishCreation(VM& vm, SetPrototype* setPrototype)
 {
@@ -99,10 +100,10 @@ JSC_DEFINE_HOST_FUNCTION(constructSet, (JSGlobalObject* globalObject, CallFrame*
             return;
         }
 
-        MarkedArgumentBuffer arguments;
-        arguments.append(nextValue);
-        ASSERT(!arguments.hasOverflowed());
-        call(globalObject, adderFunction, adderFunctionCallData, set, arguments);
+        auto arguments = WTF::toArray<EncodedJSValue>({
+            JSValue::encode(nextValue),
+        });
+        call(globalObject, adderFunction, adderFunctionCallData, set, ArgList { arguments.data(), arguments.size() });
     });
 
     return JSValue::encode(set);

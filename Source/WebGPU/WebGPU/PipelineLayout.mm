@@ -223,8 +223,7 @@ BindGroupLayout* PipelineLayout::optionalBindGroupLayout(size_t i) const
 void PipelineLayout::makeInvalid()
 {
     m_isValid = false;
-    if (m_bindGroupLayouts)
-        m_bindGroupLayouts->clear();
+    m_bindGroupLayouts = std::nullopt;
 }
 
 static size_t NODELETE returnTotalSize(auto& container)
@@ -337,21 +336,17 @@ bool PipelineLayout::updateComputeOffsets(uint32_t bindGroupIndex, const Vector<
 
 NSString* PipelineLayout::errorValidatingBindGroupCompatibility(const PipelineLayout::BindGroupHashMap& bindGroups) const
 {
+    if (!m_isValid)
+        return @"pipeline layout is not valid";
+
     if (!m_bindGroupLayouts)
         return nil;
 
-    uint32_t setBindGroupsMaxValue = 0;
-    for (auto it : bindGroups)
-        setBindGroupsMaxValue = std::max(it.key, setBindGroupsMaxValue);
-
     auto& bindGroupLayouts = *m_bindGroupLayouts;
     auto numberOfBindGroupsInPipeline = bindGroupLayouts.size();
-    if (setBindGroupsMaxValue + 1 < numberOfBindGroupsInPipeline) {
-        if (numberOfBindGroupsInPipeline == 1 && !bindGroupLayouts[0]->entries().size())
-            return nil;
-        return [NSString stringWithFormat:@"number of bind groups set(%u) is less than the pipeline uses(%zu)", setBindGroupsMaxValue + 1, numberOfBindGroupsInPipeline];
-    }
 
+    // An empty bind group layout never requires a bind group to be set at its index, so the
+    // number of bind groups set says nothing on its own: check each index the pipeline uses.
     for (size_t bindGroupIndex = 0; bindGroupIndex < numberOfBindGroupsInPipeline; ++bindGroupIndex) {
         if (!bindGroupLayouts[bindGroupIndex]->entries().size())
             continue;
@@ -376,7 +371,7 @@ NSString* PipelineLayout::errorValidatingBindGroupCompatibility(const PipelineLa
 
 #pragma mark WGPU Stubs
 
-void NODELETE wgpuPipelineLayoutReference(WGPUPipelineLayout pipelineLayout)
+void NODELETE wgpuPipelineLayoutAddRef(WGPUPipelineLayout pipelineLayout)
 {
     WebGPU::fromAPI(pipelineLayout).ref();
 }
@@ -386,7 +381,7 @@ void wgpuPipelineLayoutRelease(WGPUPipelineLayout pipelineLayout)
     WebGPU::fromAPI(pipelineLayout).deref();
 }
 
-void wgpuPipelineLayoutSetLabel(WGPUPipelineLayout pipelineLayout, const char* label)
+void wgpuPipelineLayoutSetLabel(WGPUPipelineLayout pipelineLayout, WGPUStringView label)
 {
     WebGPU::fromAPI(pipelineLayout).setLabel(WebGPU::fromAPI(label));
 }

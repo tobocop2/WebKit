@@ -25,10 +25,10 @@
 
 #pragma once
 
-#include "BuiltinUtils.h"
-#include "BytecodeIntrinsicRegistry.h"
-#include "CommonIdentifiers.h"
-#include "JSCBuiltins.h"
+#include <JavaScriptCore/BuiltinUtils.h>
+#include <JavaScriptCore/BytecodeIntrinsicRegistry.h>
+#include <JavaScriptCore/CommonIdentifiers.h>
+#include <JavaScriptCore/JSCBuiltins.h>
 #include <wtf/RobinHoodHashMap.h>
 #include <wtf/RobinHoodHashSet.h>
 #include <wtf/TZoneMalloc.h>
@@ -53,7 +53,6 @@ namespace JSC {
     macro(callFunction) \
     macro(charCodeAt) \
     macro(executor) \
-    macro(isView) \
     macro(iteratedObject) \
     macro(iteratedString) \
     macro(promise) \
@@ -86,10 +85,9 @@ namespace JSC {
     macro(newResolvedPromise) \
     macro(newRejectedPromise) \
     macro(resolveWithInternalMicrotaskForAsyncAwait) \
-    macro(asyncGeneratorNextQueueEnqueue) \
-    macro(asyncGeneratorCompleteAndDrain) \
-    macro(asyncGeneratorSuspend) \
-    macro(driveAsyncFunction) \
+    macro(asyncGeneratorPrototypeNext) \
+    macro(asyncIteratorPrototypeSymbolAsyncIterator) \
+    macro(asyncFunctionDrive) \
     macro(newHandledRejectedPromise) \
     macro(promiseReturnUndefinedOnFulfilled) \
     macro(promiseResolve) \
@@ -145,6 +143,7 @@ namespace JSC {
     macro(isSharedTypedArrayView) \
     macro(isResizableOrGrowableSharedTypedArrayView) \
     macro(isDetached) \
+    macro(isTypedArrayOutOfBounds) \
     macro(typedArrayFromFast) \
     macro(instanceOf) \
     macro(isArray) \
@@ -195,10 +194,12 @@ namespace JSC {
     macro(copyDataProperties) \
     macro(cloneObject) \
     macro(meta) \
+    macro(moduleLoader) \
     macro(instanceFieldInitializer) \
     macro(privateBrand) \
     macro(privateClassBrand) \
     macro(hasOwnPropertyFunction) \
+    macro(reflectConstructFunction) \
     macro(createPrivateSymbol) \
     macro(entries) \
     macro(emptyPropertyNameEnumerator) \
@@ -222,7 +223,7 @@ namespace JSC {
     macro(asyncFromSyncIteratorCreate) \
     macro(regExpStringIteratorCreate) \
     macro(iteratorHelperCreate) \
-    macro(syncIterator) \
+    macro(ownKeys) \
     macro(includes) \
     macro(ReferenceError) \
     macro(SuppressedError) \
@@ -243,6 +244,7 @@ JSC_COMMON_PRIVATE_IDENTIFIERS_EACH_PROPERTY_NAME(DECLARE_BUILTIN_PRIVATE_NAMES)
 
 extern JS_EXPORT_PRIVATE SymbolImpl::StaticSymbolImpl dollarVMPrivateName;
 extern JS_EXPORT_PRIVATE SymbolImpl::StaticSymbolImpl polyProtoPrivateName;
+extern JS_EXPORT_PRIVATE SymbolImpl::StaticSymbolImpl stackPrivateName;
 }
 
 class BuiltinNames {
@@ -273,7 +275,7 @@ public:
     const JSC::Identifier& dollarVMPublicName() const { return m_dollarVMName; }
     const JSC::Identifier& dollarVMPrivateName() const { return m_dollarVMPrivateName; }
     const JSC::Identifier& polyProtoName() const { return m_polyProtoPrivateName; }
-    const JSC::Identifier& intlLegacyConstructedSymbol() const { return m_intlLegacyConstructedSymbol; }
+    const JSC::Identifier& stackPrivateName() const { return m_stackPrivateName; }
 
 private:
     void checkPublicToPrivateMapConsistency(UniquedStringImpl* privateName);
@@ -282,10 +284,10 @@ private:
     JSC_FOREACH_BUILTIN_FUNCTION_NAME(DECLARE_BUILTIN_NAMES_IN_JSC)
     JSC_COMMON_PRIVATE_IDENTIFIERS_EACH_PROPERTY_NAME(DECLARE_BUILTIN_NAMES_IN_JSC)
     JSC_COMMON_PRIVATE_IDENTIFIERS_EACH_WELL_KNOWN_SYMBOL(DECLARE_BUILTIN_SYMBOLS_IN_JSC)
-    const JSC::Identifier m_intlLegacyConstructedSymbol;
     const JSC::Identifier m_dollarVMName;
     const JSC::Identifier m_dollarVMPrivateName;
     const JSC::Identifier m_polyProtoPrivateName;
+    const JSC::Identifier m_stackPrivateName;
     PrivateNameSet m_privateNameSet;
     WellKnownSymbolMap m_wellKnownSymbolsMap;
 };

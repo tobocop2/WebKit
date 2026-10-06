@@ -35,6 +35,7 @@ set(bmalloc_SOURCES
     libpas/src/libpas/bmalloc_heap_flex.c
     libpas/src/libpas/bmalloc_heap_iso.c
     libpas/src/libpas/bmalloc_heap_utils.c
+    libpas/src/libpas/bmalloc_prefault_supply.c
     libpas/src/libpas/jit_heap.c
     libpas/src/libpas/pas_bitfit_page_config_kind.c
     libpas/src/libpas/pas_heap_config_kind.c
@@ -50,6 +51,7 @@ set_source_files_properties(
     libpas/src/libpas/bmalloc_heap_flex.c
     libpas/src/libpas/bmalloc_heap_iso.c
     libpas/src/libpas/bmalloc_heap_utils.c
+    libpas/src/libpas/bmalloc_prefault_supply.c
     libpas/src/libpas/jit_heap.c
     libpas/src/libpas/pas_bitfit_page_config_kind.c
     libpas/src/libpas/pas_heap_config_kind.c
@@ -251,6 +253,7 @@ set(bmalloc_PUBLIC_HEADERS
     libpas/src/libpas/bmalloc_heap_iso_internal.h
     libpas/src/libpas/bmalloc_heap_ref.h
     libpas/src/libpas/bmalloc_heap_utils.h
+    libpas/src/libpas/bmalloc_prefault_supply.h
     libpas/src/libpas/bmalloc_type.h
     libpas/src/libpas/hotbit_heap_config.h
     libpas/src/libpas/hotbit_heap.h
@@ -581,6 +584,7 @@ set(bmalloc_PUBLIC_HEADERS
 set(bmalloc_PRIVATE_HEADERS
     bmalloc/ProcessCheck.h
     bmalloc/ScopeExit.h
+    bmalloc/SpinBackoff.h
 
     libpas/src/libpas/hotbit_heap_inlines.h
     libpas/src/libpas/iso_heap_inlines.h
@@ -695,6 +699,10 @@ if (USE_MIMALLOC)
     add_definitions(-DUSE_MIMALLOC=1)
 endif ()
 
+if (USE_EXTERNAL_MIMALLOC)
+    add_definitions(-DUSE_EXTERNAL_MIMALLOC=1)
+endif ()
+
 if (USE_SYSTEM_MALLOC)
     add_definitions(-DUSE_SYSTEM_MALLOC=1)
 endif ()
@@ -710,22 +718,25 @@ WEBKIT_FRAMEWORK_DECLARE(bmalloc)
 WEBKIT_INCLUDE_CONFIG_FILES_IF_EXISTS()
 
 WEBKIT_COPY_FILES(bmalloc_CopyHeaders
-    PRUNE_STALE
-    DESTINATION ${bmalloc_FRAMEWORK_HEADERS_DIR}/bmalloc
+    DESTINATION ${bmalloc_HEADERS_DIR}
     FILES ${bmalloc_PUBLIC_HEADERS}
     FLATTENED
 )
 
 if (bmalloc_PRIVATE_FRAMEWORK_HEADERS_DIR)
     WEBKIT_COPY_FILES(bmalloc_CopyPrivateHeaders
-        PRUNE_STALE
-        DESTINATION ${bmalloc_PRIVATE_FRAMEWORK_HEADERS_DIR}/bmalloc
+        DESTINATION ${bmalloc_PRIVATE_HEADERS_DIR}
         FILES ${bmalloc_PRIVATE_HEADERS}
         FLATTENED
     )
 endif ()
 
 WEBKIT_FRAMEWORK(bmalloc)
+
+# bmalloc is statically linked into JavaScriptCore, so it uses JSC's PGO profile.
+if (USE_APPLE_INTERNAL_SDK)
+    WEBKIT_TARGET_USE_PGO(bmalloc PROFILE JavaScriptCore)
+endif ()
 
 # Only build mbmalloc on platforms that MallocBench supports
 if (DEVELOPER_MODE AND (APPLE OR HAVE_MALLOC_TRIM))

@@ -74,6 +74,7 @@ struct HashTableValue;
 
 JS_EXPORT_PRIVATE Exception* throwTypeError(JSGlobalObject*, ThrowScope&, const String&);
 extern JS_EXPORT_PRIVATE const ASCIILiteral NonExtensibleObjectPropertyDefineError;
+extern JS_EXPORT_PRIVATE const ASCIILiteral ImmutablePropertyDefineError;
 extern JS_EXPORT_PRIVATE const ASCIILiteral ReadonlyPropertyWriteError;
 extern JS_EXPORT_PRIVATE const ASCIILiteral ReadonlyPropertyChangeError;
 extern JS_EXPORT_PRIVATE const ASCIILiteral UnableToDeletePropertyError;
@@ -90,6 +91,14 @@ class JSFinalObject;
 #else
 #define JS_EXPORT_PRIVATE_IF_ASSERT_ENABLED
 #endif
+
+// Debug-only information handed to getOwnNonIndexPropertySlot on the debugLLIntGetById=true path (rdar://157153895)
+struct PrototypeChainDebugData {
+    // The original base value where getPropertySlot began the prototype walk
+    class JSObject* bottomOfChain;
+    // The prototype-chain child of the object being examined (null if it's the base)
+    class JSObject* previousInChain;
+};
 
 class JSObject : public JSCell {
     friend class BatchedTransitionOptimizer;
@@ -155,7 +164,7 @@ public:
     template<typename T, typename PropertyNameType>
     inline T getAs(JSGlobalObject*, PropertyNameType) const; // Defined in JSObjectInlines.h
 
-    template<bool checkNullStructure = false>
+    template<bool checkNullStructure = false, bool debugLLIntGetById = false>
     bool getPropertySlot(JSGlobalObject*, PropertyName, PropertySlot&);
     bool getPropertySlot(JSGlobalObject*, unsigned propertyName, PropertySlot&);
     bool getPropertySlot(JSGlobalObject*, uint64_t propertyName, PropertySlot&);
@@ -515,6 +524,14 @@ public:
 
     JS_EXPORT_PRIVATE void seal(VM&);
     JS_EXPORT_PRIVATE void freeze(VM&);
+    // Makes this object non-extensible and stops its own properties and its prototype from changing: from now on a put with it
+    // as the receiver, a define or a delete that would change one of its own properties, and a change of its prototype all fail.
+    // Unlike freeze(), property attributes are left as they are, so an inherited property still reads as writable and assignment
+    // on an object that inherits from this one works as before.
+    // Returns false, and changes nothing, for a class with write hooks of its own that do not check for this: ProxyObject, typed
+    // arrays, DirectArguments and ScopedArguments, and any class outside JavaScriptCore that overrides a write hook.
+    JS_EXPORT_PRIVATE bool makePropertiesImmutable(VM&);
+    JS_EXPORT_PRIVATE bool hasImmutableProperties() const;
     void materializeLazyOwnProperties(VM&);
     JS_EXPORT_PRIVATE static bool preventExtensions(JSObject*, JSGlobalObject*);
     JS_EXPORT_PRIVATE static bool NODELETE isExtensible(JSObject*, JSGlobalObject*);
@@ -564,7 +581,7 @@ public:
     {
         structure()->flattenDictionaryStructure(vm, this);
     }
-    void shiftButterflyAfterFlattening(const GCSafeConcurrentJSLocker&, VM&, Structure* structure, size_t outOfLineCapacityAfter);
+    void shiftButterflyAfterFlattening(const ConcurrentJSLocker&, VM&, Structure*, size_t outOfLineCapacityAfter);
 
     JSGlobalObject* realmMayBeNull() const
     {
@@ -625,6 +642,9 @@ public:
     }
 
     void ensureWritable(VM& vm); // Defined in JSObjectInlines.h
+    // As ensureWritable(), for a caller that can do without. False: the elements are in copy-on-write storage to keep them from
+    // changing (JSObject::makePropertiesImmutable()), and stay there.
+    [[nodiscard]] bool tryMakeWritable(VM&); // Defined in JSObjectInlines.h
 
     static constexpr size_t offsetOfInlineStorage();
 
@@ -650,7 +670,8 @@ public:
 
     DECLARE_EXPORT_INFO;
 
-    bool getOwnNonIndexPropertySlot(VM&, Structure*, PropertyName, PropertySlot&);
+    template <bool debugLLIntGetById = false>
+    bool getOwnNonIndexPropertySlot(VM&, Structure*, PropertyName, PropertySlot&, const PrototypeChainDebugData* = nullptr);
     bool getNonIndexPropertySlot(JSGlobalObject*, PropertyName, PropertySlot&);
 
     JS_EXPORT_PRIVATE NEVER_INLINE bool putInlineSlow(JSGlobalObject*, PropertyName, JSValue, PutPropertySlot&);
@@ -801,7 +822,7 @@ private:
 
     JS_EXPORT_PRIVATE NEVER_INLINE ASCIILiteral putDirectToDictionaryWithoutExtensibility(VM&, PropertyName, JSValue, PutPropertySlot&);
     JS_EXPORT_PRIVATE void fillGetterPropertySlot(VM&, PropertySlot&, JSCell*, unsigned, PropertyOffset);
-    void fillCustomGetterPropertySlot(PropertySlot&, CustomGetterSetter*, unsigned, Structure*);
+    void fillCustomGetterPropertySlot(PropertySlot&, CustomGetterSetter*, unsigned, Structure*, PropertyOffset);
 
     JS_EXPORT_PRIVATE bool getOwnStaticPropertySlot(VM&, PropertyName, PropertySlot&);
         
@@ -826,6 +847,8 @@ private:
     JS_EXPORT_PRIVATE ArrayStorage* ensureArrayStorageSlow(VM&);
 
     PropertyOffset prepareToPutDirectWithoutTransition(VM&, PropertyName, unsigned attributes, StructureID, Structure*);
+
+    NO_RETURN_DUE_TO_CRASH NEVER_INLINE void crashDueToEmptyValueAtValidOffset(Structure*, PropertyName, PropertyOffset, JSObject* bottomOfChain, JSObject* previousInChain, unsigned attributes, int line, const char* filename, const char* function_name);
 };
 
 // JSObjectWithButterfly is a JSObject that has out-of-line property storage (butterfly).
@@ -948,6 +971,7 @@ public:
 
     static JSFinalObject* create(VM&, Structure*);
     static JSFinalObject* createWithButterfly(VM&, Structure*, Butterfly*);
+    static JSFinalObject* createWithButterflyCopyingInlineStorage(VM&, Structure*, Butterfly*, const WriteBarrierBase<Unknown>* inlineStorageSource);
     inline static Structure* createStructure(VM&, JSGlobalObject*, JSValue, unsigned);
 
     static JSFinalObject* createDefaultEmptyObject(JSGlobalObject*);
@@ -964,6 +988,16 @@ private:
     {
         // We do not need to use gcSafeMemcpy since this object is not exposed yet.
         memset(inlineStorageUnsafe(), 0, inlineCapacity * sizeof(EncodedJSValue));
+    }
+
+    // Initializes the inline storage by copying from |inlineStorageSource| instead of zero-filling.
+    explicit JSFinalObject(VM& vm, Structure* structure, Butterfly* butterfly, size_t inlineCapacity, const WriteBarrierBase<Unknown>* inlineStorageSource)
+        : JSObjectWithButterfly(vm, structure, butterfly)
+    {
+        auto* destination = reinterpret_cast<EncodedJSValue*>(inlineStorageUnsafe());
+        auto* source = reinterpret_cast<const EncodedJSValue*>(inlineStorageSource);
+        for (size_t i = 0; i < inlineCapacity; ++i)
+            destination[i] = source[i];
     }
 
     explicit JSFinalObject(CreatingWellDefinedBuiltinCellTag, StructureID structureID)
@@ -992,6 +1026,14 @@ inline JSFinalObject* JSFinalObject::createWithButterfly(VM& vm, Structure* stru
         NotNull,
         allocateCell<JSFinalObject>(vm, allocationSize(inlineCapacity))
     ) JSFinalObject(vm, structure, butterfly, inlineCapacity);
+    finalObject->finishCreation(vm);
+    return finalObject;
+}
+
+inline JSFinalObject* JSFinalObject::createWithButterflyCopyingInlineStorage(VM& vm, Structure* structure, Butterfly* butterfly, const WriteBarrierBase<Unknown>* inlineStorageSource)
+{
+    size_t inlineCapacity = structure->inlineCapacity();
+    JSFinalObject* finalObject = new (NotNull, allocateCell<JSFinalObject>(vm, allocationSize(inlineCapacity))) JSFinalObject(vm, structure, butterfly, inlineCapacity, inlineStorageSource);
     finalObject->finishCreation(vm);
     return finalObject;
 }
@@ -1092,7 +1134,8 @@ inline JSValue JSObject::getDirectConcurrently(Locker<JSCellLock>&, Structure* e
 
 // It is safe to call this method with a PropertyName that is actually an index,
 // but if so will always return false (doesn't search index storage).
-ALWAYS_INLINE bool JSObject::getOwnNonIndexPropertySlot(VM& vm, Structure* structure, PropertyName propertyName, PropertySlot& slot)
+template<bool debugLLIntGetById>
+ALWAYS_INLINE bool JSObject::getOwnNonIndexPropertySlot(VM& vm, Structure* structure, PropertyName propertyName, PropertySlot& slot, const PrototypeChainDebugData* debugData)
 {
     unsigned attributes;
     PropertyOffset offset = structure->get(vm, propertyName, attributes);
@@ -1106,6 +1149,12 @@ ALWAYS_INLINE bool JSObject::getOwnNonIndexPropertySlot(VM& vm, Structure* struc
     ASSERT(!parseIndex(propertyName));
 
     JSValue value = getDirect(offset);
+
+    if constexpr (debugLLIntGetById) {
+        if (!value)
+            crashDueToEmptyValueAtValidOffset(structure, propertyName, offset, debugData->bottomOfChain, debugData->previousInChain, attributes, __LINE__, __FILE__, WTF_PRETTY_FUNCTION);
+    }
+
     if (value.isCell()) {
         ASSERT(value);
         JSCell* cell = value.asCell();
@@ -1117,7 +1166,7 @@ ALWAYS_INLINE bool JSObject::getOwnNonIndexPropertySlot(VM& vm, Structure* struc
             return true;
         case CustomGetterSetterType:
             ASSERT(attributes & PropertyAttribute::CustomAccessorOrValue);
-            fillCustomGetterPropertySlot(slot, uncheckedDowncast<CustomGetterSetter>(cell), attributes, structure);
+            fillCustomGetterPropertySlot(slot, uncheckedDowncast<CustomGetterSetter>(cell), attributes, structure, offset);
             return true;
         default:
             break;
@@ -1128,7 +1177,7 @@ ALWAYS_INLINE bool JSObject::getOwnNonIndexPropertySlot(VM& vm, Structure* struc
     return true;
 }
 
-ALWAYS_INLINE void JSObject::fillCustomGetterPropertySlot(PropertySlot& slot, CustomGetterSetter* customGetterSetter, unsigned attributes, Structure* structure)
+ALWAYS_INLINE void JSObject::fillCustomGetterPropertySlot(PropertySlot& slot, CustomGetterSetter* customGetterSetter, unsigned attributes, Structure* structure, PropertyOffset offset)
 {
     ASSERT(attributes & PropertyAttribute::CustomAccessorOrValue);
     if (customGetterSetter->inherits<DOMAttributeGetterSetter>()) {
@@ -1136,14 +1185,14 @@ ALWAYS_INLINE void JSObject::fillCustomGetterPropertySlot(PropertySlot& slot, Cu
         if (structure->isUncacheableDictionary())
             slot.setCustom(this, attributes, domAttribute->getter(), domAttribute->setter(), domAttribute->domAttribute());
         else
-            slot.setCacheableCustom(this, attributes, domAttribute->getter(), domAttribute->setter(), domAttribute->domAttribute());
+            slot.setCacheableCustom(this, attributes, domAttribute->getter(), domAttribute->setter(), domAttribute->domAttribute(), offset);
         return;
     }
 
     if (structure->isUncacheableDictionary())
         slot.setCustom(this, attributes, customGetterSetter->getter(), customGetterSetter->setter());
     else
-        slot.setCacheableCustom(this, attributes, customGetterSetter->getter(), customGetterSetter->setter());
+        slot.setCacheableCustom(this, attributes, customGetterSetter->getter(), customGetterSetter->setter(), offset);
 }
 
 // It may seem crazy to inline a function this large, especially a virtual function,
@@ -1169,11 +1218,12 @@ ALWAYS_INLINE bool JSObject::getOwnPropertySlot(JSObject* object, JSGlobalObject
 
 // It may seem crazy to inline a function this large but it makes a big difference
 // since this is function very hot in variable lookup
-template<bool checkNullStructure>
+template<bool checkNullStructure, bool debugLLIntGetById>
 ALWAYS_INLINE bool JSObject::getPropertySlot(JSGlobalObject* globalObject, PropertyName propertyName, PropertySlot& slot)
 {
     VM& vm = getVM(globalObject);
     JSObject* object = this;
+    JSObject* previous = nullptr;
     while (true) {
         if (TypeInfo::overridesGetOwnPropertySlot(object->inlineTypeFlags())) [[unlikely]] {
             // If propertyName is an index then we may have missed it (as this loop is using
@@ -1188,19 +1238,25 @@ ALWAYS_INLINE bool JSObject::getPropertySlot(JSGlobalObject* globalObject, Prope
         }
         ASSERT(object->type() != ProxyObjectType);
         Structure* structure = object->structureID().decode();
-#if USE(JSVALUE64)
         if (checkNullStructure) {
             if (!structure) [[unlikely]]
                 CRASH_WITH_INFO(object->type(), object->structureID().bits());
         }
-#endif
-        if (object->getOwnNonIndexPropertySlot(vm, structure, propertyName, slot))
-            return true;
+        if constexpr (debugLLIntGetById) {
+            PrototypeChainDebugData debugData { .bottomOfChain = this, .previousInChain = previous };
+            if (object->getOwnNonIndexPropertySlot<debugLLIntGetById>(vm, structure, propertyName, slot, &debugData))
+                return true;
+        } else {
+            if (object->getOwnNonIndexPropertySlot<debugLLIntGetById>(vm, structure, propertyName, slot))
+                return true;
+        }
         // FIXME: This doesn't look like it's following the specification:
         // https://bugs.webkit.org/show_bug.cgi?id=172572
         JSValue prototype = structure->storedPrototype(object);
         if (!prototype.isObject())
             break;
+        if constexpr (debugLLIntGetById)
+            previous = object;
         object = asObject(prototype);
     }
 
@@ -1231,7 +1287,7 @@ inline bool JSObject::putDirect(VM& vm, PropertyName propertyName, JSValue value
     return putDirectInternal<PutModeDefineOwnProperty>(vm, propertyName, value, 0, slot).isNull();
 }
 
-constexpr inline intptr_t offsetInButterfly(PropertyOffset offset)
+inline constexpr intptr_t offsetInButterfly(PropertyOffset offset)
 {
     return offsetInOutOfLineStorage(offset) + Butterfly::indexOfPropertyStorage();
 }
@@ -1281,10 +1337,6 @@ inline int offsetRelativeToBase(PropertyOffset offset)
 inline size_t maxOffsetRelativeToBase(PropertyOffset offset)
 {
     ptrdiff_t addressOffset = offsetRelativeToBase(offset);
-#if USE(JSVALUE32_64)
-    if (addressOffset >= 0)
-        return static_cast<size_t>(addressOffset) + OBJECT_OFFSETOF(EncodedValueDescriptor, asBits.tag);
-#endif
     return static_cast<size_t>(addressOffset);
 }
 

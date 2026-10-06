@@ -50,6 +50,7 @@
 #import <wtf/Lock.h>
 #import <wtf/MachSendRightAnnotated.h>
 #import <wtf/MainThread.h>
+#import <wtf/NativePromise.h>
 #import <wtf/NeverDestroyed.h>
 #import <wtf/TZoneMallocInlines.h>
 #import <wtf/text/MakeString.h>
@@ -474,8 +475,8 @@ void MediaPlayerPrivateMediaStreamAVFObjC::layersAreInitialized(IntSize size, bo
 
     m_canEnqueueDisplayLayer = true;
 
-    if (m_layerHostingContextCallback)
-        m_layerHostingContextCallback(sampleBufferDisplayLayer->hostingContext());
+    for (auto& promise : std::exchange(m_layerHostingContextPromises, { }))
+        promise.resolve(sampleBufferDisplayLayer->hostingContext());
 }
 
 void MediaPlayerPrivateMediaStreamAVFObjC::destroyLayers()
@@ -716,7 +717,10 @@ void MediaPlayerPrivateMediaStreamAVFObjC::setVisibleForCanvas(bool)
 
 void MediaPlayerPrivateMediaStreamAVFObjC::setViewportVisibility(ViewportVisibility visibility)
 {
-    m_isVisibleInViewPort = visibility == ViewportVisibility::VisibleInViewport;
+    if (visibility == ViewportVisibility::NotVisible || visibility == ViewportVisibility::IntersectingViewport)
+        m_isVisibleInViewPort = false;
+    else
+        m_isVisibleInViewPort = true;
 }
 
 MediaTime MediaPlayerPrivateMediaStreamAVFObjC::duration() const
@@ -924,15 +928,15 @@ void updateTracksOfKind(MemoryCompactRobinHoodHashMap<String, RefT>& trackMap, T
             addedPrivateTracks.append(track);
     }
 
-    for (const auto& track : trackMap.values()) {
+    trackMap.removeIf([&](auto& keyValue) {
+        auto& track = keyValue.value;
         Ref streamTrack = track->streamTrack();
         if (currentTracks.containsIf([&streamTrack](auto& track) { return track.ptr() == streamTrack.ptr(); }))
-            continue;
+            return false;
 
         removedTracks.append(track);
-    }
-    for (auto& track : removedTracks)
-        trackMap.remove(track->streamTrack().id());
+        return true;
+    });
 
     for (auto& track : addedPrivateTracks) {
         RefT newTrack = itemFactory(track.get());
@@ -1103,7 +1107,7 @@ void MediaPlayerPrivateMediaStreamAVFObjC::updateCurrentFrameImage()
         return;
 
     if (auto pixelBuffer = protect(m_imagePainter.videoFrame)->pixelBuffer())
-        m_imagePainter.cgImage = NativeImage::create(m_imagePainter.pixelBufferConformer->createImageFromPixelBuffer(pixelBuffer));
+        m_imagePainter.cgImage = m_imagePainter.pixelBufferConformer->createImageFromPixelBuffer(pixelBuffer);
 }
 
 static inline CGAffineTransform videoTransformationMatrix(VideoFrame& videoFrame)
@@ -1155,11 +1159,11 @@ RefPtr<VideoFrame> MediaPlayerPrivateMediaStreamAVFObjC::videoFrameForCurrentTim
     return m_imagePainter.videoFrame;
 }
 
-DestinationColorSpace MediaPlayerPrivateMediaStreamAVFObjC::colorSpace()
+ColorSpace MediaPlayerPrivateMediaStreamAVFObjC::colorSpace()
 {
     updateCurrentFrameImage();
     RefPtr cgImage = m_imagePainter.cgImage;
-    return cgImage ? cgImage->colorSpace() : DestinationColorSpace::SRGB();
+    return cgImage ? cgImage->colorSpace() : ColorSpace::SRGB();
 }
 
 void MediaPlayerPrivateMediaStreamAVFObjC::updateLayersAsNeeded()
@@ -1302,14 +1306,15 @@ void MediaPlayerPrivateMediaStreamAVFObjC::setVideoLayerSizeFenced(const FloatSi
     sampleBufferDisplayLayer->updateBoundsAndPosition(*m_storedBounds, WTF::move(fence));
 }
 
-void MediaPlayerPrivateMediaStreamAVFObjC::requestHostingContext(LayerHostingContextCallback&& callback)
+Ref<MediaPlayer::HostingContextPromise> MediaPlayerPrivateMediaStreamAVFObjC::requestHostingContext()
 {
     auto context = hostingContext();
-    if (context.contextID) {
-        callback(context);
-        return;
-    }
-    m_layerHostingContextCallback = WTF::move(callback);
+    if (context.contextID)
+        return HostingContextPromise::createAndResolve(WTF::move(context));
+    HostingContextPromise::AutoRejectProducer producer;
+    Ref promise = producer.promise();
+    m_layerHostingContextPromises.append(WTF::move(producer));
+    return promise;
 }
 
 void MediaPlayerPrivateMediaStreamAVFObjC::setShouldMaintainAspectRatio(bool shouldMaintainAspectRatio)

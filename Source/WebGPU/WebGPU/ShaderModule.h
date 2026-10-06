@@ -29,6 +29,7 @@
 #import "CallGraph.h"
 #import "WGSL.h"
 #import <variant>
+#import <wtf/CompletionHandler.h>
 #import <wtf/FastMalloc.h>
 #import <wtf/Ref.h>
 #import <wtf/RefCounted.h>
@@ -75,6 +76,8 @@ public:
 
     static WGSL::PipelineLayout convertPipelineLayout(const PipelineLayout&);
     static id<MTLLibrary> createLibrary(id<MTLDevice>, const String& msl, String&& label, NSError **, WGSL::DeviceState&&);
+    static id<MTLLibrary> createLibrary(id<MTLDevice>, NSString *msl, NSString *label, NSError **, const WGSL::DeviceState&);
+    static void createLibraryAsync(id<MTLDevice>, NSString *msl, NSString *label, const WGSL::DeviceState&, CompletionHandler<void(id<MTLLibrary>, NSError *)>&&);
 
     WGSL::ShaderModule* ast() const;
 
@@ -105,6 +108,8 @@ public:
     bool usesSampleMaskInOutput(const String&) const;
     bool usesFragDepth(const String&) const;
     bool usesPrimitiveIndexInInput(const String&) const;
+    bool usesSubgroupInvocationIdInInput(const String&) const;
+    bool usesSubgroupSizeInInput(const String&) const;
     uint32_t clipDistancesCount(const String&) const;
 
 private:
@@ -140,6 +145,8 @@ private:
         bool usesSampleMaskInOutput { false };
         bool usesFragDepth { false };
         bool usesPrimitiveIndexInInput { false };
+        bool usesSubgroupInvocationIdInInput { false };
+        bool usesSubgroupSizeInInput { false };
         uint32_t clipDistancesCount { 0 }; // Number of clip distances (0 if not used)
     };
     const ShaderModuleState* shaderModuleState(const String&) const;

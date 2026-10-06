@@ -24,6 +24,9 @@
 #include "config.h"
 #include "SVGSVGElement.h"
 
+#include "CSSFunctionValue.h"
+#include "CSSPrimitiveValue.h"
+#include "CSSTransformListValue.h"
 #include "ContainerNodeInlines.h"
 #include "DOMMatrix2DInit.h"
 #include "DOMWrapperWorld.h"
@@ -35,6 +38,7 @@
 #include "LegacyRenderSVGRoot.h"
 #include "LegacyRenderSVGViewportContainer.h"
 #include "LocalFrame.h"
+#include "MutableStyleProperties.h"
 #include "NodeName.h"
 #include "RenderBoxInlines.h"
 #include "RenderObjectInlines.h"
@@ -130,17 +134,24 @@ RefPtr<LocalFrame> SVGSVGElement::frameForCurrentScale() const
 
 float SVGSVGElement::currentScale() const
 {
-    // When asking from inside an embedded SVG document, a scale value of 1 seems reasonable, as it doesn't
-    // know anything about the parent scale.
-    auto frame = frameForCurrentScale();
-    return frame ? frame->pageZoomFactor() : 1;
+    // Only an outermost svg element has a currentScale (SVG 2, "Interface SVGSVGElement").
+    if (!isOutermostSVGSVGElement())
+        return 1;
+    if (RefPtr frame = frameForCurrentScale())
+        return frame->pageZoomFactor();
+    return m_currentScale;
 }
 
 void SVGSVGElement::setCurrentScale(float scale)
 {
     ASSERT(std::isfinite(scale));
-    if (auto frame = frameForCurrentScale())
+    if (!isOutermostSVGSVGElement())
+        return;
+    if (RefPtr frame = frameForCurrentScale()) {
         frame->setPageZoomFactor(scale);
+        return;
+    }
+    m_currentScale = scale;
 }
 
 void SVGSVGElement::setCurrentTranslate(const FloatPoint& translation)
@@ -227,6 +238,13 @@ void SVGSVGElement::attributeChanged(const QualifiedName& name, const AtomString
 
 void SVGSVGElement::svgAttributeChanged(const QualifiedName& attrName)
 {
+    if (attrName == SVGNames::transformAttr && isOutermostSVGSVGElement()) {
+        InstanceInvalidationGuard guard(*this);
+        invalidateConcatenatedTransformCache();
+        setPresentationalHintStyleIsDirty();
+        return;
+    }
+
     auto isEmbeddedThroughFrameContainingSVGDocument = [](const RenderElement& renderer) -> bool {
         if (CheckedPtr svgRoot = dynamicDowncast<LegacyRenderSVGRoot>(renderer))
             return svgRoot->isEmbeddedThroughFrameContainingSVGDocument();
@@ -293,6 +311,65 @@ void SVGSVGElement::svgAttributeChanged(const QualifiedName& attrName)
     }
 
     SVGGraphicsElement::svgAttributeChanged(attrName);
+}
+
+void SVGSVGElement::collectExtraStyleForPresentationalHints(MutableStyleProperties& style)
+{
+    SVGGraphicsElement::collectExtraStyleForPresentationalHints(style);
+
+    if (!isOutermostSVGSVGElement() || transform().isEmpty())
+        return;
+
+    auto px = [](double value) {
+        return CSSPrimitiveValue::create(value, CSSUnitType::Px);
+    };
+    auto deg = [](double value) {
+        return CSSPrimitiveValue::create(value, CSSUnitType::Deg);
+    };
+
+    CSSValueListBuilder functions;
+    for (const auto& item : transform().items()) {
+        const auto& value = item->value();
+        auto matrix = value.matrix().value();
+        switch (value.type()) {
+        case SVGTransformValue::SVG_TRANSFORM_UNKNOWN:
+            break;
+        case SVGTransformValue::SVG_TRANSFORM_MATRIX: {
+            CSSValueListBuilder arguments;
+            for (double number : { matrix.a(), matrix.b(), matrix.c(), matrix.d(), matrix.e(), matrix.f() })
+                arguments.append(CSSPrimitiveValue::create(number));
+            functions.append(CSSFunctionValue::create(CSSValueMatrix, WTF::move(arguments)));
+            break;
+        }
+        case SVGTransformValue::SVG_TRANSFORM_TRANSLATE:
+            functions.append(CSSFunctionValue::create(CSSValueTranslate, px(matrix.e()), px(matrix.f())));
+            break;
+        case SVGTransformValue::SVG_TRANSFORM_SCALE:
+            functions.append(CSSFunctionValue::create(CSSValueScale, CSSPrimitiveValue::create(matrix.a()), CSSPrimitiveValue::create(matrix.d())));
+            break;
+        case SVGTransformValue::SVG_TRANSFORM_ROTATE: {
+            // CSS rotate() has no center argument, so rotate(a, cx, cy) becomes translate(cx, cy) rotate(a) translate(-cx, -cy).
+            auto center = value.rotationCenter();
+            bool hasCenter = !center.isZero();
+            if (hasCenter)
+                functions.append(CSSFunctionValue::create(CSSValueTranslate, px(center.x()), px(center.y())));
+            functions.append(CSSFunctionValue::create(CSSValueRotate, deg(value.angle())));
+            if (hasCenter)
+                functions.append(CSSFunctionValue::create(CSSValueTranslate, px(-center.x()), px(-center.y())));
+            break;
+        }
+        case SVGTransformValue::SVG_TRANSFORM_SKEWX:
+            functions.append(CSSFunctionValue::create(CSSValueSkewX, deg(value.angle())));
+            break;
+        case SVGTransformValue::SVG_TRANSFORM_SKEWY:
+            functions.append(CSSFunctionValue::create(CSSValueSkewY, deg(value.angle())));
+            break;
+        }
+    }
+
+    if (functions.isEmpty())
+        return;
+    addPropertyToPresentationalHintStyle(style, CSSPropertyTransform, CSSTransformListValue::create(WTF::move(functions)));
 }
 
 Ref<NodeList> SVGSVGElement::collectIntersectionOrEnclosureList(SVGRect& rect, SVGElement* referenceElement, bool (*checkFunction)(SVGElement&, SVGRect&))
@@ -535,6 +612,10 @@ Node::NeedsPostConnectionSteps SVGSVGElement::insertionSteps(InsertionType inser
         if (!document->parsing() && !document->processingLoadEvent() && document->loadEventFinished())
             m_timeContainer->begin();
     }
+
+    if (!transform().isEmpty())
+        setPresentationalHintStyleIsDirty();
+
     return SVGGraphicsElement::insertionSteps(insertionType, parentOfInsertedTree);
 }
 
@@ -545,6 +626,10 @@ void SVGSVGElement::removingSteps(RemovalType removalType, ContainerNode& oldPar
         protect(document->svgExtensions())->removeTimeContainer(*this);
         pauseAnimations();
     }
+
+    if (!transform().isEmpty())
+        setPresentationalHintStyleIsDirty();
+
     SVGGraphicsElement::removingSteps(removalType, oldParentOfRemovedTree);
 }
 
@@ -577,11 +662,6 @@ bool SVGSVGElement::animationsPaused() const
     return timeContainer().isPaused();
 }
 
-bool SVGSVGElement::hasActiveAnimation() const
-{
-    return timeContainer().isActive();
-}
-
 float SVGSVGElement::getCurrentTime() const
 {
     return narrowPrecisionToFloat(protect(timeContainer())->elapsed().value());
@@ -604,7 +684,7 @@ bool SVGSVGElement::selfHasRelativeLengths() const
 
 bool SVGSVGElement::hasTransformRelatedAttributes() const
 {
-    if (SVGGraphicsElement::hasTransformRelatedAttributes())
+    if (isOutermostSVGSVGElement() ? !!supplementalTransform() : SVGGraphicsElement::hasTransformRelatedAttributes())
         return true;
 
     // 'x' / 'y' / 'viewBox' lead to a non-identity supplementalLayerTransform in RenderSVGViewportContainer
@@ -614,6 +694,22 @@ bool SVGSVGElement::hasTransformRelatedAttributes() const
 static bool isEmbeddedThroughSVGImage(const SVGSVGElement& element)
 {
     return element.document().documentElement() == &element && isInSVGImage(&element);
+}
+
+bool SVGSVGElement::hasSynthesizedViewBoxForSVGImage() const
+{
+    // An SVG document embedded through SVGImage is resized to the container size chosen by the
+    // embedder. Without an explicit viewBox the content has to stretch to that size, which is
+    // modelled by synthesizing a viewBox from the intrinsic size, see currentViewBoxRect().
+    return !m_useCurrentView && viewBox().isEmpty() && isEmbeddedThroughSVGImage(*this);
+}
+
+bool SVGSVGElement::viewBoxDisablesPainting()
+{
+    if (!hasEmptyViewBox())
+        return false;
+
+    return m_useCurrentView ? currentView().hasEmptyViewBox() : true;
 }
 
 FloatRect SVGSVGElement::currentViewBoxRect() const
@@ -628,7 +724,7 @@ FloatRect SVGSVGElement::currentViewBoxRect() const
     if (!viewBox.isEmpty())
         return viewBox;
 
-    if (!isEmbeddedThroughSVGImage(*this))
+    if (!hasSynthesizedViewBoxForSVGImage())
         return { };
 
     // If no viewBox is specified but non-relative width/height values, then we
@@ -637,6 +733,33 @@ FloatRect SVGSVGElement::currentViewBoxRect() const
 }
 
 FloatSize SVGSVGElement::currentViewportSizeExcludingZoom() const
+{
+    // The cache is only flushed from the LBSE renderers (RenderSVGRoot / RenderSVGViewportContainer),
+    // so only serve cached values when LBSE is active. The legacy engine always recomputes.
+    if (!document().settings().layerBasedSVGEngineEnabled())
+        return computeCurrentViewportSizeExcludingZoom();
+
+    if (!m_cachedViewportSizeExcludingZoom)
+        m_cachedViewportSizeExcludingZoom = computeCurrentViewportSizeExcludingZoom();
+    return *m_cachedViewportSizeExcludingZoom;
+}
+
+FloatSize SVGSVGElement::viewportSizeForLengthResolution() const
+{
+    auto compute = [&]() -> FloatSize {
+        auto viewBoxSize = currentViewBoxRect().size();
+        return viewBoxSize.isEmpty() ? currentViewportSizeExcludingZoom() : viewBoxSize;
+    };
+
+    if (!document().settings().layerBasedSVGEngineEnabled())
+        return compute();
+
+    if (!m_cachedViewportSizeForLengthResolution)
+        m_cachedViewportSizeForLengthResolution = compute();
+    return *m_cachedViewportSizeForLengthResolution;
+}
+
+FloatSize SVGSVGElement::computeCurrentViewportSizeExcludingZoom() const
 {
     FloatSize viewportSize;
 
@@ -706,7 +829,7 @@ AffineTransform SVGSVGElement::viewBoxToViewTransform(float viewWidth, float vie
 
         // If we synthesized a viewBox (no explicit viewBox but embedded through SVGImage),
         // we should also synthesize preserveAspectRatio="none" to allow stretching.
-        if (viewBox().isEmpty() && !currentViewBox.isEmpty() && isEmbeddedThroughSVGImage(*this)) {
+        if (hasSynthesizedViewBoxForSVGImage()) {
             auto preserveAspectRatio = SVGPreserveAspectRatioValue(SVGPreserveAspectRatioValue::SVG_PRESERVEASPECTRATIO_NONE, SVGPreserveAspectRatioValue::SVG_MEETORSLICE_MEET);
             return SVGFitToViewBox::viewBoxToViewTransform(currentViewBox, preserveAspectRatio, viewWidth, viewHeight);
         }
@@ -741,7 +864,7 @@ SVGSVGElement* SVGSVGElement::findRootAnchor(StringView fragmentIdentifier) cons
     return nullptr;
 }
 
-bool SVGSVGElement::scrollToFragment(StringView fragmentIdentifier)
+bool SVGSVGElement::setViewForFragment(StringView fragmentIdentifier)
 {
     CheckedPtr renderer = downcast<RenderLayerModelObject>(this->renderer());
 
@@ -809,7 +932,7 @@ bool SVGSVGElement::scrollToFragment(StringView fragmentIdentifier)
     return false;
 }
 
-void SVGSVGElement::resetScrollAnchor()
+void SVGSVGElement::resetViewToDefault()
 {
     if (!m_useCurrentView && m_currentViewFragmentIdentifier.isEmpty())
         return;
@@ -887,11 +1010,12 @@ RefPtr<Element> SVGSVGElement::getElementById(const AtomString& id)
         return nullptr;
     }
 
-    RefPtr element = protect(treeScope())->getElementById(id);
+    Ref scope = treeScope();
+    RefPtr element = scope->getElementById(id);
     if (element && element->isDescendantOf(*this))
         return element;
-    if (protect(treeScope())->containsMultipleElementsWithId(id)) {
-        for (auto& element : *treeScope().getAllElementsById(id)) {
+    if (scope->containsMultipleElementsWithId(id)) {
+        for (auto& element : *scope->getAllElementsById(id)) {
             if (element->isDescendantOf(*this))
                 return element.ptr();
         }

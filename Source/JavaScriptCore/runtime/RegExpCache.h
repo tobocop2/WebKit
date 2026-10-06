@@ -51,6 +51,7 @@ class RegExpCache final : private WeakHandleOwner {
 public:
     RegExpCache() = default;
     void deleteAllCode();
+    void deleteCodeNotUsedInCurrentFullCollectionCycle(VM&);
 
     RegExp* ensureEmptyRegExp(VM& vm)
     {
@@ -73,11 +74,12 @@ private:
     RegExp* ensureEmptyRegExpSlow(VM&);
 
     RegExp* lookupOrCreate(VM&, const WTF::String& patternString, OptionSet<Yarr::Flags>);
+    template<typename Create> RegExp* lookupOrCreate(VM&, const WTF::String& patternString, OptionSet<Yarr::Flags>, const Create&);
     void addToStrongCache(RegExp*);
 
     unsigned m_nextEntryInStrongCache { 0 };
     Lock m_lock;
-    RegExpCacheMap m_weakCache; // Holds all regular expressions currently live.
+    RegExpCacheMap m_weakCache WTF_GUARDED_BY_LOCK(m_lock); // Holds all regular expressions currently live.
     std::array<RegExp*, maxStrongCacheableEntries> m_strongCache { }; // Holds a select few regular expressions that have compiled and executed
     RegExp* m_emptyRegExp { nullptr };
 };

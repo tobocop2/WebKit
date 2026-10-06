@@ -40,11 +40,13 @@
 #include "WebPageProxy.h"
 #include <WebCore/DiagnosticLoggingClient.h>
 #include <WebCore/DiagnosticLoggingKeys.h>
+#include <WebCore/Page.h>
 #include <wtf/Borrow.h>
 #include <wtf/DebugUtilities.h>
 #include <wtf/HexNumber.h>
 #include <wtf/SetForScope.h>
 #include <wtf/text/StringBuilder.h>
+#include <wtf/text/TextStream.h>
 
 #if PLATFORM(COCOA)
 #include <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
@@ -227,7 +229,7 @@ void WebBackForwardList::goToItem(WebBackForwardListItem& item)
 
     // If the target item wasn't even in the list, there's nothing else to do.
     if (targetIndex == notFound) {
-        LOG(BackForward, "(Back/Forward) WebBackForwardList %p could not go to item %s (%s) because it was not found", this, item.identifier().toString().utf8().data(), item.url().utf8().data());
+        LOG_WITH_STREAM(BackForward, stream << "(Back/Forward) WebBackForwardList "_s << this << " could not go to item "_s << item.identifier().toString() << " ("_s << item.url() << ") because it was not found"_s);
         return;
     }
 
@@ -263,7 +265,7 @@ void WebBackForwardList::goToItem(WebBackForwardListItem& item)
 
     m_currentIndex = targetIndex;
 
-    LOG(BackForward, "(Back/Forward) WebBackForwardList %p going to item %s, is now at index %zu", this, item.identifier().toString().utf8().data(), targetIndex);
+    LOG_WITH_STREAM(BackForward, stream << "(Back/Forward) WebBackForwardList "_s << this << " going to item "_s << item.identifier().toString() << ", is now at index "_s << targetIndex);
     page->didChangeBackForwardList(nullptr, WTF::move(removedItems));
 }
 
@@ -759,8 +761,12 @@ void WebBackForwardList::backForwardAddItem(IPC::Connection& connection, Ref<Fra
         backForwardAddItemShared(connection, WTF::move(navigatedFrameState), webPageProxy->didLoadWebArchive() ? LoadedWebArchive::Yes : LoadedWebArchive::No);
 }
 
-static bool messageCheckItemURLs(Ref<FrameState>& frameState, Ref<WebProcessProxy>& process)
+static constexpr unsigned maxFrameStateDepthForMessageCheck = WebCore::Page::maxFrameDepth;
+
+static bool messageCheckItemURLs(Ref<FrameState>& frameState, Ref<WebProcessProxy>& process, unsigned depth = 0)
 {
+    MESSAGE_CHECK_WITH_RETURN_VALUE(process, depth < maxFrameStateDepthForMessageCheck, false);
+
     URL itemURL { frameState->urlString };
     URL itemOriginalURL { frameState->originalURLString };
 #if PLATFORM(COCOA)
@@ -775,6 +781,11 @@ static bool messageCheckItemURLs(Ref<FrameState>& frameState, Ref<WebProcessProx
 #if PLATFORM(COCOA)
     }
 #endif
+
+    for (auto& child : frameState->children) {
+        if (!messageCheckItemURLs(child, process, depth + 1))
+            return false;
+    }
     return true;
 }
 
@@ -849,7 +860,7 @@ void WebBackForwardList::backForwardUpdateItem(IPC::Connection& connection, Ref<
         return;
 
     if (RefPtr webPageProxy = m_page.get()) {
-        ASSERT(webPageProxy->identifier() == item->pageID() && frameState->itemID == item->identifier());
+        MESSAGE_CHECK(process, webPageProxy->identifier() == item->pageID() && frameState->itemID == item->identifier());
 
         auto oldFrameID = frameItem->frameID();
         frameItem->updateFrameStatePayload(WTF::move(frameState));
@@ -877,17 +888,17 @@ void WebBackForwardList::replaceFrameStateForChild(WebBackForwardListItem& item,
     targetFrameItem->updateFrameStatePayload(WTF::move(newFrameState));
 }
 
-void WebBackForwardList::backForwardGoToItem(BackForwardItemIdentifier itemID, CompletionHandler<void(const WebBackForwardListCounts&)>&& completionHandler)
+void WebBackForwardList::backForwardGoToItem(IPC::Connection& connection, BackForwardItemIdentifier itemID)
 {
     // On process swap, we tell the previous process to ignore the load, which causes it to restore its current back forward item to its previous
     // value. Since the load is really going on in a new provisional process, we want to ignore such requests from the committed process.
     // Any real new load in the committed process would have cleared m_provisionalPage.
     if (RefPtr webPageProxy = m_page.get()) {
         if (webPageProxy->hasProvisionalPage())
-            return completionHandler(rawCounts());
+            return;
     }
 
-    backForwardGoToItemShared(itemID, WTF::move(completionHandler));
+    backForwardGoToItemShared(connection, itemID);
 }
 
 void WebBackForwardList::backForwardListContainsItem(WebCore::BackForwardItemIdentifier itemID, CompletionHandler<void(bool)>&& completionHandler)
@@ -895,17 +906,33 @@ void WebBackForwardList::backForwardListContainsItem(WebCore::BackForwardItemIde
     completionHandler(itemForID(itemID));
 }
 
-void WebBackForwardList::backForwardGoToItemShared(BackForwardItemIdentifier itemID, CompletionHandler<void(const WebBackForwardListCounts&)>&& completionHandler)
+void WebBackForwardList::backForwardGoToItemShared(IPC::Connection& connection, BackForwardItemIdentifier itemID)
 {
     if (RefPtr webPageProxy = m_page.get())
-        MESSAGE_CHECK_COMPLETION(Ref { webPageProxy->legacyMainFrameProcess() }, !WebKit::isInspectorPage(*webPageProxy), completionHandler(rawCounts()));
+        MESSAGE_CHECK_BASE(!WebKit::isInspectorPage(*webPageProxy), connection);
 
     RefPtr item = itemForID(itemID);
     if (!item)
-        return completionHandler(rawCounts());
+        return;
+
+    // A stale/duplicate BackForwardGoToItem from an earlier split-traversal leg can arrive after the
+    // index already advanced to a later leg's destination; ignore an index move opposite to the
+    // in-flight traversal direction so it cannot clobber the current item back (webkit.org/b/318728).
+    if (RefPtr page = m_page.get(); page && m_currentIndex) {
+        if (int32_t direction = page->inFlightTraversalDirection()) {
+            size_t targetIndex = m_entries.findIf([&](auto& entry) {
+                return entry.ptr() == item.get();
+            });
+            if (targetIndex != notFound) {
+                bool movesForward = targetIndex > *m_currentIndex;
+                bool movesBackward = targetIndex < *m_currentIndex;
+                if ((direction < 0 && movesForward) || (direction > 0 && movesBackward))
+                    return;
+            }
+        }
+    }
 
     goToItem(*item);
-    completionHandler(rawCounts());
 }
 
 void WebBackForwardList::backForwardAllItems(FrameIdentifier frameID, CompletionHandler<void(Vector<Ref<FrameState>>&&)>&& completionHandler)
@@ -937,7 +964,7 @@ void WebBackForwardList::backForwardListCounts(CompletionHandler<void(WebBackFor
     completionHandler(rawCounts());
 }
 
-FrameState* WebBackForwardList::findFrameStateInItem(WebCore::BackForwardItemIdentifier itemID, WebCore::FrameIdentifier parentFrameID, WebCore::FrameIdentifier childFrameID, uint64_t childFrameIndex)
+FrameState* WebBackForwardList::findFrameStateInItem(WebCore::BackForwardItemIdentifier itemID, WebCore::FrameIdentifier parentFrameID, WebCore::FrameIdentifier childFrameID, uint64_t childFrameIndex, const String& childFrameName)
 {
     RefPtr targetItem = itemForID(itemID);
     if (!targetItem)
@@ -955,11 +982,17 @@ FrameState* WebBackForwardList::findFrameStateInItem(WebCore::BackForwardItemIde
 
     RefPtr childFrameItem = parentFrameItem->childItemForFrameID(childFrameID);
     if (!childFrameItem) {
-        // The identifier is absent after session restore or cross-site child-frame recreation; fall back to position.
-        childFrameItem = parentFrameItem->childItemAtIndex(childFrameIndex);
+        // The identifier is absent after session restore or cross-site child-frame recreation
+        if (childFrameName.isEmpty())
+            childFrameItem = parentFrameItem->childItemAtIndex(childFrameIndex);
+        else
+            childFrameItem = parentFrameItem->childItemForFrameName(childFrameName);
+        if (!childFrameItem)
+            return nullptr;
+
+        if (!childFrameItem->frameID())
+            childFrameItem->updateFrameID(childFrameID);
     }
-    if (!childFrameItem)
-        return nullptr;
 
     return &childFrameItem->frameState();
 }
@@ -1081,17 +1114,12 @@ WebCore::BackForwardFrameItemIdentifier generateBackForwardFrameItemIdentifier()
 // rdar://168139823 is the task of doing a productionized version of WebKit Swift logging
 void doLog(const WTF::String& msg)
 {
-    LOG(BackForward, "%s", msg.utf8().data());
+    LOG_WITH_STREAM(BackForward, stream << msg);
 }
 
 void doLoadingReleaseLog(const WTF::String& msg)
 {
-    RELEASE_LOG(Loading, "%s", msg.utf8().data());
-}
-// rdar://168139740 is the task of doing a productionized Swift MESSAGE_CHECK
-void messageCheckFailed(Ref<WebKit::WebProcessProxy> process)
-{
-    MESSAGE_CHECK_BASE(false, process->connection());
+    RELEASE_LOG(Loading, "%s", msg.utf8());
 }
 
 // Workarounds for rdar://171011011
@@ -1109,7 +1137,7 @@ void setFrameStateBackForwardItemIdentifier(WebKit::FrameState& frameState, cons
 
 Ref<WebKit::WebBackForwardListItem> createItemFromState(const WebKit::BackForwardListItemState& itemState, WebKit::WebPageProxyIdentifier pageIdentifier)
 {
-    Ref stateCopy = itemState.frameState->copy();
+    Ref stateCopy = protect(itemState.frameState)->copy();
     setBackForwardItemIdentifiers(stateCopy, WebCore::BackForwardItemIdentifier::generate());
     return WebKit::WebBackForwardListItem::create(WTF::move(stateCopy), pageIdentifier, itemState.navigatedFrameID);
 }

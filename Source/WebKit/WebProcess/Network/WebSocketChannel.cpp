@@ -67,8 +67,8 @@ Ref<NetworkSendQueue> WebSocketChannel::createMessageQueue(Document& document, W
         if (!channel)
             return;
         auto data = utf8String.span();
-        channel->notifySendFrame(WebSocketFrame::OpCode::OpCodeText, byteCast<uint8_t>(data));
-        channel->sendMessageInternal(Messages::NetworkSocketChannel::SendString { byteCast<uint8_t>(data) }, utf8String.length());
+        channel->notifySendFrame(WebSocketFrame::OpCode::OpCodeText, asByteSpan(data));
+        channel->sendMessageInternal(Messages::NetworkSocketChannel::SendString { asByteSpan(data) }, utf8String.length());
     }, [weakChannel = WeakPtr { channel }](auto span) {
         RefPtr channel = weakChannel.get();
         if (!channel)
@@ -216,7 +216,7 @@ template<typename T> void WebSocketChannel::sendMessageInternal(T&& message, siz
     sendWithAsyncReply(std::forward<T>(message), WTF::move(completionHandler));
 }
 
-void WebSocketChannel::send(CString&& message)
+void WebSocketChannel::send(UTF8CString&& message)
 {
     if (!increaseBufferedAmount(message.length()))
         return;
@@ -224,7 +224,7 @@ void WebSocketChannel::send(CString&& message)
     m_messageQueue->enqueue(WTF::move(message));
 }
 
-void WebSocketChannel::send(const JSC::ArrayBuffer& binaryData, unsigned byteOffset, unsigned byteLength)
+void WebSocketChannel::send(const JSC::ArrayBuffer& binaryData, size_t byteOffset, size_t byteLength)
 {
     if (!increaseBufferedAmount(byteLength))
         return;

@@ -256,9 +256,8 @@ void AuthenticatorManager::enableNativeSupport()
 void AuthenticatorManager::clearStateAsync()
 {
     RunLoop::mainSingleton().dispatch([weakThis = WeakPtr { *this }] {
-        if (!weakThis)
-            return;
-        weakThis->clearState();
+        if (RefPtr protectedThis = weakThis)
+            protectedThis->clearState();
     });
 }
 
@@ -375,7 +374,7 @@ void AuthenticatorManager::requestPin(uint64_t retries, CompletionHandler<void(c
 
     auto callback = [weakThis = WeakPtr { *this }, completionHandler = WTF::move(completionHandler)] (const WTF::String& pin) mutable {
         RefPtr protectedThis = weakThis.get();
-        if (!protectedThis) {
+        if (!protectedThis || !protectedThis->m_pendingRequest) {
             completionHandler(nullString());
             return;
         }
@@ -404,7 +403,7 @@ void AuthenticatorManager::requestNewPin(uint64_t minLength, CompletionHandler<v
 
     auto callback = [weakThis = WeakPtr { *this }, completionHandler = WTF::move(completionHandler)] (const WTF::String& pin) mutable {
         RefPtr protectedThis = weakThis.get();
-        if (!protectedThis) {
+        if (!protectedThis || !protectedThis->m_pendingRequest) {
             completionHandler(nullString());
             return;
         }
@@ -638,9 +637,8 @@ void AuthenticatorManager::dispatchPanelClientCall(Function<void(const API::WebA
     // Call delegates in the next run loop to prevent clients' reentrance that would potentially modify the state
     // of the current run loop in unexpected ways.
     RunLoop::mainSingleton().dispatch([weakPanel = WTF::move(weakPanel), call = WTF::move(call)] () {
-        if (!weakPanel)
-            return;
-        call(*weakPanel);
+        if (RefPtr panel = weakPanel)
+            call(*panel);
     });
 }
 

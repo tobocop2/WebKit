@@ -109,7 +109,7 @@ public:
     // Alt-Svc
     const String& alternativeServicesStorageFile() const LIFETIME_BOUND { return m_alternativeServicesStorageFile; }
     void setAlternativeServicesStorageFile(const String& cacheFile) { m_alternativeServicesStorageFile = cacheFile; }
-    void clearAlternativeServicesStorageFile();
+    WEBCORE_EXPORT void clearAlternativeServicesStorageFile();
 
     // Proxy
     const CurlProxySettings& proxySettings() const LIFETIME_BOUND { return m_proxySettings; }
@@ -207,7 +207,7 @@ public:
     }
 
     void append(const char* str) { m_list = curl_slist_append(m_list, str); }
-    void append(const String& str) { append(str.latin1().data()); }
+    void append(const String& str) { append(str.utf8().legacyCStringPointer()); }
 
 private:
     struct curl_slist* m_list { nullptr };
@@ -311,7 +311,7 @@ public:
     std::optional<CertificateInfo> certificateInfo() const;
 
     // socket
-    Expected<curl_socket_t, CURLcode> getActiveSocket();
+    std::expected<curl_socket_t, CURLcode> getActiveSocket();
     CURLcode send(const uint8_t*, size_t, size_t&);
     CURLcode receive(uint8_t*, size_t, size_t&);
 
@@ -328,6 +328,7 @@ private:
     };
 
     void enableRequestHeaders();
+    void enableProxyRequestHeaders();
 
     static CURLcode willSetupSslCtxCallback(CURL*, void* sslCtx, void* userData);
     CURLcode willSetupSslCtx(void* sslCtx);
@@ -340,6 +341,7 @@ private:
     URL m_url;
     CurlSList m_localhostAlias;
     CurlSList m_requestHeaders;
+    CurlSList m_proxyRequestHeaders;
 
     std::unique_ptr<CurlSSLVerifier> m_sslVerifier;
     std::unique_ptr<TLSConnectionInfo> m_tlsConnectionInfo;

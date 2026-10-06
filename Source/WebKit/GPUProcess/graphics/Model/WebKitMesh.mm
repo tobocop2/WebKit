@@ -167,6 +167,8 @@ static MTLVertexFormat toMetal(WebCore::WebGPU::VertexFormat format)
         return MTLVertexFormatInt3;
     case WebCore::WebGPU::VertexFormat::Sint32x4:
         return MTLVertexFormatInt4;
+    case WebCore::WebGPU::VertexFormat::Snorm1010102:
+        return MTLVertexFormatInt1010102Normalized;
     case WebCore::WebGPU::VertexFormat::Unorm1010102:
         return MTLVertexFormatUInt1010102Normalized;
     case WebCore::WebGPU::VertexFormat::Unorm8x4Bgra:
@@ -231,6 +233,22 @@ static MTLIndexType toMetal(WebModel::IndexType indexType)
         return MTLIndexTypeUInt16;
     case WebModel::IndexType::UInt32:
         return MTLIndexTypeUInt32;
+    }
+}
+
+static MTLVertexStepFunction toMetal(WebModel::VertexStepFunction stepFunction)
+{
+    switch (stepFunction) {
+    case WebModel::VertexStepFunction::Constant:
+        return MTLVertexStepFunctionConstant;
+    case WebModel::VertexStepFunction::PerVertex:
+        return MTLVertexStepFunctionPerVertex;
+    case WebModel::VertexStepFunction::PerInstance:
+        return MTLVertexStepFunctionPerInstance;
+    case WebModel::VertexStepFunction::PerPatch:
+        return MTLVertexStepFunctionPerPatch;
+    case WebModel::VertexStepFunction::PerPatchControlPoint:
+        return MTLVertexStepFunctionPerPatchControlPoint;
     }
 }
 
@@ -605,7 +623,7 @@ static NSArray<WKBridgeVertexLayout *> *convert(const Vector<VertexLayout>& layo
 
     NSMutableArray<WKBridgeVertexLayout *> *result = [NSMutableArray array];
     for (const auto& layout : layouts)
-        [result addObject:[WebKit::allocWKBridgeVertexLayoutInstance() initWithBufferIndex:layout.bufferIndex bufferOffset:layout.bufferOffset bufferStride:layout.bufferStride]];
+        [result addObject:[WebKit::allocWKBridgeVertexLayoutInstance() initWithBufferIndex:layout.bufferIndex bufferOffset:layout.bufferOffset bufferStride:layout.bufferStride stepFunction:toMetal(layout.stepFunction) stepRate:layout.stepRate]];
 
     return result;
 }

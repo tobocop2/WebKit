@@ -31,6 +31,7 @@
 #import <WebCore/ResourceLoadPriority.h>
 #import <wtf/TZoneMallocInlines.h>
 #import <wtf/cocoa/VectorCocoa.h>
+#import <wtf/text/CString.h>
 
 #if PLATFORM(COCOA) && HAVE(WK_SECURE_CODING_NSURLREQUEST)
 
@@ -119,7 +120,7 @@ static bool isReservedProtocolPropertyKeyPrefix(NSString *key)
 
 static bool isTypedAllowlistKey(NSString *key)
 {
-    static NSSet<NSString *> *allowlist = [[NSSet alloc] initWithArray:@[
+    static NeverDestroyed<RetainPtr<NSSet<NSString *>>> allowlist = adoptNS([[NSSet alloc] initWithArray:@[
         @"_kCFHTTPCookiePolicyPropertyIsTopLevelNavigation",
         @"kCFURLRequestAllowAllPOSTCaching",
         @"_kCFHTTPCookiePolicyPropertySiteForCookies",
@@ -132,8 +133,8 @@ static bool isTypedAllowlistKey(NSString *key)
         @"maximumRequestCount",
         @"com.apple.ap.pc.proxy-is-recursive",
         @"requestType",
-    ]];
-    return [allowlist containsObject:key];
+    ]]);
+    return [allowlist.get() containsObject:key];
 }
 
 static void populateAppProperties(NSDictionary *protocolPropertiesDict, ProtocolProperties& props)
@@ -143,8 +144,13 @@ static void populateAppProperties(NSDictionary *protocolPropertiesDict, Protocol
         if (!key)
             continue;
 
-        if (isReservedProtocolPropertyKeyPrefix(key.get()) || isTypedAllowlistKey(key.get())) {
-            RELEASE_LOG_ERROR(API, "NSURLRequest property key '%@' not allowed. Skipping this property.", key.get());
+        // Keys represented in the typed fields are handled elsewhere.
+        // Encountering them here is expected, and skipping them prevents errant logging.
+        if (isTypedAllowlistKey(key.get()))
+            continue;
+
+        if (isReservedProtocolPropertyKeyPrefix(key.get())) {
+            RELEASE_LOG_INFO_FORWARDABLE(API, CoreIpcNsurlRequestPropertyKeyNotAllowed, UTF8CString { key });
             continue;
         }
 

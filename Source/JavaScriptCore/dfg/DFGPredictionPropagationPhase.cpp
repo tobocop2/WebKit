@@ -202,10 +202,8 @@ private:
         case UInt32ToNumber: {
             if (node->canSpeculateInt32(m_pass))
                 changed |= mergePrediction(SpecInt32Only);
-            else if (enableInt52())
-                changed |= mergePrediction(SpecInt52Any);
             else
-                changed |= mergePrediction(SpecBytecodeNumber);
+                changed |= mergePrediction(SpecInt52Any);
             break;
         }
 
@@ -619,18 +617,14 @@ private:
                 break;
             case Array::Uint32Array: {
                 if (isInt32SpeculationForArithmetic(node->getHeapPrediction()) && node->op() == GetByVal) {
-                    if (node->op() == GetByVal && arrayMode.isOutOfBounds())
+                    if (arrayMode.isOutOfBounds())
                         changed |= mergePrediction(SpecInt32Only | SpecOther);
                     else
                         changed |= mergePrediction(SpecInt32Only);
-                } else if (!(node->op() == GetByVal && arrayMode.isOutOfBounds()) && enableInt52())
+                } else if (!(node->op() == GetByVal && arrayMode.isOutOfBounds()))
                     changed |= mergePrediction(SpecInt52Any);
-                else {
-                    if (node->op() == GetByVal && arrayMode.isOutOfBounds())
-                        changed |= mergePrediction(SpecInt32Only | SpecAnyIntAsDouble | SpecOther);
-                    else
-                        changed |= mergePrediction(SpecInt32Only | SpecAnyIntAsDouble);
-                }
+                else
+                    changed |= mergePrediction(SpecInt32Only | SpecAnyIntAsDouble | SpecOther);
                 break;
             }
             case Array::Int8Array:
@@ -945,6 +939,13 @@ private:
             break;
         }
 
+        case BufferWrite: {
+            DataViewData data = node->bufferAccessData();
+            if (data.isFloatingPoint)
+                m_graph.voteNode(m_graph.varArgChild(node, 2), VoteValue, weight);
+            break;
+        }
+
         case MovHint:
             // Ignore these since they have no effect on in-DFG execution.
             break;
@@ -1006,7 +1007,7 @@ private:
         switch (m_currentNode->op()) {
         case JSConstant: {
             SpeculatedType type = speculationFromValue(m_currentNode->asJSValue());
-            if (type == SpecAnyIntAsDouble && enableInt52()) 
+            if (type == SpecAnyIntAsDouble)
                 type = int52AwareSpeculationFromValue(m_currentNode->asJSValue());
             setPrediction(type);
             break;
@@ -1041,6 +1042,7 @@ private:
         case ArraySplice:
         case RegExpExec:
         case RegExpExecNonGlobalOrSticky:
+        case RegExpExecSticky:
         case RegExpTest:
         case RegExpTestInline:
         case RegExpMatchFast:
@@ -1058,7 +1060,6 @@ private:
         case GetByIdWithThisMegamorphic:
         case GetByIdDirect:
         case GetByIdDirectFlush:
-        case TryGetById:
         case GetByValWithThis:
         case GetByValWithThisMegamorphic:
         case GetByOffset:
@@ -1080,10 +1081,12 @@ private:
         case TailCallForwardVarargsInlinedCaller:
         case CallWasm:
         case TailCallInlinedCallerWasm:
+        case CallFFI:
         case CallCustomAccessorGetter:
         case GetGlobalVar:
         case GetGlobalLexicalVariable:
         case GetClosureVar:
+        case GetLazyClosureVar:
         case GetInternalField:
         case GetFromArguments:
         case LoadMapValue:
@@ -1101,8 +1104,33 @@ private:
         case ExtractValueFromWeakMapGet: 
         case DataViewGetInt:
         case DataViewGetFloat:
-        case DateGetInt32OrNaN: {
+        case DateGetInt32OrNaN:
+        case DateGetMilliseconds: {
             setPrediction(m_currentNode->getHeapPrediction());
+            break;
+        }
+
+        case BufferReadInt: {
+            DataViewData data = m_currentNode->bufferAccessData();
+            switch (data.byteSize) {
+            case 1:
+            case 2:
+                setPrediction(SpecInt32Only);
+                break;
+            case 4:
+                setPrediction(data.isSigned ? SpecInt32Only : SpecInt52Any);
+                break;
+            case 8:
+                setPrediction(SpecHeapBigInt);
+                break;
+            default:
+                RELEASE_ASSERT_NOT_REACHED();
+            }
+            break;
+        }
+
+        case BufferReadFloat: {
+            setPrediction(SpecFullDouble);
             break;
         }
 
@@ -1249,6 +1277,7 @@ private:
         case StringSubstr:
         case ToUpperCase:
         case ToLowerCase:
+        case StringTrim:
         case ArrayJoin:
             setPrediction(SpecString);
             break;
@@ -1323,7 +1352,6 @@ private:
         case IsCallable:
         case IsConstructor:
         case IsCellWithType:
-        case IsTypedArrayView:
         case ArrayIsArray:
         case HasStructureWithFlags:
         case MatchStructure: {
@@ -1336,6 +1364,7 @@ private:
             break;
         }
         case MapGet:
+        case DateGetStorage:
         case GetButterfly:
         case GetIndexedPropertyStorage:
         case AllocatePropertyStorage:
@@ -1399,6 +1428,10 @@ private:
 
         case CreatePromise:
             setPrediction(SpecPromiseObject);
+            break;
+
+        case OpenAsyncFromSyncIterator:
+            setPrediction(SpecObjectOther);
             break;
 
         case NewResolvedPromise:
@@ -1542,7 +1575,6 @@ private:
         }
 
         case FiatInt52: {
-            RELEASE_ASSERT(enableInt52());
             setPrediction(SpecInt52Any);
             break;
         }
@@ -1810,6 +1842,7 @@ private:
         case SetArgumentDefinitely:
         case SetArgumentMaybe:
         case SetFunctionName:
+        case EnqueueAsyncGeneratorDriver:
         case CheckStructure:
         case CheckIsConstant:
         case CheckNotEmpty:
@@ -1852,6 +1885,7 @@ private:
         case FilterSetPrivateBrandStatus:
         case ClearCatchLocals:
         case DataViewSet:
+        case BufferWrite:
         case InvalidationPoint:
         case ObjectAssign:
         case ResolvePromiseFirstResolving:

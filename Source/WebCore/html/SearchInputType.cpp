@@ -47,6 +47,7 @@
 #include "RenderObjectInlines.h"
 #include "RenderSearchField.h"
 #include "ScriptDisallowedScope.h"
+#include "Settings.h"
 #include "ShadowRoot.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "StylePreferredSize.h"
@@ -270,8 +271,7 @@ void SearchInputType::attributeChanged(const QualifiedName& name)
 RenderPtr<RenderElement> SearchInputType::createInputRenderer(Style::ComputedStyle&& style)
 {
     ASSERT(element());
-    // FIXME: https://github.com/llvm/llvm-project/pull/142471 Moving style is not unsafe.
-    SUPPRESS_UNCOUNTED_ARG return createRenderer<RenderSearchField>(*protect(element()), WTF::move(style));
+    return createRenderer<RenderSearchField>(*protect(element()), WTF::move(style));
 }
 
 const AtomString& SearchInputType::formControlType() const
@@ -299,10 +299,12 @@ void SearchInputType::createShadowSubtree()
     ASSERT(container);
     ASSERT(textWrapper);
 
-    Ref resultsButton = SearchFieldResultsButtonElement::create(document);
-    container->insertBefore(resultsButton, textWrapper.copyRef());
-    updateResultButtonPseudoType(resultsButton, element()->maxResults());
-    m_resultsButton = WTF::move(resultsButton);
+    if (document->settings().searchInputResultsAttributeEnabled()) {
+        Ref resultsButton = SearchFieldResultsButtonElement::create(document);
+        container->insertBefore(resultsButton, textWrapper.copyRef());
+        updateResultButtonPseudoType(resultsButton, element()->maxResults());
+        m_resultsButton = WTF::move(resultsButton);
+    }
 
     Ref cancelButton = SearchFieldCancelButtonElement::create(document);
     container->insertBefore(cancelButton, protect(textWrapper->nextSibling()));

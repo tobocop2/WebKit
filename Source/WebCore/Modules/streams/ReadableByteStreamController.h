@@ -73,7 +73,7 @@ public:
 
     void runCancelSteps(JSDOMGlobalObject&, JSC::JSValue, Function<void(std::optional<JSC::JSValue>&&)>&&);
     void runPullSteps(JSDOMGlobalObject&, Ref<ReadableStreamReadRequest>&&);
-    void NODELETE runReleaseSteps();
+    void runReleaseSteps();
 
     void storeError(JSDOMGlobalObject&, JSC::JSValue);
     JSC::JSValue NODELETE storedError() const;
@@ -93,7 +93,7 @@ public:
     void error(JSDOMGlobalObject&, JSC::JSValue);
 
     enum class ShouldThrowOnError : bool { No, Yes };
-    bool close(JSDOMGlobalObject&, ShouldThrowOnError = ShouldThrowOnError::Yes);
+    bool close(JSDOMGlobalObject&, ShouldThrowOnError);
     void closeAndRespondToPendingPullIntos(JSDOMGlobalObject&);
     size_t pullFromBytes(JSDOMGlobalObject&, JSC::ArrayBuffer&, size_t offset);
     ExceptionOr<void> enqueue(JSDOMGlobalObject&, JSC::ArrayBufferView&);
@@ -142,7 +142,7 @@ private:
     void invalidateByobRequest();
     Vector<PullIntoDescriptor> processPullIntoDescriptorsUsingQueue();
     void enqueueDetachedPullIntoToQueue(JSDOMGlobalObject&, PullIntoDescriptor&);
-    PullIntoDescriptor NODELETE shiftPendingPullInto();
+    PullIntoDescriptor shiftPendingPullInto();
     void enqueueChunkToQueue(Ref<JSC::ArrayBuffer>&&, size_t byteOffset, size_t byteLength);
     void enqueueClonedChunkToQueue(JSDOMGlobalObject&, JSC::ArrayBuffer&, size_t byteOffset, size_t byteLength);
     void callPullIfNeeded(JSDOMGlobalObject&);

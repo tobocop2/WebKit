@@ -40,6 +40,7 @@
 #import "CocoaAccessibilityConstants.h"
 #import "DeprecatedGlobalSettings.h"
 #import "DocumentView.h"
+#import "FrameTree.h"
 #import "LocalFrameInlines.h"
 #import "LocalFrameView.h"
 #import "RenderObject.h"
@@ -47,6 +48,7 @@
 #import "WebAccessibilityObjectWrapperMac.h"
 #import <pal/spi/cocoa/NSAccessibilitySPI.h>
 #import <pal/spi/mac/HIServicesSPI.h>
+#import <wtf/RuntimeApplicationChecks.h>
 #import <wtf/Scope.h>
 #import <wtf/StdLibExtras.h>
 #import <wtf/cocoa/TypeCastsCocoa.h>
@@ -525,6 +527,13 @@ void AXObjectCache::postTextSelectionChangePlatformNotification(AccessibilityObj
 
     processQueuedIsolatedNodeUpdates();
 
+    // If the selection landed on a stitched-away text run, report the change on the stitch-group
+    // representative (the element actually exposed in the tree) rather than the removed member,
+    // so the SelectedTextChanged notification that VoiceOver uses to move focus during caret
+    // navigation targets an element present in its parent's children. Mirrors the
+    // AXUIElementForTextMarker redirect.
+    axObject = downcast<AccessibilityObject>(axObject->stitchRepresentativeOrSelf());
+
     auto intent = inferDirectionFromIntent(*axObject, originalIntent, selection);
 
     auto userInfo = adoptNS([[NSMutableDictionary alloc] initWithCapacity:5]);
@@ -572,6 +581,28 @@ void AXObjectCache::postTextSelectionChangePlatformNotification(AccessibilityObj
         if (root->wrapper() != axObject->wrapper())
             AXPostNotificationWithUserInfo(axObject->wrapper(), NSAccessibilitySelectedTextChangedNotification, userInfo.get());
     }
+
+#if ENABLE(ACCESSIBILITY_LOCAL_FRAME)
+    // A selection change inside an in-process (local) child frame is posted above only on that child
+    // frame's own web area and text control. VoiceOver tracks the document's text-selection context on
+    // the MAIN frame's web area, and a child frame's root web area does not connect to it through the
+    // ordinary parentObject() chain (AccessibilityScrollView::parentObject() returns nullptr for a root
+    // web area; the link exists only via crossFrameParentObject()). So VoiceOver never associates the
+    // child-frame selection change with the document and announces nothing when arrowing through a text
+    // field inside an iframe. Also post the notification on each ancestor frame's web area (up to the
+    // main frame's), reusing the same userInfo — its marker range and TextChangeElement carry their own
+    // (child) tree identifiers, so the announced selection resolves correctly cross-frame.
+    RefPtr document = this->document();
+    RefPtr frame = document ? document->frame() : nullptr;
+    for (RefPtr<Frame> ancestor = frame ? frame->tree().parent() : nullptr; ancestor; ancestor = ancestor->tree().parent()) {
+        if (RefPtr localAncestorFrame = dynamicDowncast<LocalFrame>(ancestor.get())) {
+            RefPtr ancestorDocument = localAncestorFrame->document();
+            CheckedPtr ancestorCache = ancestorDocument ? ancestorDocument->existingAXObjectCache() : nullptr;
+            if (RefPtr ancestorRoot = ancestorCache ? ancestorCache->rootWebArea() : nullptr)
+                AXPostNotificationWithUserInfo(ancestorRoot->wrapper(), NSAccessibilitySelectedTextChangedNotification, userInfo.get());
+        }
+    }
+#endif // ENABLE(ACCESSIBILITY_LOCAL_FRAME)
 }
 
 static void addTextMarkerForVisiblePosition(NSMutableDictionary *change, AXObjectCache& cache, const VisiblePosition& position)
@@ -772,12 +803,14 @@ bool AXObjectCache::clientSupportsIsolatedTree()
 }
 
 #if ENABLE(ACCESSIBILITY_ISOLATED_TREE)
-AXObjectCache::PlatformAXThreadSupport AXObjectCache::platformAXThreadSupport(ForceAXThreadMode forceAXThread)
+AXObjectCache::PlatformAXThreadSupport AXObjectCache::platformAXThreadSupport(AXThreadModePreconditions preconditions)
 {
     if (!(_AXSIsolatedTreeModeFunctionIsAvailable()))
         return PlatformAXThreadSupport::NotSupported;
 
-    if (forceAXThread == ForceAXThreadMode::No && !shouldForceAccessibilityEnabled()) {
+    // Only RequireClientAndSetting needs a client. The setting itself is enforced by
+    // transitionToAXThreadModeIfNeeded.
+    if (preconditions == AXThreadModePreconditions::RequireClientAndSetting && !shouldForceAccessibilityEnabled()) {
         if (!clientSupportsIsolatedTree())
             return PlatformAXThreadSupport::NotSupported;
 
@@ -801,10 +834,15 @@ AXObjectCache::PlatformAXThreadSupport AXObjectCache::platformAXThreadSupport(Fo
 
 AXObjectCache::DidStartThread AXObjectCache::platformStartSecondaryThread()
 {
+    AX_ASSERT(isInWebProcess());
+
     auto error = _AXUIElementUseSecondaryAXThread(true);
     // Starting the true AX thread doesn't work in testing contexts.
     // This is OK because we fake it with the AXThread class.
-    AX_ASSERT(error == kAXErrorSuccess || clientIsInTestMode());
+    //
+    // If there is no client (as is the case at some points during tests), we can't determine whether this
+    // failure is OK, so relax the assert for now. Ideally we can eliminate this relaxation in the future.
+    AX_ASSERT(error == kAXErrorSuccess || clientIsInTestMode() || _AXGetClientForCurrentRequestUntrusted() == kAXClientTypeNoActiveRequestFound);
     return error == kAXErrorSuccess ? DidStartThread::Yes : DidStartThread::No;
 }
 #endif // ENABLE(ACCESSIBILITY_ISOLATED_TREE)

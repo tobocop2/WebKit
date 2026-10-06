@@ -172,8 +172,12 @@ class TextureD3D : public TextureImpl, public angle::ObserverInterface
     GLint getLevelZeroWidth() const;
     GLint getLevelZeroHeight() const;
     virtual GLint getLevelZeroDepth() const;
+    virtual GLint getBaseLevelStorageDepth() const;
 
     GLint creationLevels(GLsizei width, GLsizei height, GLsizei depth) const;
+    bool isLevelComplete(int level) const;
+    bool isValidLevel(int level) const;
+    virtual bool isNonBaseLevelComplete(int level) const;
     virtual angle::Result initMipmapImages(const gl::Context *context) = 0;
     bool isBaseImageZeroSize() const;
     virtual bool isImageComplete(const gl::ImageIndex &index) const = 0;
@@ -204,6 +208,9 @@ class TextureD3D : public TextureImpl, public angle::ObserverInterface
 
     angle::Result releaseTexStorage(const gl::Context *context,
                                     const gl::TexLevelMask &copyStorageToImagesMask);
+    angle::Result releaseTexStorage(
+        const gl::Context *context,
+        const gl::CubeFaceArray<gl::TexLevelMask> &copyStorageToImagesMask);
 
     GLuint getBaseLevel() const { return mBaseLevel; }
 
@@ -224,7 +231,7 @@ class TextureD3D : public TextureImpl, public angle::ObserverInterface
 
     virtual angle::Result updateStorage(const gl::Context *context) = 0;
 
-    bool shouldUseSetData(const ImageD3D *image) const;
+    bool shouldUseSetData(const gl::ImageIndex &index, const ImageD3D *image) const;
 
     angle::Result generateMipmapUsingImages(const gl::Context *context, const GLuint maxLevel);
 
@@ -297,7 +304,7 @@ class TextureD3D_2D : public TextureD3D
                               const gl::ImageIndex &index,
                               GLenum internalFormat,
                               GLenum type,
-                              GLint sourceLevel,
+                              gl::LevelIndex sourceLevel,
                               bool unpackFlipY,
                               bool unpackPremultiplyAlpha,
                               bool unpackUnmultiplyAlpha,
@@ -305,7 +312,7 @@ class TextureD3D_2D : public TextureD3D
     angle::Result copySubTexture(const gl::Context *context,
                                  const gl::ImageIndex &index,
                                  const gl::Offset &destOffset,
-                                 GLint sourceLevel,
+                                 gl::LevelIndex sourceLevel,
                                  const gl::Box &sourceBox,
                                  bool unpackFlipY,
                                  bool unpackPremultiplyAlpha,
@@ -350,8 +357,7 @@ class TextureD3D_2D : public TextureD3D
     angle::Result updateStorage(const gl::Context *context) override;
     angle::Result initMipmapImages(const gl::Context *context) override;
 
-    bool isValidLevel(int level) const;
-    bool isLevelComplete(int level) const;
+    bool isNonBaseLevelComplete(int level) const override;
     bool isImageComplete(const gl::ImageIndex &index) const override;
 
     angle::Result updateStorageLevel(const gl::Context *context, int level);
@@ -430,7 +436,7 @@ class TextureD3D_Cube : public TextureD3D
                               const gl::ImageIndex &index,
                               GLenum internalFormat,
                               GLenum type,
-                              GLint sourceLevel,
+                              gl::LevelIndex sourceLevel,
                               bool unpackFlipY,
                               bool unpackPremultiplyAlpha,
                               bool unpackUnmultiplyAlpha,
@@ -438,7 +444,7 @@ class TextureD3D_Cube : public TextureD3D
     angle::Result copySubTexture(const gl::Context *context,
                                  const gl::ImageIndex &index,
                                  const gl::Offset &destOffset,
-                                 GLint sourceLevel,
+                                 gl::LevelIndex sourceLevel,
                                  const gl::Box &sourceBox,
                                  bool unpackFlipY,
                                  bool unpackPremultiplyAlpha,
@@ -481,7 +487,6 @@ class TextureD3D_Cube : public TextureD3D
     angle::Result updateStorage(const gl::Context *context) override;
     angle::Result initMipmapImages(const gl::Context *context) override;
 
-    bool isValidFaceLevel(int faceIndex, int level) const;
     bool isFaceLevelComplete(int faceIndex, int level) const;
     bool isCubeComplete() const;
     bool isImageComplete(const gl::ImageIndex &index) const override;
@@ -564,7 +569,7 @@ class TextureD3D_3D : public TextureD3D
                               const gl::ImageIndex &index,
                               GLenum internalFormat,
                               GLenum type,
-                              GLint sourceLevel,
+                              gl::LevelIndex sourceLevel,
                               bool unpackFlipY,
                               bool unpackPremultiplyAlpha,
                               bool unpackUnmultiplyAlpha,
@@ -572,7 +577,7 @@ class TextureD3D_3D : public TextureD3D
     angle::Result copySubTexture(const gl::Context *context,
                                  const gl::ImageIndex &index,
                                  const gl::Offset &destOffset,
-                                 GLint sourceLevel,
+                                 gl::LevelIndex sourceLevel,
                                  const gl::Box &sourceBox,
                                  bool unpackFlipY,
                                  bool unpackPremultiplyAlpha,
@@ -616,8 +621,7 @@ class TextureD3D_3D : public TextureD3D
     angle::Result updateStorage(const gl::Context *context) override;
     angle::Result initMipmapImages(const gl::Context *context) override;
 
-    bool isValidLevel(int level) const;
-    bool isLevelComplete(int level) const;
+    bool isNonBaseLevelComplete(int level) const override;
     bool isImageComplete(const gl::ImageIndex &index) const override;
     angle::Result updateStorageLevel(const gl::Context *context, int level);
 
@@ -695,7 +699,7 @@ class TextureD3D_2DArray : public TextureD3D
                               const gl::ImageIndex &index,
                               GLenum internalFormat,
                               GLenum type,
-                              GLint sourceLevel,
+                              gl::LevelIndex sourceLevel,
                               bool unpackFlipY,
                               bool unpackPremultiplyAlpha,
                               bool unpackUnmultiplyAlpha,
@@ -703,7 +707,7 @@ class TextureD3D_2DArray : public TextureD3D
     angle::Result copySubTexture(const gl::Context *context,
                                  const gl::ImageIndex &index,
                                  const gl::Offset &destOffset,
-                                 GLint sourceLevel,
+                                 gl::LevelIndex sourceLevel,
                                  const gl::Box &sourceBox,
                                  bool unpackFlipY,
                                  bool unpackPremultiplyAlpha,
@@ -746,11 +750,11 @@ class TextureD3D_2DArray : public TextureD3D
     angle::Result updateStorage(const gl::Context *context) override;
     angle::Result initMipmapImages(const gl::Context *context) override;
 
-    bool isValidLevel(int level) const;
-    bool isLevelComplete(int level) const;
+    bool isNonBaseLevelComplete(int level) const override;
     bool isImageComplete(const gl::ImageIndex &index) const override;
     bool isSRGB(GLint level) const;
     angle::Result updateStorageLevel(const gl::Context *context, int level);
+    GLint getBaseLevelStorageDepth() const override;
 
     void deleteImages();
     angle::Result redefineImage(const gl::Context *context,

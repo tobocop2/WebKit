@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <WebCore/DocumentEnums.h>
 #include <WebCore/Node.h>
 
 namespace WebCore {
@@ -82,7 +83,7 @@ public:
 
     enum class CanDelayNodeDeletion : uint8_t { No, Yes, Unknown };
     struct ChildChange {
-        enum class Type : uint8_t { ElementInserted, ElementRemoved, ElementAndTextInserted, TextInserted, TextRemoved, TextChanged, AllChildrenRemoved, NonContentsChildRemoved, NonContentsChildInserted, AllChildrenReplaced };
+        enum class Type : uint8_t { ElementInserted, ElementRemoved, ElementMovedInto, ElementMovedFrom, ElementAndTextInserted, TextInserted, TextRemoved, TextChanged, TextMovedFrom, TextMovedInto, AllChildrenRemoved, NonContentsChildRemoved, NonContentsChildInserted, NonContentsChildMovedInto, NonContentsChildMovedFrom, AllChildrenReplaced };
         enum class Source : uint8_t { Parser, API, Clone };
         enum class AffectsElements : uint8_t { Unknown, No, Yes };
 
@@ -106,10 +107,16 @@ public:
             case ChildChange::Type::AllChildrenReplaced:
                 return true;
             case ChildChange::Type::ElementRemoved:
+            case ChildChange::Type::ElementMovedFrom:
+            case ChildChange::Type::ElementMovedInto:
             case ChildChange::Type::TextRemoved:
+            case ChildChange::Type::TextMovedFrom:
+            case ChildChange::Type::TextMovedInto:
             case ChildChange::Type::TextChanged:
             case ChildChange::Type::AllChildrenRemoved:
             case ChildChange::Type::NonContentsChildRemoved:
+            case ChildChange::Type::NonContentsChildMovedFrom:
+            case ChildChange::Type::NonContentsChildMovedInto:
                 return false;
             }
             ASSERT_NOT_REACHED();
@@ -150,7 +157,7 @@ public:
     ExceptionOr<void> moveBefore(Node&, RefPtr<Node>&& refChild);
 
     ExceptionOr<void> ensurePreInsertionValidity(Node& newChild, Node* refChild);
-    ExceptionOr<void> ensurePreInsertionValidityForPhantomDocumentFragment(NodeVector& newChildren, Node* refChild = nullptr);
+    ExceptionOr<void> ensurePreInsertionValidityForPhantomDocumentFragment(NodeVector& newChildren, Node* refChild = nullptr, AcceptChildOperation = AcceptChildOperation::InsertOrAdd);
     ExceptionOr<void> insertChildrenBeforeWithoutPreInsertionValidityCheck(NodeVector&&, Node* nextChild = nullptr);
 
 protected:
@@ -193,6 +200,8 @@ private:
     CheckedPtr<Node> m_firstChild;
     CheckedPtr<Node> m_lastChild;
 };
+
+bool containsIncludingHostElements(const Node& possibleAncestor, const Node&);
 
 } // namespace WebCore
 

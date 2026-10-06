@@ -33,7 +33,7 @@
 #include "JSPromise.h"
 #include "JSPromiseReaction.h"
 #if USE(BUN_JSC_ADDITIONS)
-#include "InternalFieldTuple.h"
+#include "AsyncContextSwapScope.h"
 #endif
 
 namespace JSC {
@@ -148,11 +148,11 @@ JSC_DEFINE_HOST_FUNCTION(promiseProtoFuncCatch, (JSGlobalObject* globalObject, C
     auto thenCallData = getCallDataInline(then);
     if (thenCallData.type == CallData::Type::None) [[unlikely]]
         return throwVMTypeError(globalObject, scope, "|this|.then is not a function"_s);
-    MarkedArgumentBuffer thenArguments;
-    thenArguments.append(jsUndefined());
-    thenArguments.append(onRejected);
-    ASSERT(!thenArguments.hasOverflowed());
-    RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, then, thenCallData, thisValue, thenArguments)));
+    auto thenArguments = WTF::toArray<EncodedJSValue>({
+        JSValue::encode(jsUndefined()),
+        JSValue::encode(onRejected),
+    });
+    RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, then, thenCallData, thisValue, ArgList { thenArguments.data(), thenArguments.size() })));
 }
 
 JSC_DEFINE_HOST_FUNCTION(promiseFinallyValueThunkFunc, (JSGlobalObject*, CallFrame* callFrame))
@@ -196,11 +196,11 @@ JSC_DEFINE_HOST_FUNCTION(promiseFinallyThenFinallyFunc, (JSGlobalObject* globalO
     auto thenCallData = getCallDataInline(then);
     if (thenCallData.type == CallData::Type::None)
         return throwVMTypeError(globalObject, scope, "|this|.then is not a function"_s);
-    MarkedArgumentBuffer thenArgs;
-    thenArgs.append(valueThunk);
-    thenArgs.append(jsUndefined());
-    ASSERT(!thenArgs.hasOverflowed());
-    RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, then, thenCallData, resolvedPromise, thenArgs)));
+    auto thenArgs = WTF::toArray<EncodedJSValue>({
+        JSValue::encode(valueThunk),
+        JSValue::encode(jsUndefined()),
+    });
+    RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, then, thenCallData, resolvedPromise, ArgList { thenArgs.data(), thenArgs.size() })));
 }
 
 JSC_DEFINE_HOST_FUNCTION(promiseFinallyCatchFinallyFunc, (JSGlobalObject* globalObject, CallFrame* callFrame))
@@ -228,11 +228,11 @@ JSC_DEFINE_HOST_FUNCTION(promiseFinallyCatchFinallyFunc, (JSGlobalObject* global
     auto thenCallData = getCallDataInline(then);
     if (thenCallData.type == CallData::Type::None)
         return throwVMTypeError(globalObject, scope, "|this|.then is not a function"_s);
-    MarkedArgumentBuffer thenArgs;
-    thenArgs.append(thrower);
-    thenArgs.append(jsUndefined());
-    ASSERT(!thenArgs.hasOverflowed());
-    RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, then, thenCallData, resolvedPromise, thenArgs)));
+    auto thenArgs = WTF::toArray<EncodedJSValue>({
+        JSValue::encode(thrower),
+        JSValue::encode(jsUndefined()),
+    });
+    RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, then, thenCallData, resolvedPromise, ArgList { thenArgs.data(), thenArgs.size() })));
 }
 
 static EncodedJSValue promiseProtoFuncFinallySlow(JSGlobalObject* globalObject, JSValue thisValue, JSValue onFinally)
@@ -251,11 +251,11 @@ static EncodedJSValue promiseProtoFuncFinallySlow(JSGlobalObject* globalObject, 
         return throwVMTypeError(globalObject, scope, "|this|.then is not a function"_s);
 
     if (!onFinally.isCallable()) {
-        MarkedArgumentBuffer thenArguments;
-        thenArguments.append(onFinally);
-        thenArguments.append(onFinally);
-        ASSERT(!thenArguments.hasOverflowed());
-        RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, then, thenCallData, thisValue, thenArguments)));
+        auto thenArguments = WTF::toArray<EncodedJSValue>({
+            JSValue::encode(onFinally),
+            JSValue::encode(onFinally),
+        });
+        RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, then, thenCallData, thisValue, ArgList { thenArguments.data(), thenArguments.size() })));
     }
 
     NativeExecutable* thenFinallyExecutable = vm.getHostFunction(promiseFinallyThenFinallyFunc, ImplementationVisibility::Public, callHostFunctionAsConstructor, 1, nullString());
@@ -268,11 +268,11 @@ static EncodedJSValue promiseProtoFuncFinallySlow(JSGlobalObject* globalObject, 
     catchFinally->setField(vm, JSFunctionWithFields::Field::ResolvingPromise, onFinally);
     catchFinally->setField(vm, JSFunctionWithFields::Field::ResolvingOther, constructor);
 
-    MarkedArgumentBuffer thenArguments;
-    thenArguments.append(thenFinally);
-    thenArguments.append(catchFinally);
-    ASSERT(!thenArguments.hasOverflowed());
-    RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, then, thenCallData, thisValue, thenArguments)));
+    auto thenArguments = WTF::toArray<EncodedJSValue>({
+        JSValue::encode(thenFinally),
+        JSValue::encode(catchFinally),
+    });
+    RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, then, thenCallData, thisValue, ArgList { thenArguments.data(), thenArguments.size() })));
 }
 
 JSC_DEFINE_HOST_FUNCTION(promiseProtoFuncFinally, (JSGlobalObject* globalObject, CallFrame* callFrame))
@@ -293,20 +293,9 @@ JSC_DEFINE_HOST_FUNCTION(promiseProtoFuncFinally, (JSGlobalObject* globalObject,
             JSPromise* resultPromise = JSPromise::create(vm, globalObject->promiseStructure());
             auto* context = JSSlimPromiseReaction::create(vm, resultPromise, onFinally, /* isFulfill */ false, /* next */ nullptr);
 #if USE(BUN_JSC_ADDITIONS)
-            // Wrap context with async context in InternalFieldTuple: [context, asyncContext]
-            JSValue contextValue = context;
-            if (auto* asyncContextData = globalObject->m_asyncContextData.get()) {
-                JSValue asyncContext = asyncContextData->getInternalField(0);
-                if (!asyncContext.isUndefined()) {
-                    auto* tuple = InternalFieldTuple::create(vm, globalObject->internalFieldTupleStructure());
-                    tuple->putInternalField(vm, 0, context);
-                    tuple->putInternalField(vm, 1, asyncContext);
-                    contextValue = tuple;
-                }
-            }
-            promise->performPromiseThenWithInternalMicrotask(vm, InternalMicrotask::PromiseFinallyReactionJob, resultPromise, contextValue);
+            promise->performPromiseThenWithInternalMicrotask(vm, InternalMicrotask::PromiseFinallyReactionJob, nullptr, context, AsyncContextSwapScope::current(vm, globalObject));
 #else
-            promise->performPromiseThenWithInternalMicrotask(vm, InternalMicrotask::PromiseFinallyReactionJob, resultPromise, context);
+            promise->performPromiseThenWithInternalMicrotask(vm, InternalMicrotask::PromiseFinallyReactionJob, nullptr, context);
 #endif
             return JSValue::encode(resultPromise);
         }

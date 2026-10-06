@@ -368,7 +368,7 @@ void WebContextMenuProxyMac::setupServicesMenu()
 
 void WebContextMenuProxyMac::appendRemoveBackgroundItemToControlledImageMenuIfNeeded()
 {
-#if ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
+#if ENABLE(IMAGE_ANALYSIS)
     RefPtr page = this->page();
     if (!page || !protect(page->preferences())->removeBackgroundEnabled())
         return;
@@ -407,7 +407,7 @@ void WebContextMenuProxyMac::appendRemoveBackgroundItemToControlledImageMenuIfNe
             protectedThis->m_copySubjectResult = result;
         });
     });
-#endif // ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
+#endif // ENABLE(IMAGE_ANALYSIS)
 }
 
 void WebContextMenuProxyMac::showServicesMenu()
@@ -427,7 +427,7 @@ void WebContextMenuProxyMac::clearServicesMenu()
 
 void WebContextMenuProxyMac::removeBackgroundFromControlledImage()
 {
-#if ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
+#if ENABLE(IMAGE_ANALYSIS)
     RefPtr page = this->page();
     if (!page)
         return;
@@ -441,7 +441,7 @@ void WebContextMenuProxyMac::removeBackgroundFromControlledImage()
         return;
 
     page->replaceImageForRemoveBackground(*elementContext, { String(type.get()) }, span(data.get()));
-#endif // ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
+#endif // ENABLE(IMAGE_ANALYSIS)
 }
 
 #if ENABLE(CONTEXT_MENU_IMAGES_ON_MAC)
@@ -507,7 +507,7 @@ RetainPtr<NSMenuItem> WebContextMenuProxyMac::createShareMenuItem(ShareMenuItemT
     if (hitTestData.imageSharedMemory) {
         if (usePlaceholder)
             [items addObject:adoptNS([[NSImage alloc] init]).get()];
-        else if (auto image = adoptNS([[NSImage alloc] initWithData:protect(*hitTestData.imageSharedMemory)->toNSData().get()])) {
+        else if (RetainPtr image = createCocoaImageRestrictedToSupportedTypes(protect(*hitTestData.imageSharedMemory)->toNSData().get())) {
             RetainPtr title = hitTestData.imageText.createNSString();
             if (![title length])
                 title = WEB_UI_NSSTRING(@"Image", "Fallback title for images in the share sheet");
@@ -543,6 +543,11 @@ RetainPtr<NSMenuItem> WebContextMenuProxyMac::createShareMenuItem(ShareMenuItemT
     return shareMenuItem;
 }
 #endif
+
+void WebContextMenuProxyMac::cancelTracking()
+{
+    [protect(m_menu) cancelTrackingWithoutAnimation];
+}
 
 void WebContextMenuProxyMac::show()
 {
@@ -885,7 +890,7 @@ void WebContextMenuProxyMac::getContextMenuFromItems(const Vector<WebContextMenu
 #else
             UNUSED_PARAM(imageURL);
 #endif
-#if ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
+#if ENABLE(IMAGE_ANALYSIS)
             if (copySubjectItem) {
                 if (RetainPtr image = imageBitmap->createPlatformImage()) {
                     protectedThis->m_copySubjectResult = nullptr;

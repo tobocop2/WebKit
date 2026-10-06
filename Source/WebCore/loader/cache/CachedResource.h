@@ -95,6 +95,7 @@ public:
         XSLStyleSheet,
 #endif
         LinkPrefetch,
+        Text,
 #if ENABLE(VIDEO)
         TextTrackResource,
 #endif
@@ -180,7 +181,7 @@ public:
     }
 
     unsigned size() const { return encodedSize() + decodedSize() + overheadSize(); }
-    unsigned NODELETE encodedSize() const;
+    WEBCORE_EXPORT unsigned NODELETE encodedSize() const;
     unsigned NODELETE decodedSize() const;
     unsigned overheadSize() const;
 
@@ -267,6 +268,8 @@ public:
     void setIsPreloaded(bool isPreloaded) { m_isPreloaded = isPreloaded; }
     bool isLinkPreload() const { return m_isLinkPreload; }
     void setLinkPreload() { m_isLinkPreload = true; }
+    bool isLinkModulePreload() const { return m_isLinkModulePreload; }
+    void setLinkModulePreload() { m_isLinkModulePreload = true; }
     bool hasUnknownEncoding() { return m_hasUnknownEncoding; }
     void setHasUnknownEncoding(bool hasUnknownEncoding) { m_hasUnknownEncoding = hasUnknownEncoding; }
 
@@ -354,7 +357,7 @@ protected:
 
     // FIXME: Make the rest of these data members private and use functions in derived classes instead.
     SingleThreadWeakHashCountedSet<CachedResourceClient> m_clients;
-    std::unique_ptr<ResourceRequest> m_originalRequest; // Needed by Ping loads.
+    std::unique_ptr<ResourceRequest> m_originalRequest; // Used by SubresourceLoader::originalHeaders() for CORS checks.
     RefPtr<SubresourceLoader> m_loader;
     RefPtr<FragmentedSharedBuffer> m_data;
 
@@ -420,6 +423,7 @@ private:
     bool m_inCache : 1 { false };
     bool m_loading : 1 { false };
     bool m_isLinkPreload : 1;
+    bool m_isLinkModulePreload : 1;
     bool m_hasUnknownEncoding : 1;
     bool m_switchingClientsToRevalidatedResource : 1 { false };
     bool m_ignoreForRequestCount : 1;

@@ -113,6 +113,7 @@ static constexpr unsigned bitWidthForMaxBytecodeStructLength = WTF::getMSBSet(ma
     macro(OpGetFromScope) \
     macro(OpGetPrivateName) \
     macro(OpNewArrayWithSpecies) \
+    macro(OpAsyncIteratorNext) \
 
 #define FOR_EACH_OPCODE_WITH_CALL_LINK_INFO(macro) \
     macro(OpCall) \
@@ -122,10 +123,25 @@ static constexpr unsigned bitWidthForMaxBytecodeStructLength = WTF::getMSBSet(ma
     macro(OpSuperConstruct) \
     macro(OpIteratorOpen) \
     macro(OpIteratorNext) \
+    macro(OpAsyncIteratorOpen) \
+    macro(OpAsyncIteratorNext) \
     macro(OpCallVarargs) \
     macro(OpTailCallVarargs) \
     macro(OpConstructVarargs) \
     macro(OpSuperConstructVarargs) \
+    macro(OpCallIgnoreResult) \
+
+// The other opcodes with a CallLinkInfo have varargs; those get theirs at link time.
+#define FOR_EACH_OPCODE_WITH_LAZY_CALL_LINK_INFO(macro) \
+    macro(OpCall) \
+    macro(OpTailCall) \
+    macro(OpCallDirectEval) \
+    macro(OpConstruct) \
+    macro(OpSuperConstruct) \
+    macro(OpIteratorOpen) \
+    macro(OpIteratorNext) \
+    macro(OpAsyncIteratorOpen) \
+    macro(OpAsyncIteratorNext) \
     macro(OpCallIgnoreResult) \
 
 #define FOR_EACH_OPCODE_WITH_SIMPLE_ARRAY_PROFILE(macro) \
@@ -232,6 +248,7 @@ inline bool isBranch(OpcodeID opcodeID)
     case op_jnstricteq:
     case op_jbelow:
     case op_jbeloweq:
+    case op_iterator_close_check:
     case op_switch_imm:
     case op_switch_char:
     case op_switch_string:

@@ -64,6 +64,7 @@ WTF_ALLOW_COMPACT_POINTERS_TO_INCOMPLETE_TYPE(WebCore::AXObjectRareData);
 
 namespace WebCore {
 
+class HTMLTextFormControlElement;
 class IntPoint;
 class IntSize;
 class ScrollableArea;
@@ -140,7 +141,9 @@ public:
 
     bool isSecureField() const override { return false; }
     bool isContainedBySecureField() const;
-    bool isNativeTextControl() const override { return false; }
+    bool isNativeTextControl() const final { return nativeTextControl(); }
+    // The <textarea> or text <input> whose value this object exposes, or null.
+    HTMLTextFormControlElement* nativeTextControl() const;
     virtual bool isSearchField() const { return false; }
     bool isAttachment() const override { return false; }
 #if ENABLE(ATTACHMENT_ELEMENT)
@@ -396,6 +399,7 @@ public:
     virtual void recomputeAriaRole() { }
     virtual AccessibilityRole ariaRoleAttribute() const { return AccessibilityRole::Unknown; }
     bool hasExplicitGenericRole() const { return ariaRoleAttribute() == AccessibilityRole::Generic; }
+    bool hasExplicitGroupRole() const final { return ariaRoleAttribute() == AccessibilityRole::Group; }
     bool hasImplicitGenericRole() const { return role() == AccessibilityRole::Generic && !hasExplicitGenericRole(); }
     bool ariaRoleHasPresentationalChildren() const;
     bool inheritsPresentationalRole() const override { return false; }
@@ -438,7 +442,9 @@ public:
     virtual AXTextRuns textRuns() { return { }; }
     bool hasTextRuns() final { return textRuns().size(); }
     TextEmissionBehavior textEmissionBehavior() const override { return TextEmissionBehavior::None; }
-    AXTextRunLineID listMarkerLineID() const override { return { }; }
+    bool isReplacedElementForTextEmission() const final;
+    bool isInUserAgentShadowTree() const final;
+    bool isInsideNativeTextControl() const final;
     String listMarkerText() const override { return { }; }
     FontOrientation fontOrientation() const final;
 #endif
@@ -520,6 +526,9 @@ public:
     static TextIterator textIteratorIgnoringFullSizeKana(const SimpleRange&);
     CharacterRange selectedTextRange() const override { return { }; }
     int insertionPointLineNumber() const override { return -1; }
+#if ENABLE(WRITING_TOOLS)
+    bool writingToolsAvailable() const final;
+#endif // ENABLE(WRITING_TOOLS)
 
     URL url() const override { return URL(); }
     VisibleSelection selection() const final;
@@ -553,6 +562,7 @@ public:
     RenderView* topRenderer() const;
     virtual ScrollView* scrollView() const { return nullptr; }
     unsigned ariaLevel() const final;
+    unsigned computedHeadingLevel() const final;
     String language() const final;
     // 1-based, to match the aria-level spec.
     bool isInlineText() const final;
@@ -576,6 +586,11 @@ public:
     void performDismissActionIgnoringResult() final { performDismissAction(); }
     bool press() override;
     bool syncPress() override { return press(); }
+    // Presses this object as an aria-actions action target, then restores focus to wherever it was
+    // beforehand (not only when the action's host was focused) if pressing moved focus onto this
+    // object, e.g. because it's a focusable button. The intervening focus movement is not surfaced
+    // to assistive technology, so invoking an action never moves the user's focus.
+    bool pressPreservingFocus();
     bool performShowMenuAction();
 
     std::optional<AccessibilityOrientation> explicitOrientation() const override { return std::nullopt; }
@@ -693,7 +708,7 @@ public:
     String doAXStringForRange(const CharacterRange&) const override { return { }; }
     IntRect doAXBoundsForRange(const CharacterRange&) const override { return { }; }
     IntRect doAXBoundsForRangeUsingCharacterOffset(const CharacterRange&) const override { return { }; }
-    static StringView listMarkerTextForNodeAndPosition(Node*, Position&&);
+    static String listMarkerTextForNodeAndPosition(Node*, Position&&);
 
     unsigned doAXLineForIndex(unsigned) final;
 
@@ -836,6 +851,7 @@ public:
 
     void clearIsIgnoredFromParentData() { m_isIgnoredFromParentData = { }; }
     void setIsIgnoredFromParentDataForChild(AccessibilityObject&);
+    AccessibilityIsIgnoredFromParentData computeIsIgnoredFromParentData();
 
     AccessibilityChildrenVector documentLinks() override { return AccessibilityChildrenVector(); }
 
@@ -901,7 +917,7 @@ public:
         // Prefix increment operator (++iterator).
         iterator& operator++()
         {
-            m_current = m_current->nextSibling();
+            m_current = protect(m_current)->nextSibling();
             ensureContentsParentValidity();
             return *this;
         }
@@ -917,7 +933,7 @@ public:
         // --iterator
         iterator& operator--()
         {
-            m_current = m_current->previousSibling();
+            m_current = protect(m_current)->previousSibling();
             ensureContentsParentValidity();
             return *this;
         }
@@ -932,8 +948,11 @@ public:
     private:
         void ensureContentsParentValidity()
         {
-            RefPtr contentsParent = m_current ? m_current->displayContentsParent() : nullptr;
-            if (contentsParent && m_displayContentsParent && contentsParent.get() != m_displayContentsParent.get())
+            if (!m_current || !m_displayContentsParent)
+                return;
+            // The objects after a display: contents element's last child are its own siblings, since a
+            // display:contents element has no box for them to hang off. Stop rather than walking into them.
+            if (protect(m_current)->parentObject() != m_displayContentsParent.get())
                 m_current = nullptr;
         }
 
@@ -955,7 +974,7 @@ protected:
     void markPlatformWrapperIgnoredStateDirty() const { };
 #endif
 
-    void setIsIgnoredFromParentData(AccessibilityIsIgnoredFromParentData& data) { m_isIgnoredFromParentData = data; }
+    void setIsIgnoredFromParentData(const AccessibilityIsIgnoredFromParentData& data) { m_isIgnoredFromParentData = data; }
     bool ignoredFromPresentationalRole() const;
 
     bool isAccessibilityObject() const override { return true; }

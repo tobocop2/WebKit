@@ -109,7 +109,9 @@ public:
         return runs && runs->size();
     }
     TextEmissionBehavior textEmissionBehavior() const final;
-    AXTextRunLineID listMarkerLineID() const final { return propertyValue<AXTextRunLineID>(AXProperty::ListMarkerLineID); };
+    bool isReplacedElementForTextEmission() const final { return boolAttributeValue(AXProperty::IsReplacedElementForTextEmission); }
+    bool isInUserAgentShadowTree() const final { return boolAttributeValue(AXProperty::IsInUserAgentShadowTree); }
+    bool isInsideNativeTextControl() const final { return boolAttributeValue(AXProperty::IsInsideNativeTextControl); }
     String listMarkerText() const final { return stringAttributeValue(AXProperty::ListMarkerText); }
     FontOrientation fontOrientation() const final { return propertyValue<FontOrientation>(AXProperty::FontOrientation); }
 
@@ -284,7 +286,7 @@ private:
     AccessibilityChildrenVector disclosedRows() final { return tree().objectsForIDs(vectorAttributeValue<AXID>(AXProperty::DisclosedRows)); }
     AXIsolatedObject* disclosedByRow() const final { return objectAttributeValue(AXProperty::DisclosedByRow); }
 
-    bool isFieldset() const final { return boolAttributeValue(AXProperty::IsFieldset); }
+    bool isFieldset() const final { return elementName() == ElementName::HTML_fieldset; }
     bool isChecked() const final { return boolAttributeValue(AXProperty::IsChecked); }
     bool isEnabled() const final { return boolAttributeValue(AXProperty::IsEnabled); }
     bool isSelected() const final { return boolAttributeValue(AXProperty::IsSelected); }
@@ -349,10 +351,7 @@ private:
     {
         return tree().focusedNode().unsafeGet();
     }
-    AXIsolatedObject* focusedUIElementInAnyLocalFrame() const final
-    {
-        return tree().focusedNode().unsafeGet();
-    }
+    AXIsolatedObject* focusedUIElementInAnyLocalFrame() const final;
     AXIsolatedObject* internalLinkElement() const final { return objectAttributeValue(AXProperty::InternalLinkElement); }
     AccessibilityChildrenVector radioButtonGroup() const final { return tree().objectsForIDs(vectorAttributeValue<AXID>(AXProperty::RadioButtonGroupMembers)); }
     AXIsolatedObject* scrollBar(AccessibilityOrientation) final;
@@ -417,6 +416,8 @@ private:
 #endif
     std::optional<AccessibilityOrientation> explicitOrientation() const { return optionalAttributeValue<AccessibilityOrientation>(AXProperty::ExplicitOrientation); }
     unsigned ariaLevel() const final { return unsignedAttributeValue(AXProperty::ARIALevel); }
+    bool hasExplicitGroupRole() const final { return boolAttributeValue(AXProperty::HasExplicitGroupRole); }
+    unsigned computedHeadingLevel() const final { return unsignedAttributeValue(AXProperty::HeadingLevel); }
     String language() const final { return stringAttributeValue(AXProperty::Language); }
     void setSelectedChildren(const AccessibilityChildrenVector&) final;
     AccessibilityChildrenVector visibleChildren() final { return tree().objectsForIDs(vectorAttributeValue<AXID>(AXProperty::VisibleChildren)); }
@@ -446,6 +447,9 @@ private:
     // CharacterRange support.
     CharacterRange selectedTextRange() const final { return propertyValue<CharacterRange>(AXProperty::SelectedTextRange); }
     int insertionPointLineNumber() const final;
+#if ENABLE(WRITING_TOOLS)
+    bool writingToolsAvailable() const final { return tree().writingToolsAvailable(); }
+#endif // ENABLE(WRITING_TOOLS)
     CharacterRange doAXRangeForLine(unsigned) const final;
     String doAXStringForRange(const CharacterRange&) const final;
     CharacterRange characterRangeForPoint(const IntPoint&) const final;

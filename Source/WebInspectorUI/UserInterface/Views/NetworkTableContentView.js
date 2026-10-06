@@ -171,6 +171,7 @@ WI.NetworkTableContentView = class NetworkTableContentView extends WI.ContentVie
         WI.Frame.addEventListener(WI.Frame.Event.ChildFrameWasAdded, this._handleFrameWasAdded, this);
         WI.Resource.addEventListener(WI.Resource.Event.LoadingDidFinish, this._resourceLoadingDidFinish, this);
         WI.Resource.addEventListener(WI.Resource.Event.LoadingDidFail, this._resourceLoadingDidFail, this);
+        WI.Resource.addEventListener(WI.Resource.Event.URLDidChange, this._handleResourceURLDidChange, this);
         WI.Resource.addEventListener(WI.Resource.Event.RedirectsDidChange, this._resourceRedirectsDidChange, this);
         WI.Resource.addEventListener(WI.Resource.Event.SizeDidChange, this._handleResourceSizeDidChange, this);
         WI.Resource.addEventListener(WI.Resource.Event.TransferSizeDidChange, this._resourceTransferSizeDidChange, this);
@@ -321,6 +322,7 @@ WI.NetworkTableContentView = class NetworkTableContentView extends WI.ContentVie
         WI.Frame.removeEventListener(WI.Frame.Event.ChildFrameWasAdded, this._handleFrameWasAdded, this);
         WI.Resource.removeEventListener(WI.Resource.Event.LoadingDidFinish, this._resourceLoadingDidFinish, this);
         WI.Resource.removeEventListener(WI.Resource.Event.LoadingDidFail, this._resourceLoadingDidFail, this);
+        WI.Resource.removeEventListener(WI.Resource.Event.URLDidChange, this._handleResourceURLDidChange, this);
         WI.Resource.removeEventListener(WI.Resource.Event.RedirectsDidChange, this._resourceRedirectsDidChange, this);
         WI.Resource.removeEventListener(WI.Resource.Event.SizeDidChange, this._handleResourceSizeDidChange, this);
         WI.Resource.removeEventListener(WI.Resource.Event.TransferSizeDidChange, this._resourceTransferSizeDidChange, this);
@@ -839,6 +841,8 @@ WI.NetworkTableContentView = class NetworkTableContentView extends WI.ContentVie
 
     _populateInitiatorCell(cell, entry)
     {
+        cell.removeChildren();
+
         let domNode = entry.domNode;
         if (domNode) {
             cell.textContent = emDash;
@@ -848,16 +852,12 @@ WI.NetworkTableContentView = class NetworkTableContentView extends WI.ContentVie
         // For redirect entries, show the previous redirect or parent resource as the initiator.
         if (entry.redirect && entry.resource) {
             let initiatorName;
-            let initiatorObject;
-
             if (entry.previousRedirect) {
                 // Show the previous redirect in the chain
                 initiatorName = WI.displayNameForURL(entry.previousRedirect.url, entry.previousRedirect.urlComponents);
-                initiatorObject = entry.previousRedirect;
             } else {
                 // First redirect - show the parent resource
                 initiatorName = entry.resource.displayName;
-                initiatorObject = entry.resource;
             }
 
             let linkElement = cell.appendChild(document.createElement("a"));
@@ -998,7 +998,7 @@ WI.NetworkTableContentView = class NetworkTableContentView extends WI.ContentVie
         }
 
         if (entry.redirect) {
-            let {redirect, time, startTime} = entry;
+            let {time, startTime} = entry;
 
             if (isNaN(time) || isNaN(startTime)) {
                 cell.textContent = zeroWidthSpace;
@@ -1998,6 +1998,23 @@ WI.NetworkTableContentView = class NetworkTableContentView extends WI.ContentVie
         });
     }
 
+    _handleResourceURLDidChange(event)
+    {
+        // A resource's URL can be corrected after its row exists: an out-of-process frame's main resource
+        // starts out as an origin-only placeholder. Re-render so the Name and Domain columns catch up.
+        this._runForMainCollection((collection, wasMain) => {
+            let resource = event.target;
+            collection.pendingUpdates.push(resource);
+
+            // The filter was evaluated against the old URL, and its result is memoized per resource.
+            if (this._hasURLFilter())
+                this._checkURLFilterAgainstResource(resource);
+
+            if (wasMain)
+                this.needsLayout();
+        });
+    }
+
     _resourceLoadingDidFail(event)
     {
         this._runForMainCollection((collection, wasMain) => {
@@ -2608,12 +2625,12 @@ WI.NetworkTableContentView = class NetworkTableContentView extends WI.ContentVie
         let duration = Date.now() - loadTimeStatistic.start;
 
         let delay = loadTimeStatistic.delay;
-        if (duration >= 1_000) // 1 second
-            delay = 100;
+        if (duration >= 3_600_000) // 1 hour
+            delay = 10_000;
         else if (duration >= 60_000) // 60 seconds
             delay = 1_000;
-        else if (duration >= 3_600_000) // 1 minute
-            delay = 10_000;
+        else if (duration >= 1_000) // 1 second
+            delay = 100;
 
         if (delay !== loadTimeStatistic.delay) {
             loadTimeStatistic.delay = delay;

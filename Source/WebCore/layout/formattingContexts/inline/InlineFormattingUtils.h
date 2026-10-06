@@ -36,6 +36,7 @@ namespace Layout {
 class FloatingContext;
 class InlineFormattingContext;
 class InlineLevelBox;
+class LineBox;
 
 class InlineFormattingUtils {
 public:
@@ -44,10 +45,11 @@ public:
     InlineLayoutUnit logicalTopForNextLine(const LineLayoutResult&, const InlineRect& lineLogicalRect, const FloatingContext&) const;
 
     enum class IsIntrinsicWidthMode : bool { No, Yes };
-    enum class LineEndsWithLineBreak : bool { No, Yes };
-    InlineLayoutUnit computedTextIndent(IsIntrinsicWidthMode, IsFirstFormattedLine, std::optional<LineEndsWithLineBreak> previousLineEndsWithLineBreak, InlineLayoutUnit availableWidth) const;
+    enum class PreviousLineEndsParagraph : bool { No, Yes };
+    InlineLayoutUnit computedTextIndent(IsIntrinsicWidthMode, IsFirstFormattedLine, std::optional<PreviousLineEndsParagraph>, InlineLayoutUnit availableWidth) const;
+    static InlineLayoutUnit computedTextIndentForFirstLine(const ElementBox& root, InlineLayoutUnit availableWidth);
 
-    bool inlineLevelBoxAffectsLineBox(const InlineLevelBox&) const;
+    bool inlineLevelBoxAffectsLineBox(const InlineLevelBox&, const LineBox&) const;
 
     InlineLayoutUnit initialLineHeight(bool isFirstLine) const;
 
@@ -70,16 +72,6 @@ public:
     static std::optional<LineLayoutResult::InlineContentEnding> inlineContentEnding(const Line::Result&);
 
     bool NODELETE shouldDiscardRemainingContentInBlockDirection() const;
-
-    enum class SnapDirection : uint8_t { Floor, Ceil, Round };
-    static InlineLayoutUnit snapToInt(InlineLayoutUnit, const InlineLevelBox&, SnapDirection = SnapDirection::Round);
-    static InlineLayoutUnit snapToInt(InlineLayoutUnit, const Box&, SnapDirection = SnapDirection::Round);
-
-    static InlineLayoutUnit NODELETE ascent(const FontMetrics&, FontBaseline, const InlineLevelBox&);
-    static InlineLayoutUnit NODELETE descent(const FontMetrics&, FontBaseline, const InlineLevelBox&);
-
-    static InlineLayoutUnit ascent(const FontMetrics&, FontBaseline, const Box&);
-    static InlineLayoutUnit descent(const FontMetrics&, FontBaseline, const Box&);
 
 private:
     bool isAtSoftWrapOpportunity(const InlineItem& previous, const InlineItem& next) const;

@@ -208,6 +208,15 @@ def parse_args(args):
                  "directories enumerated with the option. Some ports may ignore this "
                  "option while others can have a default value that can be overridden here."),
 
+        optparse.make_option("--check-pre-existing-failures", action="store_true",
+                             default=False, dest="check_pre_existing_failures",
+                             help="After the run, consult results.webkit.org to annotate each unexpected "
+                                  "failure as pre-existing (historically failing on CI) or possibly new. "
+                                  "Capped at --max-pre-existing-checks tests."),
+        optparse.make_option("--max-pre-existing-checks", type="int", default=0,
+                             dest="max_pre_existing_checks",
+                             help="Maximum number of failing tests to look up in results.webkit.org when "
+                                  "--check-pre-existing-failures is set. Use 0 for no limit. (default: 0)"),
         optparse.make_option("--skip-failing-tests", action="store_true",
             default=False, help="Skip tests that are marked as failing or flaky. "
                  "Note: When using this option, you might miss new crashes "
@@ -230,10 +239,14 @@ def parse_args(args):
                  "Specify multiple times for multiple sets of overrides."),
         optparse.make_option("--compare-port", action="store", default=None,
             help="Use the specified port's baselines first"),
+        optparse.make_option("--show-results", action="store_true",
+                             default=False, dest="show_results",
+                             help="Launch a browser with results after the tests "
+                                  "are done"),
         optparse.make_option("--no-show-results", action="store_false",
-            default=True, dest="show_results",
-            help="Don't launch a browser with results after the tests "
-                 "are done"),
+                             dest="show_results",
+                             help="Don't launch a browser with results after the tests "
+                                  "are done (default)"),
         optparse.make_option("--full-results-html", action="store_true",
             default=False,
             help="Show all failures in results.html, rather than only regressions"),

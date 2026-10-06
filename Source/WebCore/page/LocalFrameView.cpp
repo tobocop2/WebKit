@@ -3,7 +3,7 @@
  *                     1999 Lars Knoll <knoll@kde.org>
  *                     1999 Antti Koivisto <koivisto@kde.org>
  *                     2000 Dirk Mueller <mueller@kde.org>
- * Copyright (C) 2004-2025 Apple Inc. All rights reserved.
+ * Copyright (C) 2004-2026 Apple Inc. All rights reserved.
  *           (C) 2006 Graham Dennis (graham.dennis@gmail.com)
  *           (C) 2006 Alexey Proskuryakov (ap@nypop.com)
  * Copyright (C) 2009 Google Inc. All rights reserved.
@@ -90,6 +90,7 @@
 #include "PageColorSampler.h"
 #include "PageInspectorController.h"
 #include "PageOverlayController.h"
+#include "ParsedContentType.h"
 #include "PerformanceLoggingClient.h"
 #include "PlatformRenderTheme.h"
 #include "ProgressTracker.h"
@@ -142,6 +143,7 @@
 #include "VelocityData.h"
 #include "VisualViewport.h"
 #include "WheelEventTestMonitor.h"
+#include <span>
 #include <wtf/HexNumber.h>
 #include <wtf/MemoryPressureHandler.h>
 #include <wtf/Ref.h>
@@ -152,8 +154,11 @@
 #include <wtf/text/TextStream.h>
 
 #if PLATFORM(IOS_FAMILY)
-#include "DocumentLoader.h"
 #include "LegacyTileCache.h"
+#endif
+
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+#include <WebKitAdditions/AXCustomColorBackdropContext.h>
 #endif
 
 #include "LayoutContext.h"
@@ -421,7 +426,7 @@ void LocalFrameView::clear()
 #if PLATFORM(IOS_FAMILY)
     // To avoid flashes of white, disable tile updates immediately when view is cleared at the beginning of a page load.
     // Tiling will be re-enabled from UIKit via [WAKWindow setTilingMode:] when we have content to draw.
-    if (LegacyTileCache* tileCache = legacyTileCache())
+    if (RefPtr tileCache = legacyTileCache())
         tileCache->setTilingMode(LegacyTileCache::Disabled);
 #endif
 }
@@ -430,7 +435,7 @@ void LocalFrameView::clear()
 void LocalFrameView::didReplaceMultipartContent()
 {
     // Re-enable tile updates that were disabled in clear().
-    if (LegacyTileCache* tileCache = legacyTileCache())
+    if (RefPtr tileCache = legacyTileCache())
         tileCache->setTilingMode(LegacyTileCache::Normal);
 }
 #endif
@@ -706,7 +711,7 @@ void LocalFrameView::applyPaginationToViewport()
         if (!columnGap.isNormal()) {
             CheckedPtr renderBox = dynamicDowncast<RenderBox>(documentOrBodyRenderer.get());
             if (CheckedPtr containerForPaginationGap = renderBox ? renderBox : documentOrBodyRenderer->containingBlock())
-                pagination.gap = Style::evaluate<LayoutUnit>(columnGap, containerForPaginationGap->contentBoxLogicalWidth(), Style::ZoomNeeded { }).toUnsigned();
+                pagination.gap = Style::evaluate<LayoutUnit>(columnGap, containerForPaginationGap->contentBoxLogicalWidth(), documentOrBodyRenderer->style().usedZoomForLength()).toUnsigned();
         }
     }
     setPagination(pagination);
@@ -963,7 +968,7 @@ bool LocalFrameView::flushCompositingStateForThisFrame(const LocalFrame& rootFra
         return false;
 
 #if PLATFORM(IOS_FAMILY)
-    if (LegacyTileCache* tileCache = legacyTileCache())
+    if (RefPtr tileCache = legacyTileCache())
         tileCache->doPendingRepaints();
 #endif
 
@@ -1293,8 +1298,12 @@ void LocalFrameView::willDoLayout(SingleThreadWeakPtr<RenderElement> layoutRoot)
     }
     auto firstLayout = !layoutContext().didFirstLayout();
     if (firstLayout) {
-        m_lastViewportSize = sizeForResizeEvent();
-        m_lastUsedZoomFactor = layoutRoot->style().usedZoom();
+        // Skip pre-initializing when loaded while hidden, so scheduleResizeEventIfNeeded() treats the
+        // 0x0 to actual size transition as a genuine resize per the CSSOM View spec.
+        if (!m_loadedWhileHidden) {
+            m_lastViewportSize = sizeForResizeEvent();
+            m_lastUsedZoomFactor = layoutRoot->style().usedZoom();
+        }
         m_firstLayoutCallbackPending = true;
     }
     adjustScrollbarsForLayout(firstLayout);
@@ -2046,11 +2055,6 @@ LayoutRect LocalFrameView::layoutViewportRect() const
     return LayoutRect(m_layoutViewportOrigin, baseLayoutViewportSize());
 }
 
-void LocalFrameView::updateLayoutViewportRect()
-{
-    m_frame->loader().client().broadcastFrameLayoutViewportRectToOtherProcesses(layoutViewportRect());
-}
-
 // visibleContentRect is in the bounds of the scroll view content. That consists of an
 // optional header, the document, and an optional footer. Only the document is scaled,
 // so we have to compute the visible part of the document in unscaled document coordinates.
@@ -2130,18 +2134,16 @@ std::optional<LayoutRect> LocalFrameView::visibleRectOfChild(const Frame& child)
     ASSERT(childOwnerRenderer->frame().frameID() == m_frame->frameID());
 
     auto rects = childOwnerRenderer->computeVisibleRectsInContainer(
-        { childOwnerRenderer->frameRect() },
+        { childOwnerRenderer->borderBoxRect() },
         &childOwnerRenderer->view(),
         {
-            .hasPositionFixedDescendant = false,
-            .dirtyRectIsFlipped = false,
-            .descendantNeedsEnclosingIntRect = false,
             .options = {
                 VisibleRectContext::Option::UseEdgeInclusiveIntersection,
                 VisibleRectContext::Option::ApplyCompositedClips,
                 VisibleRectContext::Option::ApplyCompositedContainerScrolls
             },
-        }
+        },
+        { }
     );
 
     return rects.transform([] (const auto& repaintRects) { return repaintRects.clippedOverflowRect; });
@@ -2215,6 +2217,20 @@ TransformationMatrix LocalFrameView::absoluteToChildFrameOwnerLocalTransform(con
 
     auto matrix = transformState.releaseTrackedTransform();
     return valueOrDefault(matrix->inverse());
+}
+
+FloatRect LocalFrameView::mapAbsoluteToChildFrameViewRect(const FloatRect& rect, const Frame& child) const
+{
+    return mapAbsoluteToChildFrameViewRect(rect, absoluteToChildFrameOwnerLocalTransform(child),
+        childFrameOwnerContentBoxLocation(child));
+}
+
+FloatRect LocalFrameView::mapAbsoluteToChildFrameViewRect(const FloatRect& rect, const TransformationMatrix& absoluteToChildFrameOwnerLocalTransform, FloatPoint childFrameOwnerContentBoxLocation)
+{
+    // Use projectQuad() instead of mapRect() here to handle 3D rotations.
+    auto childFrameViewRect = absoluteToChildFrameOwnerLocalTransform.projectQuad(rect).boundingBox();
+    childFrameViewRect.moveBy(-childFrameOwnerContentBoxLocation);
+    return childFrameViewRect;
 }
 
 LayoutRect LocalFrameView::rectForFixedPositionLayout() const
@@ -2648,7 +2664,7 @@ std::pair<FixedContainerEdges, WeakElementEdges> LocalFrameView::fixedContainerE
     static constexpr auto minimumOpacityThresholdToClampToSolidColor = 0.75;
 
     auto pageBackgroundColor = page->pageExtendedBackgroundColor();
-    auto blendAgainstPageBackground = [pageBackgroundColor](const Color& color) {
+    auto blendAgainstPageBackground = [&pageBackgroundColor](const Color& color) {
         if (color.isOpaque())
             return color;
 
@@ -2957,7 +2973,7 @@ bool LocalFrameView::useDarkAppearance() const
         return renderer->useDarkAppearance();
 #endif
     if (RefPtr document = m_frame->document())
-        return document->useDarkAppearance(static_cast<const Style::ComputedStyle*>(nullptr));
+        return document->useDarkAppearance(nullptr);
     return false;
 }
 
@@ -2968,7 +2984,7 @@ OptionSet<StyleColorOptions> LocalFrameView::styleColorOptions() const
         return renderer->styleColorOptions();
 #endif
     if (RefPtr document = m_frame->document())
-        return document->styleColorOptions(static_cast<const Style::ComputedStyle*>(nullptr));
+        return document->styleColorOptions(nullptr);
     return { };
 }
 
@@ -3144,6 +3160,15 @@ bool LocalFrameView::scrollToTextFragment(IsRetry isRetry)
     if (!m_frame->isMainFrame())
         return false;
 
+    // Text directives are only processed in text/html and text/plain documents. Parse the
+    // content type so that a MIME parameter (e.g. "text/html; charset=UTF-8") is ignored.
+    auto parsedContentType = ParsedContentType::create(document->contentType());
+    if (!parsedContentType)
+        return false;
+    auto mimeType = parsedContentType->mimeType();
+    if (mimeType != "text/html"_s && mimeType != "text/plain"_s)
+        return false;
+
     // Block text fragments in cross-origin window.open() popups
     if (!checkTextFragmentSecurity(m_frame.get()))
         return false;
@@ -3226,9 +3251,9 @@ bool LocalFrameView::scrollToAnchorFragment(StringView fragmentIdentifier)
         if (fragmentIdentifier.isEmpty())
             return false;
         if (auto rootElement = DocumentSVG::rootElement(document.get())) {
-            if (rootElement->scrollToFragment(fragmentIdentifier))
+            if (rootElement->setViewForFragment(fragmentIdentifier))
                 return true;
-            // If SVG failed to scrollToAnchor() and anchorElement is null, no other scrolling will be possible.
+            // If the fragment addressed no SVG view and anchorElement is null, no other scrolling will be possible.
             if (!anchorElement)
                 return false;
         }
@@ -3404,10 +3429,10 @@ void LocalFrameView::resetScrollAnchor()
 
     if (is<SVGDocument>(document.get())) {
         if (auto rootElement = DocumentSVG::rootElement(document.get())) {
-            // We need to update the layout before resetScrollAnchor(), otherwise we
+            // We need to update the layout before resetting the view, otherwise we
             // could really mess things up if resetting the anchor comes at a bad moment.
             document->updateStyleIfNeeded();
-            rootElement->resetScrollAnchor();
+            rootElement->resetViewToDefault();
         }
     }
 }
@@ -3571,6 +3596,8 @@ bool LocalFrameView::scrollRectToVisible(const LayoutRect& absoluteRect, const R
             adjustedRect = layer->ensureLayerScrollableArea()->scrollRectToVisible(adjustedRect, adjustedOptions);
             if (adjustedOptions.visibilityCheckRect)
                 adjustedOptions.visibilityCheckRect->setLocation(adjustedRect.location());
+            if (options.container == ScrollIntoViewContainer::Nearest)
+                return true;
         }
         // FIXME: Make scroll adjustments work for more than just fixedpos elements.
         if (insideFixed)
@@ -3639,7 +3666,10 @@ void LocalFrameView::scrollRectToVisibleInChildView(const LayoutRect& absoluteRe
     // See https://bugs.webkit.org/show_bug.cgi?id=205059
     setScrollPosition(scrollPosition, scrollPositionChangeOptionsForElement(*this, element.get(), options));
 
-    if (options.shouldAllowCrossOriginScrolling == ShouldAllowCrossOriginScrolling::No && !safeToPropagateScrollToParent()) 
+    if (options.container == ScrollIntoViewContainer::Nearest)
+        return;
+
+    if (options.shouldAllowCrossOriginScrolling == ShouldAllowCrossOriginScrolling::No && !safeToPropagateScrollToParent())
         return;
 
     // FIXME: ideally need to determine if this <iframe> is inside position:fixed.
@@ -3805,8 +3835,10 @@ void LocalFrameView::scrollPositionChanged(const ScrollPosition& oldPosition, co
             m_frame->editor().renderLayerDidScroll(*layer);
     }
 
-    if (m_frame->settings().siteIsolationEnabled() && oldPosition != newPosition)
-        static_cast<Frame&>(m_frame).loaderClient().broadcastFrameScrollPositionToOtherProcesses(newPosition);
+    if (oldPosition != newPosition) {
+        if (RefPtr page = m_frame->page(); page && page->mainFrame().tree().containsRemoteFrame())
+            page->scheduleRenderingUpdate(RenderingUpdateStep::SyncLocalFrameInfoToRemote);
+    }
 }
 
 void LocalFrameView::applyRecursivelyWithVisibleRect(NOESCAPE const Function<void(LocalFrameView& frameView, const IntRect& visibleRect)>& apply)
@@ -3845,7 +3877,8 @@ void LocalFrameView::updateScriptedAnimationsAndTimersThrottlingState(const IntR
         return;
 
     // We don't throttle zero-size or display:none frames because those are usually utility frames.
-    bool shouldThrottle = visibleRect.isEmpty() && !m_lastUsedSizeForLayout.isEmpty() && m_frame->ownerRenderer();
+    bool ownerHasRenderer = m_frame->ownerRenderer() || (m_frame->isRootFrame() && m_ownerHasRendererInParentFrameProcess);
+    bool shouldThrottle = visibleRect.isEmpty() && !m_lastUsedSizeForLayout.isEmpty() && ownerHasRenderer;
     document->setTimerThrottlingEnabled(shouldThrottle);
 
     RefPtr page = m_frame->page();
@@ -4233,7 +4266,7 @@ void LocalFrameView::adjustTiledBackingCoverage()
     if (renderView && renderView->layer() && renderView->layer()->backing())
         renderView->layer()->backing()->adjustTiledBackingCoverage();
 #if PLATFORM(IOS_FAMILY)
-    if (LegacyTileCache* tileCache = legacyTileCache())
+    if (RefPtr tileCache = legacyTileCache())
         tileCache->setSpeculativeTileCreationEnabled(m_speculativeTilingEnabled);
 #endif
 }
@@ -4278,7 +4311,7 @@ void LocalFrameView::show()
 {
     ScrollView::show();
 
-    if (m_frame->isMainFrame()) {
+    if (m_frame->isRootFrame()) {
         // Turn off speculative tiling for a brief moment after a LocalFrameView appears on screen.
         // Note that adjustTiledBackingCoverage() kicks the (500ms) timer to re-enable it.
         m_speculativeTilingEnabled = false;
@@ -4375,7 +4408,15 @@ Color LocalFrameView::baseBackgroundColor() const
     return m_baseBackgroundColor;
 }
 
-void LocalFrameView::invalidateForBaseBackgroundOrColorSchemeChange()
+void LocalFrameView::invalidateForFrameOwnerColorSchemeChange()
+{
+    invalidateForBaseBackgroundChange();
+
+    if (RefPtr document = frame().document())
+        document->appearanceDidChange();
+}
+
+void LocalFrameView::invalidateForBaseBackgroundChange()
 {
     recalculateScrollbarOverlayStyle();
     setNeedsLayoutAfterViewConfigurationChange();
@@ -4396,7 +4437,7 @@ void LocalFrameView::setBaseBackgroundColor(const Color& backgroundColor)
     if (!isViewForDocumentInFrame())
         return;
 
-    invalidateForBaseBackgroundOrColorSchemeChange();
+    invalidateForBaseBackgroundChange();
 }
 
 #if ENABLE(DARK_MODE_CSS)
@@ -4616,7 +4657,7 @@ void LocalFrameView::scheduleScrollToAnchorAndTextFragment()
     ASSERT(document);
 
     m_scheduledToScrollToAnchor = true;
-    document->eventLoop().queueTask(TaskSource::DOMManipulation, [weakThis = WeakPtr { *this }] {
+    protect(document->eventLoop())->queueTask(TaskSource::DOMManipulation, [weakThis = WeakPtr { *this }] {
         RefPtr protectedThis = weakThis.get();
         if (!protectedThis)
             return;
@@ -4659,14 +4700,26 @@ void LocalFrameView::scrollToAnchor()
 
     LOG_WITH_STREAM(Scrolling, stream << " anchor node rect " << rect);
 
+    CheckedRef renderer = *anchorNode->renderer();
+
     // Scroll nested layers and frames to reveal the anchor.
     // Align to the top and to the closest side (this matches other browsers).
-    if (anchorNode->renderer()->writingMode().isHorizontal())
-        scrollRectToVisible(rect, *anchorNode->renderer(), insideFixed, { SelectionRevealMode::Reveal, ScrollAlignment::alignToEdgeIfNeeded, ScrollAlignment::alignTopAlways, ShouldAllowCrossOriginScrolling::No });
-    else if (anchorNode->renderer()->writingMode().blockDirection() == FlowDirection::RightToLeft)
-        scrollRectToVisible(rect, *anchorNode->renderer(), insideFixed, { SelectionRevealMode::Reveal, ScrollAlignment::alignRightAlways, ScrollAlignment::alignToEdgeIfNeeded, ShouldAllowCrossOriginScrolling::No });
-    else
-        scrollRectToVisible(rect, *anchorNode->renderer(), insideFixed, { SelectionRevealMode::Reveal, ScrollAlignment::alignLeftAlways, ScrollAlignment::alignToEdgeIfNeeded, ShouldAllowCrossOriginScrolling::No });
+    ScrollAlignment alignX;
+    ScrollAlignment alignY;
+    if (renderer->writingMode().isHorizontal()) {
+        alignX = ScrollAlignment::alignToEdgeIfNeeded;
+        alignY = ScrollAlignment::alignTopAlways;
+    } else if (renderer->writingMode().blockDirection() == FlowDirection::RightToLeft) {
+        alignX = ScrollAlignment::alignRightAlways;
+        alignY = ScrollAlignment::alignToEdgeIfNeeded;
+    } else {
+        alignX = ScrollAlignment::alignLeftAlways;
+        alignY = ScrollAlignment::alignToEdgeIfNeeded;
+    }
+
+    adjustScrollAlignmentForScrollSnapAlign(renderer, &alignX, &alignY);
+
+    scrollRectToVisible(rect, renderer, insideFixed, { SelectionRevealMode::Reveal, alignX, alignY, ShouldAllowCrossOriginScrolling::No });
 
     if (AXObjectCache* cache = protect(m_frame->document())->existingAXObjectCache())
         cache->handleScrolledToAnchor(*anchorNode);
@@ -4690,7 +4743,7 @@ void LocalFrameView::scrollToPendingTextFragmentRange()
 
     auto range = *m_pendingTextFragmentIndicatorRange;
     auto rangeText = plainText(range);
-    if (m_pendingTextFragmentIndicatorText != plainText(range))
+    if (m_pendingTextFragmentIndicatorText != rangeText)
         return;
 
     LOG_WITH_STREAM(Scrolling, stream << *this << " scrollToPendingTextFragmentRange() " << range);
@@ -4828,6 +4881,11 @@ void LocalFrameView::performPostLayoutTasks()
     if (!layoutContext().isLayoutNested() && m_frame->document()->documentElement())
         fireLayoutRelatedMilestonesIfNeeded();
 
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+    if (CheckedPtr renderView = this->renderView())
+        renderView->adjustAXCustomColorModeAfterLayout();
+#endif
+
 #if PLATFORM(IOS_FAMILY)
     // Only send layout-related delegate callbacks synchronously for the main frame to
     // avoid re-entering layout for the main frame while delivering a layout-related delegate
@@ -4945,6 +5003,13 @@ IntSize LocalFrameView::sizeForResizeEvent() const
     if (useFixedLayout() && !fixedLayoutSize().isEmpty() && delegatesScrolling())
         return fixedLayoutSize();
     return visibleContentRectIncludingScrollbars().size();
+}
+
+void LocalFrameView::primeResizeEventBaseline(IntSize size)
+{
+    m_lastViewportSize = size;
+    if (CheckedPtr renderView = this->renderView())
+        m_lastUsedZoomFactor = renderView->style().usedZoom();
 }
 
 void LocalFrameView::scheduleResizeEventIfNeeded()
@@ -5263,8 +5328,13 @@ IntRect LocalFrameView::windowClipRect() const
     // Set our clip rect to be our contents.
     IntRect clipRect = contentsToWindow(visibleContentRect(LegacyIOSDocumentVisibleRect));
 
-    if (!m_frame->ownerElement())
+    if (!m_frame->ownerElement()) {
+        // When SI is enabled, this frame has no local owner element. Apply the visible rect that
+        // the parent frame process passed to us over IPC instead.
+        if (m_visibleRectFromParentFrameProcess)
+            clipRect.intersect(*m_visibleRectFromParentFrameProcess);
         return clipRect;
+    }
 
     // Take our owner element and get its clip rect.
     RefPtr ownerElement = m_frame->ownerElement();
@@ -5780,6 +5850,11 @@ void LocalFrameView::willPaintContents(GraphicsContext& context, const IntRect&,
     if (is<AccessibilityRegionContext>(regionContext))
         m_paintBehavior.add(PaintBehavior::FlattenCompositingLayers);
 
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+    if (is<AXCustomColorBackdropContext>(regionContext))
+        m_paintBehavior.add(PaintBehavior::FlattenCompositingLayers);
+#endif
+
     paintingState.isFlatteningPaintOfRootFrame = (m_paintBehavior & PaintBehavior::FlattenCompositingLayers) && !m_frame->ownerElement() && !context.detectingContentfulPaint();
     if (paintingState.isFlatteningPaintOfRootFrame)
         notifyWidgetsInAllFrames(WidgetNotification::WillPaintFlattened);
@@ -6019,20 +6094,13 @@ void LocalFrameView::updateLayoutAndStyleIfNeededRecursive(OptionSet<LayoutOptio
     ASSERT(!needsLayout());
 }
 
-#include <span>
-
 template<typename CharacterType>
 static size_t nonWhitespaceLength(std::span<const CharacterType> characters)
 {
-    size_t result = characters.size();
-    for (auto character : characters) {
-        if (isASCIIWhitespace(character))
-            --result;
-    }
-    return result;
+    return characters.size() - WTF::countMatchedCharacters<CharacterType, ' ', '\t', '\n', '\f', '\r'>(characters);
 }
 
-void LocalFrameView::incrementVisuallyNonEmptyCharacterCountSlowCase(const String& inlineText)
+SUPPRESS_NODELETE void LocalFrameView::incrementVisuallyNonEmptyCharacterCountSlowCase(const String& inlineText)
 {
     if (inlineText.is8Bit())
         m_visuallyNonEmptyCharacterCount += nonWhitespaceLength(inlineText.span8());
@@ -6158,8 +6226,13 @@ void LocalFrameView::checkAndDispatchDidReachVisuallyNonEmptyState()
         return;
 
     m_contentQualifiesAsVisuallyNonEmpty = true;
-    if (m_frame->isRootFrame())
+    if (m_frame->isRootFrame()) {
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+        if (RefPtr page = m_frame->page())
+            page->didReachVisuallyNonEmptyState();
+#endif
         m_frame->loader().didReachVisuallyNonEmptyState();
+    }
 }
 
 bool LocalFrameView::hasContentfulDescendants() const

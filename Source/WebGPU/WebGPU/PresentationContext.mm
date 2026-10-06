@@ -81,7 +81,7 @@ TextureView* PresentationContext::getCurrentTextureView()
 
 #pragma mark WGPU Stubs
 
-void NODELETE wgpuSurfaceReference(WGPUSurface surface)
+void NODELETE wgpuSurfaceAddRef(WGPUSurface surface)
 {
     WebGPU::fromAPI(surface).ref();
 }
@@ -91,7 +91,7 @@ void wgpuSurfaceRelease(WGPUSurface surface)
     WebGPU::fromAPI(surface).deref();
 }
 
-void NODELETE wgpuSwapChainReference(WGPUSwapChain swapChain)
+void NODELETE wgpuSwapChainAddRef(WGPUSwapChain swapChain)
 {
     WebGPU::fromAPI(swapChain).ref();
 }
@@ -104,6 +104,11 @@ void wgpuSwapChainRelease(WGPUSwapChain swapChain)
 WGPUTextureFormat wgpuSurfaceGetPreferredFormat(WGPUSurface surface, WGPUAdapter adapter)
 {
     return WebGPU::fromAPI(surface).getPreferredFormat(WebGPU::fromAPI(adapter));
+}
+
+double wgpuSurfaceGetLastFrameGPUCostSeconds(WGPUSurface surface)
+{
+    return protect(WebGPU::fromAPI(surface))->lastFrameGPUCost().seconds();
 }
 
 WGPUTexture wgpuSwapChainGetCurrentTexture(WGPUSwapChain swapChain, uint32_t index)

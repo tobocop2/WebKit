@@ -7,10 +7,6 @@
 //    Implements the class methods for ContextMtl.
 //
 
-#ifdef UNSAFE_BUFFERS_BUILD
-#    pragma allow_unsafe_buffers
-#endif
-
 #include "libANGLE/renderer/metal/ContextMtl.h"
 
 #include <TargetConditionals.h>
@@ -18,11 +14,11 @@
 
 #include "GLSLANG/ShaderLang.h"
 #include "common/debug.h"
+#include "common/unsafe_buffers.h"
 #include "image_util/loadimage.h"
 #include "libANGLE/Display.h"
 #include "libANGLE/Query.h"
 #include "libANGLE/TransformFeedback.h"
-#include "libANGLE/renderer/OverlayImpl.h"
 #include "libANGLE/renderer/metal/BufferMtl.h"
 #include "libANGLE/renderer/metal/CompilerMtl.h"
 #include "libANGLE/renderer/metal/DisplayMtl.h"
@@ -1333,8 +1329,6 @@ angle::Result ContextMtl::syncState(const gl::Context *context,
                 // NOTE(hqle): this is part of EXT_multisample_compatibility.
                 // NOTE(hqle): MSAA feature.
                 break;
-            case gl::state::DIRTY_BIT_COVERAGE_MODULATION:
-                break;
             case gl::state::DIRTY_BIT_FRAMEBUFFER_SRGB_WRITE_CONTROL_MODE:
                 break;
             case gl::state::DIRTY_BIT_CURRENT_VALUES:
@@ -1343,6 +1337,10 @@ angle::Result ContextMtl::syncState(const gl::Context *context,
                 break;
             }
             case gl::state::DIRTY_BIT_PROVOKING_VERTEX:
+                break;
+            case gl::state::DIRTY_BIT_CLIP_CONTROL:
+                updateFrontFace(glState);
+                invalidateDriverUniforms();
                 break;
             case gl::state::DIRTY_BIT_EXTENDED:
                 updateExtendedState(glState, extendedDirtyBits);
@@ -1369,10 +1367,6 @@ void ContextMtl::updateExtendedState(const gl::State &glState,
     {
         switch (extendedDirtyBit)
         {
-            case gl::state::EXTENDED_DIRTY_BIT_CLIP_CONTROL:
-                updateFrontFace(glState);
-                invalidateDriverUniforms();
-                break;
             case gl::state::EXTENDED_DIRTY_BIT_CLIP_DISTANCES:
                 invalidateDriverUniforms();
                 break;
@@ -1559,12 +1553,6 @@ SemaphoreImpl *ContextMtl::createSemaphore()
     return nullptr;
 }
 
-OverlayImpl *ContextMtl::createOverlay(const gl::OverlayState &state)
-{
-    // Not implemented.
-    return new OverlayImpl(state);
-}
-
 angle::Result ContextMtl::dispatchCompute(const gl::Context *context,
                                           GLuint numGroupsX,
                                           GLuint numGroupsY,
@@ -1657,8 +1645,8 @@ angle::Result ContextMtl::bindMetalRasterizationRateMap(gl::Context *context,
     if (auto *metalRenderbuffer = static_cast<RenderbufferMtl *>(renderbuffer))
     {
         FramebufferAttachmentRenderTarget *rtOut = nullptr;
-        gl::ImageIndex index;
-        GLenum binding = 0;
+        gl::ImageIndex index                     = gl::ImageIndex::Make2D(0);
+        GLenum binding                           = 0;
         if (angle::Result::Continue ==
             metalRenderbuffer->getAttachmentRenderTarget(context, binding, index, 1, &rtOut))
         {
@@ -1823,7 +1811,7 @@ void ContextMtl::endEncoding(bool forceSaveRenderPassContent)
             mRenderEncoder.setStoreAction(MTLStoreActionStore);
         }
 
-        disableActiveOcclusionQueryInRenderPass();
+        disableOcclusionQueryInRenderPass();
 
         mOcclusionQueryPool.prepareRenderPassVisibilityPoolBuffer(this);
 
@@ -2281,84 +2269,73 @@ void ContextMtl::onBackbufferResized(const gl::Context *context, WindowSurfaceMt
     onDrawFrameBufferChangedState(context, framebuffer, true);
 }
 
-angle::Result ContextMtl::onOcclusionQueryBegin(const gl::Context *context, QueryMtl *query)
+angle::Result ContextMtl::onOcclusionQueryBegin(QueryMtl &query)
 {
-    ASSERT(mOcclusionQuery == nullptr);
-    mOcclusionQuery = query;
+    ASSERT(!mOcclusionQueryResultBuffer);  // Frontend guarantees none active at the time.
+    const mtl::BufferRef &resultBuffer = query.getVisibilityResultBuffer();
+    bool isEnabledInRenderPass;
+
+    if (mRenderEncoder.valid() && !mOcclusionQueryPool.canAllocateQueryOffset(this))
+    {
+        endEncoding(true);
+    }
 
     if (mRenderEncoder.valid())
     {
-        // if render pass has started, start the query in the encoder
-        return startOcclusionQueryInRenderPass(query, true);
+        size_t resultOffset;
+        ANGLE_TRY(mOcclusionQueryPool.beginQuery(this, resultBuffer, &resultOffset));
+        mRenderEncoder.setVisibilityResultMode(MTLVisibilityResultModeBoolean, resultOffset);
+        // Result is available after flush.
+        mCmdBuffer.setWriteDependency(resultBuffer, /*isRenderCommand=*/true);
+        isEnabledInRenderPass = true;
     }
     else
     {
-        query->resetVisibilityResult(this);
+        // Reset the occlusion query result stored in buffer to zero.
+        // Later draws will use continueQuery() to enable the visibility buffer writes.
+        auto blitEncoder = getBlitCommandEncoder();
+        blitEncoder->fillBuffer(resultBuffer, NSMakeRange(0, mtl::kOcclusionQueryResultSize), 0);
+        resultBuffer->syncContent(this, blitEncoder);
+        isEnabledInRenderPass = false;
     }
-
+    mOcclusionQueryResultBuffer          = resultBuffer;
+    mOcclusionQueryIsEnabledInRenderPass = isEnabledInRenderPass;
     return angle::Result::Continue;
 }
-void ContextMtl::onOcclusionQueryEnd(const gl::Context *context, QueryMtl *query)
-{
-    ASSERT(mOcclusionQuery == query);
 
-    if (mRenderEncoder.valid())
-    {
-        // if render pass has started, end the query in the encoder
-        disableActiveOcclusionQueryInRenderPass();
-    }
-
-    mOcclusionQuery = nullptr;
-}
-void ContextMtl::onOcclusionQueryDestroy(const gl::Context *context, QueryMtl *query)
+void ContextMtl::onOcclusionQueryEnd()
 {
-    if (query->getAllocatedVisibilityOffsets().empty())
-    {
-        return;
-    }
-    if (mOcclusionQuery == query)
-    {
-        onOcclusionQueryEnd(context, query);
-    }
-    mOcclusionQueryPool.deallocateQueryOffset(this, query);
+    ASSERT(mOcclusionQueryResultBuffer);  // Frontend guarantees one active at the time.
+    disableOcclusionQueryInRenderPass();
+    mOcclusionQueryResultBuffer = nullptr;
 }
 
-void ContextMtl::disableActiveOcclusionQueryInRenderPass()
+void ContextMtl::onOcclusionQueryDestroy(QueryMtl &query)
 {
-    if (!mOcclusionQuery || mOcclusionQuery->getAllocatedVisibilityOffsets().empty())
-    {
-        return;
-    }
-
-    ASSERT(mRenderEncoder.valid());
-    mRenderEncoder.setVisibilityResultMode(MTLVisibilityResultModeDisabled,
-                                           mOcclusionQuery->getAllocatedVisibilityOffsets().back());
+    // On normal operation frontend guaraantees that end is called before destroy.
+    // On context destruction, active query is destroyed without end.
+    // Discard is valid for both.
+    mOcclusionQueryPool.discardQuery(query.getVisibilityResultBuffer());
 }
 
-angle::Result ContextMtl::restartActiveOcclusionQueryInRenderPass()
+void ContextMtl::disableOcclusionQueryInRenderPass()
 {
-    if (!mOcclusionQuery || mOcclusionQuery->getAllocatedVisibilityOffsets().empty())
+    if (mOcclusionQueryResultBuffer && mOcclusionQueryIsEnabledInRenderPass)
     {
-        return angle::Result::Continue;
+        ASSERT(mRenderEncoder.valid());
+        mRenderEncoder.setVisibilityResultMode(MTLVisibilityResultModeDisabled, 0);
+        mOcclusionQueryIsEnabledInRenderPass = false;
     }
-
-    return startOcclusionQueryInRenderPass(mOcclusionQuery, false);
 }
 
-angle::Result ContextMtl::startOcclusionQueryInRenderPass(QueryMtl *query, bool clearOldValue)
+angle::Result ContextMtl::enableOcclusionQueryInRenderPass()
 {
     ASSERT(mRenderEncoder.valid());
-
-    ANGLE_TRY(mOcclusionQueryPool.allocateQueryOffset(this, query, clearOldValue));
-
-    mRenderEncoder.setVisibilityResultMode(MTLVisibilityResultModeBoolean,
-                                           query->getAllocatedVisibilityOffsets().back());
-
-    // We need to mark the query's buffer as being written in this command buffer now. Since the
-    // actual writing is deferred until the render pass ends and user could try to read the query
-    // result before the render pass ends.
-    mCmdBuffer.setWriteDependency(query->getVisibilityResultBuffer(), /*isRenderCommand=*/true);
-
+    size_t resultOffset;
+    ANGLE_TRY(mOcclusionQueryPool.continueQuery(this, mOcclusionQueryResultBuffer, &resultOffset));
+    mRenderEncoder.setVisibilityResultMode(MTLVisibilityResultModeBoolean, resultOffset);
+    mCmdBuffer.setWriteDependency(mOcclusionQueryResultBuffer, /*isRenderCommand=*/true);
+    mOcclusionQueryIsEnabledInRenderPass = true;
     return angle::Result::Continue;
 }
 
@@ -2431,8 +2408,8 @@ angle::Result ContextMtl::updateDefaultAttribute(size_t attribIndex)
 
     static_assert(kDefaultGLAttributeValueSize == mtl::kDefaultAttributeSize,
                   "Unexpected default attribute size");
-    memcpy(mDefaultAttributes[attribIndex].values, &defaultValue.Values,
-           mtl::kDefaultAttributeSize);
+    ANGLE_UNSAFE_TODO(memcpy(mDefaultAttributes[attribIndex].values, &defaultValue.Values,
+                             mtl::kDefaultAttributeSize));
 
     return angle::Result::Continue;
 }
@@ -2586,11 +2563,18 @@ angle::Result ContextMtl::setupDrawImpl(const gl::Context *context,
         ANGLE_TRY(handleDirtyRenderPass(context));
     }
 
-    if (mOcclusionQuery && mOcclusionQueryPool.getNumRenderPassAllocatedQueries() == 0)
+    if (mOcclusionQueryResultBuffer && !mOcclusionQueryIsEnabledInRenderPass)
     {
-        // The occlusion query is still active, and a new render pass has started.
-        // We need to continue the querying process in the new render encoder.
-        ANGLE_TRY(startOcclusionQueryInRenderPass(mOcclusionQuery, false));
+        // The occlusion query is still active, and a new render pass has started or we have paused
+        // the querying process. We need to continue the querying process.
+        if (!mOcclusionQueryPool.canAllocateQueryOffset(this))
+        {
+            // The render pass visibility query offset limit has been reached. End the current
+            // encoding; the caller will retry with a new render encoder.
+            endEncoding(true);
+            return angle::Result::Continue;
+        }
+        ANGLE_TRY(enableOcclusionQueryInRenderPass());
     }
 
     bool isPipelineDescChanged;
@@ -2777,7 +2761,8 @@ angle::Result ContextMtl::handleDirtyActiveTextures(const gl::Context *context)
         TextureMtl *textureMtl = mtl::GetImpl(texture);
 
         // Make sure texture's image definitions will be transferred to GPU.
-        ANGLE_TRY(textureMtl->ensureNativeStorageCreated(context, true));
+        ANGLE_TRY(textureMtl->ensureNativeStorageCreated(context, /*keepImages=*/true,
+                                                         ImageMipLevels::EnabledLevels));
 
         // The binding of this texture will be done by ProgramMtl.
         return angle::Result::Continue;

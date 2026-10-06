@@ -131,6 +131,9 @@ void Editor::writeImageToPasteboard(Pasteboard& pasteboard, Element& imageElemen
 void Editor::pasteWithPasteboard(Pasteboard* pasteboard, OptionSet<PasteOption> options)
 {
     auto range = selectedRange();
+    if (!range)
+        return;
+
     bool allowPlainText = options.contains(PasteOption::AllowPlainText);
     WebContentReader reader(*document().frame(), *range, allowPlainText);
     int numberOfPasteboardItems = client()->getPasteboardItemsCount();
@@ -217,11 +220,8 @@ void Editor::setDictationPhrasesAsChildOfElement(const Vector<Vector<String>>& d
     unsigned previousDictationPhraseStart = 0;
     for (auto& interpretations : dictationPhrases) {
         auto dictationPhraseLength = interpretations[0].length();
-        if (interpretations.size() > 1) {
-            auto alternatives = interpretations;
-            alternatives.removeAt(0);
-            addMarker(*textNode, previousDictationPhraseStart, dictationPhraseLength, DocumentMarkerType::DictationPhraseWithAlternatives, WTF::move(alternatives));
-        }
+        if (interpretations.size() > 1)
+            addMarker(*textNode, previousDictationPhraseStart, dictationPhraseLength, DocumentMarkerType::DictationPhraseWithAlternatives, interpretations.subvector(1));
         previousDictationPhraseStart += dictationPhraseLength;
     }
 

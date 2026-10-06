@@ -432,10 +432,24 @@ static inline bool NODELETE isDescendantOf(TextIteratorBehaviors options, Node& 
     return node.isDescendantOf(&possibleAncestor);
 }
 
+static inline ContainerNode* NODELETE parentInComposedTreeIgnoringUserAgentShadow(Node& node)
+{
+    if (auto* slot = node.assignedSlot()) {
+        if (auto* shadowRoot = slot->containingShadowRoot(); shadowRoot && shadowRoot->mode() != ShadowRootMode::UserAgent)
+            return slot;
+    }
+
+    if (auto* shadowRoot = dynamicDowncast<ShadowRoot>(node))
+        return shadowRoot->host();
+
+    return node.parentNode();
+}
+
 static inline Node* NODELETE parentNodeOrShadowHost(TextIteratorBehaviors options, Node& node)
 {
     if (options.contains(TextIteratorBehavior::TraversesFlatTree)) [[unlikely]]
-        return node.parentInComposedTree();
+        return parentInComposedTreeIgnoringUserAgentShadow(node);
+
     return node.parentOrShadowHostNode();
 }
 
@@ -1044,7 +1058,7 @@ static bool shouldEmitExtraNewlineForNode(Node& node, bool emitsNewlinesPerInner
         return false;
 
     auto bottomMargin = renderBox->collapsedMarginAfter();
-    auto fontSize = renderBox->style().fontDescription().computedSize();
+    auto fontSize = renderBox->style().fontDescription().usedSize();
     return bottomMargin * 2 >= fontSize;
 }
 
@@ -1354,6 +1368,12 @@ void TextIterator::emitText(Text& textNode, RenderText& renderer, int textStartO
 
     m_lastTextNodeEndedWithCollapsedSpace = false;
     m_hasEmitted = true;
+}
+
+TextIteratorPosition TextIterator::position() const
+{
+    ASSERT(!atEnd());
+    return { *m_positionNode, m_positionOffsetBaseNode, static_cast<unsigned>(m_positionStartOffset), static_cast<unsigned>(m_positionEndOffset) };
 }
 
 SimpleRange TextIterator::range() const
@@ -2147,13 +2167,20 @@ SimpleRange resolveCharacterRange(const SimpleRange& scope, CharacterRange range
     uint64_t location = 0;
     for (TextIterator it(scope, behaviors); !it.atEnd(); it.advance()) {
         unsigned length = it.text().length();
-        auto textRunRange = it.range();
 
         auto found = [&] (uint64_t targetLocation) -> bool {
             return targetLocation >= location && targetLocation - location <= length;
         };
         bool foundStart = found(range.location);
         bool foundEnd = found(rangeEnd);
+
+        if (!foundStart && !foundEnd) {
+            location += length;
+            continue;
+        }
+
+        // TextIterator::range() costs a previous-sibling walk, so only resolve it for the runs that bound the result.
+        auto textRunRange = it.range();
 
         if (foundEnd) {
             // FIXME: This is a workaround for the fact that the end of a run is often at the wrong position for emitted '\n's or if the renderer of the current node is a replaced element.
@@ -2392,7 +2419,7 @@ bool containsPlainText(const String& document, const String& target, FindOptions
     SearchBuffer buffer { target, options };
     StringView remainingText { document };
     while (!remainingText.isEmpty()) {
-        size_t charactersAppended = buffer.append(document);
+        size_t charactersAppended = buffer.append(remainingText);
         remainingText = remainingText.substring(charactersAppended);
         if (remainingText.isEmpty())
             buffer.reachedBreak();

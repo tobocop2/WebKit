@@ -37,10 +37,12 @@
 #include "WebPage.h"
 #include "WebPageProxyMessages.h"
 #include "WebProcess.h"
+#include <WebCore/DocumentLoader.h>
 #include <WebCore/FrameLoader.h>
 #include <WebCore/HitTestResult.h>
 #include <WebCore/LocalFrameInlines.h>
 #include <WebCore/PolicyChecker.h>
+#include <wtf/text/TextStream.h>
 
 #if PLATFORM(COCOA)
 #include <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
@@ -123,7 +125,6 @@ std::optional<NavigationActionData> WebFrameLoaderClient::navigationActionData(c
         originatingPageID,
         WTF::move(parentFrameID),
         document ? std::optional { document->identifier() } : std::nullopt,
-        requestingFrame ? requestingFrame->certificateInfo() : CertificateInfo(),
         getCurrentProcessID(),
         requestingFrame ? requestingFrame->isFocused() : false
     };
@@ -157,7 +158,6 @@ std::optional<NavigationActionData> WebFrameLoaderClient::navigationActionData(c
         mouseEventData ? mouseEventData->locationInRootViewCoordinates : FloatPoint(),
         redirectResponse,
         navigationAction.isRequestFromClientOrUserInput(),
-        navigationAction.treatAsSameOriginNavigation(),
         navigationAction.hasOpenedFrames(),
         navigationAction.openedByDOMWithOpener(),
         hasOpener,
@@ -169,6 +169,7 @@ std::optional<NavigationActionData> WebFrameLoaderClient::navigationActionData(c
         navigationAction.sourceBackForwardItemIdentifier(),
         navigationAction.lockHistory(),
         navigationAction.lockBackForwardList(),
+        navigationAction.navigationHistoryBehavior(),
         clientRedirectSourceForHistory,
         sandboxFlags,
         ReferrerPolicy::EmptyString,
@@ -187,12 +188,13 @@ std::optional<NavigationActionData> WebFrameLoaderClient::navigationActionData(c
         request,
         request.url().isValid() ? String() : request.url().string(),
         requester,
+        navigationAction.pendingDispatchNavigateEventIdentifier(),
     };
 }
 
 void WebFrameLoaderClient::dispatchDecidePolicyForNavigationAction(const NavigationAction& navigationAction, const ResourceRequest& request, const ResourceResponse& redirectResponse, FormState*, const String& clientRedirectSourceForHistory, std::optional<WebCore::NavigationIdentifier> navigationID, std::optional<WebCore::HitTestResult>&& hitTestResult, bool hasOpener, NavigationUpgradeToHTTPSBehavior navigationUpgradeToHTTPSBehavior, SandboxFlags sandboxFlags, PolicyDecisionMode policyDecisionMode, FramePolicyFunction&& function)
 {
-    LOG(Loading, "WebProcess %i - dispatchDecidePolicyForNavigationAction to request url %s", getCurrentProcessID(), request.url().string().utf8().data());
+    LOG_WITH_STREAM(Loading, stream << "WebProcess "_s << getCurrentProcessID() << " - dispatchDecidePolicyForNavigationAction to request url "_s << request.url().string());
 
     auto navigationActionData = this->navigationActionData(navigationAction, request, redirectResponse, clientRedirectSourceForHistory, navigationID, WTF::move(hitTestResult), hasOpener, navigationUpgradeToHTTPSBehavior, sandboxFlags);
     if (!navigationActionData)
@@ -200,7 +202,26 @@ void WebFrameLoaderClient::dispatchDecidePolicyForNavigationAction(const Navigat
 
     RefPtr webPage = m_frame->page();
 
-    uint64_t listenerID = m_frame->setUpPolicyListener(WTF::move(function), WebFrame::ForNavigationAction::Yes);
+    // Record the document initiating a download attribute check, and the load it is made for.
+    //
+    // Only the check for the activation itself is one: a download attribute link the client answers Use for
+    // is an ordinary navigation, and DocumentLoader::willSendRequest() reuses the same triggering action,
+    // download attribute and all, for the check it makes when the server redirects that load. Unlike the
+    // activation check, that one belongs to a load in progress - its DocumentLoader awaits the answer - so
+    // cancelling the load has to cancel it, and it must not be kept out of the cancellation.
+    //
+    // WebPageProxy::decidePolicyForNavigationAction() draws the same line for its own listener, from the
+    // redirect response in the NavigationActionData, so the two have to stay in agreement.
+    Markable<WebCore::ScriptExecutionContextIdentifier> downloadAttributeInitiatingDocument;
+    SingleThreadWeakPtr<WebCore::DocumentLoader> downloadAttributePolicyDocumentLoader;
+    if (!navigationAction.downloadAttribute().isNull() && redirectResponse.isNull()) {
+        if (RefPtr localFrame = m_frame->coreLocalFrame()) {
+            if (RefPtr document = localFrame->document())
+                downloadAttributeInitiatingDocument = document->identifier();
+            downloadAttributePolicyDocumentLoader = localFrame->loader().policyDocumentLoader();
+        }
+    }
+    auto listenerID = m_frame->setUpPolicyListener(WTF::move(function), WebFrame::ForNavigationAction::Yes, downloadAttributeInitiatingDocument ? WebFrame::PolicyCheckKind::DownloadAttribute : WebFrame::PolicyCheckKind::Navigation, downloadAttributeInitiatingDocument, WTF::move(downloadAttributePolicyDocumentLoader));
 
     // Notify the UIProcess.
     if (policyDecisionMode == PolicyDecisionMode::Synchronous) {
@@ -214,7 +235,7 @@ void WebFrameLoaderClient::dispatchDecidePolicyForNavigationAction(const Navigat
             }
 
             auto [policyDecision] = sendResult.takeReply();
-            WebFrameLoaderClient_RELEASE_LOG(WebFrameLoaderClientDispatchDecidePolicyForNavigationActionGotPolicyActionFromSyncIpc, toString(policyDecision.policyAction).characters());
+            WebFrameLoaderClient_RELEASE_LOG(WebFrameLoaderClientDispatchDecidePolicyForNavigationActionGotPolicyActionFromSyncIpc, toString(policyDecision.policyAction));
             m_frame->didReceivePolicyDecision(listenerID, PolicyDecision { policyDecision.isNavigatingToAppBoundDomain, policyDecision.policyAction, { }, policyDecision.downloadID });
             return;
         }
@@ -230,7 +251,7 @@ void WebFrameLoaderClient::dispatchDecidePolicyForNavigationAction(const Navigat
         if (!frame)
             return;
 
-        RELEASE_LOG_FORWARDABLE(Network, WebFrameLoaderClientDispatchDecidePolicyForNavigationActionGotPolicyActionFromAsyncIpc, frame->frameID().toUInt64(), webPageID, toString(policyDecision.policyAction).characters());
+        RELEASE_LOG_FORWARDABLE(Network, WebFrameLoaderClientDispatchDecidePolicyForNavigationActionGotPolicyActionFromAsyncIpc, frame->frameID().toUInt64(), webPageID, toString(policyDecision.policyAction));
 
         frame->didReceivePolicyDecision(listenerID, WTF::move(policyDecision));
     });
@@ -266,10 +287,10 @@ void WebFrameLoaderClient::broadcastAllFrameTreeSyncDataToOtherProcesses(FrameTr
         webPage->send(Messages::WebPageProxy::BroadcastAllFrameTreeSyncData(m_frame->frameID(), data));
 }
 
-void WebFrameLoaderClient::broadcastFrameTreeSyncDataToOtherProcesses(const FrameTreeSyncSerializationData& data)
+void WebFrameLoaderClient::broadcastFrameTreeSyncDataToOtherProcesses(FrameTreeSyncSerializationData&& data)
 {
     if (RefPtr webPage = m_frame->page())
-        webPage->send(Messages::WebPageProxy::BroadcastFrameTreeSyncData(m_frame->frameID(), data));
+        webPage->send(Messages::WebPageProxy::BroadcastFrameTreeSyncData(m_frame->frameID(), WTF::move(data)));
 }
 
 void WebFrameLoaderClient::didNotifyUserActivation(MonotonicTime activationTime)
@@ -282,6 +303,12 @@ void WebFrameLoaderClient::didConsumeUserActivation()
 {
     if (RefPtr webPage = m_frame->page())
         webPage->send(Messages::WebPageProxy::DidConsumeUserActivation(m_frame->frameID()));
+}
+
+void WebFrameLoaderClient::didHandleFirstUserGesture(MonotonicTime gestureTime)
+{
+    if (RefPtr webPage = m_frame->page())
+        webPage->send(Messages::WebPageProxy::DidHandleFirstUserGesture(m_frame->frameID(), gestureTime));
 }
 
 }

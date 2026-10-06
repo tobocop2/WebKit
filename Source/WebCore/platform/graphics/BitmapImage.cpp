@@ -33,6 +33,7 @@
 #include "ImageBuffer.h"
 #include "ImageObserver.h"
 #include "NativeImageSource.h"
+#include "ShareableBitmap.h"
 
 namespace WebCore {
 
@@ -53,9 +54,26 @@ RefPtr<BitmapImage> BitmapImage::create(RefPtr<NativeImage>&& nativeImage)
     return adoptRef(*new BitmapImage(nativeImage.releaseNonNull()));
 }
 
+std::optional<Ref<BitmapImage>> BitmapImage::create(RefPtr<ShareableBitmap>&& bitmap)
+{
+    if (!bitmap)
+        return std::nullopt;
+    RefPtr image = bitmap->createImage();
+    if (!image)
+        return std::nullopt;
+    return image.releaseNonNull();
+}
+
 RefPtr<BitmapImage> BitmapImage::create(PlatformImagePtr&& platformImage)
 {
     return create(NativeImage::create(WTF::move(platformImage)));
+}
+
+BitmapImage& BitmapImage::nullImage()
+{
+    ASSERT(isMainThread());
+    static NeverDestroyed<Ref<BitmapImage>> nullImage = BitmapImage::create();
+    return nullImage->get();
 }
 
 BitmapImage::BitmapImage(ImageObserver* observer, AlphaOption alphaOption, GammaAndColorProfileOption gammaAndColorProfileOption)
@@ -140,7 +158,7 @@ ImageDrawResult BitmapImage::draw(GraphicsContext& context, const FloatRect& des
             if (headroom == Headroom::FromImage)
                 headroom = nativeImage->headroom();
 
-            context.drawNativeImage(nativeImage, destinationRect, adjustedSourceRect, { options, orientation, headroom });
+            m_source->drawNativeImage(context, nativeImage, destinationRect, adjustedSourceRect, { options, orientation, headroom });
 #if !HAVE(SUPPORT_HDR_DISPLAY_APIS)
         }
 #endif
@@ -175,15 +193,13 @@ void BitmapImage::drawLuminanceMaskPattern(GraphicsContext& context, const Float
     if (!buffer)
         return;
 
-    auto observer = imageObserver();
-
-    // Temporarily reset image observer, we don't want to receive any changeInRect() calls due to this relayout.
-    setImageObserver(nullptr);
-
     auto bufferRect = FloatRect { { }, buffer->logicalSize() };
-    draw(buffer->context(), bufferRect, tileRect, { options, DecodingMode::Synchronous, ImageOrientation::Orientation::FromImage });
+    {
+        // Temporarily reset image observer, we don't want to receive any changeInRect() calls due to this relayout.
+        ImageObserverDisableScope imageObserverDisabler(*this);
+        draw(buffer->context(), bufferRect, tileRect, { options, DecodingMode::Synchronous, ImageOrientation::Orientation::FromImage });
+    }
 
-    setImageObserver(WTF::move(observer));
     buffer->convertToLuminanceMask();
 
     context.setDrawLuminanceMask(false);

@@ -31,6 +31,7 @@
 #include "JSCSSStyleSheet.h"
 #include "JSDOMConvertInterface.h"
 #include "JSDOMPromiseDeferred.h"
+#include "JSNodeCustomInlines.h"
 #include "Logging.h"
 #include "MediaList.h"
 #include "MediaQueryParser.h"
@@ -182,6 +183,7 @@ CSSStyleSheet::~CSSStyleSheet()
 
 Node* CSSStyleSheet::ownerNode() const
 {
+    assertIsOwnerThread();
     return m_ownerNode.get();
 }
 
@@ -278,12 +280,32 @@ void CSSStyleSheet::forEachStyleScope(NOESCAPE const Function<void(Style::Scope&
 
 void CSSStyleSheet::clearOwnerNode()
 {
+    Locker locker { m_opaqueRootLockForGC };
     m_ownerNode = nullptr;
+}
+
+WebCoreOpaqueRoot CSSStyleSheet::opaqueRootForGCThread()
+{
+    Locker locker { m_opaqueRootLockForGC };
+    if (m_ownerNode)
+        return root(m_ownerNode.get());
+    if (SUPPRESS_UNCOUNTED_LOCAL SUPPRESS_UNCHECKED_LOCAL CSSImportRule* ownerRule = m_ownerRule.get()) {
+        // Cannot ref on the GC thread, same as ownerRule above.
+        if (SUPPRESS_UNCOUNTED_LOCAL auto* parentSheet = ownerRule->parentStyleSheet())
+            return parentSheet->opaqueRootForGCThread();
+    }
+    return WebCoreOpaqueRoot { this };
 }
 
 CSSImportRule* CSSStyleSheet::ownerRule() const
 {
     return m_ownerRule.get();
+}
+
+void CSSStyleSheet::clearOwnerRule()
+{
+    Locker locker { m_opaqueRootLockForGC };
+    m_ownerRule = nullptr;
 }
 
 void CSSStyleSheet::reattachChildRuleCSSOMWrappers()
@@ -472,15 +494,15 @@ CSSStyleSheet* CSSStyleSheet::parentStyleSheet() const
     return ownerRule ? ownerRule->parentStyleSheet() : nullptr;
 }
 
-CSSStyleSheet& CSSStyleSheet::rootStyleSheet()
+Ref<CSSStyleSheet> CSSStyleSheet::rootStyleSheet()
 {
-    auto* root = this;
+    RefPtr root = this;
     while (root->parentStyleSheet())
         root = root->parentStyleSheet();
-    return *root;
+    return root.releaseNonNull();
 }
 
-const CSSStyleSheet& CSSStyleSheet::rootStyleSheet() const
+Ref<const CSSStyleSheet> CSSStyleSheet::rootStyleSheet() const
 {
     return const_cast<CSSStyleSheet&>(*this).rootStyleSheet();
 }
@@ -571,6 +593,7 @@ ExceptionOr<void> CSSStyleSheet::replaceSync(String&& text)
 
 bool CSSStyleSheet::isDetached() const
 {
+    assertIsOwnerThread();
     return !m_ownerNode
         && !m_ownerRule
         && m_adoptingTreeScopes.isEmptyIgnoringNullReferences();

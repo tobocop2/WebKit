@@ -30,6 +30,7 @@
 #include "FrameInspectorTarget.h"
 #include "FrameInspectorTargetProxy.h"
 #include "InspectorBrowserAgent.h"
+#include "InspectorStorageAgent.h"
 #include "PageInspectorTarget.h"
 #include "PageInspectorTargetProxy.h"
 #include "ProvisionalFrameProxy.h"
@@ -454,13 +455,20 @@ void WebPageInspectorController::didCommitProvisionalFrame(WebFrameProxy& frame,
     String newTargetID = FrameInspectorTarget::toTargetID(frameID, newProcessID);
 
     CheckedPtr targetAgent = m_targetAgent;
-    CheckedPtr newTarget = m_targets.get(newTargetID);
-    ASSERT(newTarget);
-    newTarget->didCommitProvisionalTarget();
-    targetAgent->didCommitProvisionalTarget(oldTargetID, newTargetID);
 
-    if (auto oldTarget = m_targets.take(oldTargetID))
-        targetAgent->targetDestroyed(protect(*oldTarget));
+    // Under site isolation the frame's target may already be gone (for example a cross-site main-frame
+    // commit wiped this page's frame targets before this late subframe commit arrived). Skip the target
+    // notifications in that case, but still run the instrumentation migration below.
+    if (CheckedPtr newTarget = m_targets.get(newTargetID)) {
+        newTarget->didCommitProvisionalTarget();
+        targetAgent->didCommitProvisionalTarget(oldTargetID, newTargetID);
+    }
+
+    // A same-process commit has oldTargetID == newTargetID; taking it would destroy what we just committed.
+    if (oldTargetID != newTargetID) {
+        if (auto oldTarget = m_targets.take(oldTargetID))
+            targetAgent->targetDestroyed(protect(*oldTarget));
+    }
 
     // Instrument the new process for network events now that the frame has
     // committed in its final process. Also disable instrumentation for the
@@ -511,6 +519,7 @@ void WebPageInspectorController::createLazyAgents()
     auto webPageContext = webPageAgentContext();
 
     m_agents.append(makeUniqueRef<InspectorBrowserAgent>(webPageContext));
+    m_agents.append(makeUniqueRef<InspectorStorageAgent>(webPageContext));
 
     if (protect(protect(m_inspectedPage)->preferences())->siteIsolationEnabled()) {
         // ProxyingNetworkAgent and ProxyingPageAgent are RefCounted (for IPC MessageReceiver)
@@ -552,6 +561,12 @@ bool WebPageInspectorController::isPageInstrumentationEnabled() const
     return m_pageAgent && m_pageAgent->isEnabled();
 }
 
+void WebPageInspectorController::setShowPaintRects(bool show)
+{
+    if (RefPtr pageAgent = m_pageAgent)
+        std::ignore = pageAgent->setShowPaintRects(show);
+}
+
 void WebPageInspectorController::setEnabledBrowserAgent(InspectorBrowserAgent* agent)
 {
     if (m_enabledBrowserAgent == agent)
@@ -576,6 +591,17 @@ void WebPageInspectorController::browserExtensionsDisabled(HashSet<String>&& ext
 {
     if (CheckedPtr enabledBrowserAgent = m_enabledBrowserAgent)
         enabledBrowserAgent->extensionsDisabled(WTF::move(extensionIDs));
+}
+
+// Unlike closing the inspector, this leaves the page target and other frame targets connected.
+void WebPageInspectorController::disconnectFrameTargetForTesting(WebCore::FrameIdentifier frameID)
+{
+    RefPtr frame = WebFrameProxy::webFrame(frameID);
+    if (!frame)
+        return;
+
+    if (CheckedPtr target = m_targets.get(getTargetID(*frame)))
+        target->disconnect();
 }
 
 } // namespace WebKit

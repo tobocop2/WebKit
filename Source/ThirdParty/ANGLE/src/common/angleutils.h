@@ -35,9 +35,9 @@
 namespace angle
 {
 
-#if defined(ANGLE_ENABLE_D3D9) || defined(ANGLE_ENABLE_D3D11)
+#if defined(ANGLE_PLATFORM_WINDOWS)
 using Microsoft::WRL::ComPtr;
-#endif  // defined(ANGLE_ENABLE_D3D9) || defined(ANGLE_ENABLE_D3D11)
+#endif
 
 // Forward declaration. Implementation in system_utils.h
 using ThreadId = std::thread::id;
@@ -62,7 +62,7 @@ constexpr char kPerfMonitorExtensionName[] = "GL_AMD_performance_monitor";
 struct PerfMonitorCounterInfo
 {
     PerfMonitorCounterInfo() = default;
-    PerfMonitorCounterInfo(const char *name) : name(name) {}
+    PerfMonitorCounterInfo(std::string_view name) : name(name) {}
 
     std::string name;
 };
@@ -97,9 +97,7 @@ struct PerfMonitorTriplet
 
 #define ANGLE_VK_PERF_COUNTERS_X(FN)               \
     FN(commandQueueSubmitCallsTotal)               \
-    FN(commandQueueSubmitCallsPerFrame)            \
     FN(vkQueueSubmitCallsTotal)                    \
-    FN(vkQueueSubmitCallsPerFrame)                 \
     FN(commandQueueWaitSemaphoresTotal)            \
     FN(renderPasses)                               \
     FN(writeDescriptorSets)                        \
@@ -140,7 +138,6 @@ struct PerfMonitorTriplet
     FN(monolithicPipelineCreation)                 \
     FN(descriptorSetAllocations)                   \
     FN(descriptorSetCacheTotalSize)                \
-    FN(descriptorSetCacheKeySizeBytes)             \
     FN(uniformsAndXfbDescriptorSetCacheHits)       \
     FN(uniformsAndXfbDescriptorSetCacheMisses)     \
     FN(uniformsAndXfbDescriptorSetCacheTotalSize)  \
@@ -162,10 +159,24 @@ struct PerfMonitorTriplet
     FN(vertexArraySyncStateCalls)                  \
     FN(allocateNewBufferBlockCalls)                \
     FN(bufferSuballocationCalls)                   \
-    FN(dynamicBufferAllocations)                   \
     FN(framebufferCacheSize)                       \
     FN(pendingSubmissionGarbageObjects)            \
     FN(graphicsDriverUniformsUpdated)
+
+#define ANGLE_VK_API_PERF_COUNTER_GROUPS_X(FN) \
+    FN(Command)                                \
+    FN(Submit)                                 \
+    FN(Surface)                                \
+    FN(Wait)                                   \
+    FN(Other)
+
+#define ANGLE_VK_API_PERF_COUNTER_TYPES_X(FN) \
+    FN(WallTimeNs)                            \
+    FN(Samples)
+
+#define ANGLE_VK_API_PERF_COUNTER_TYPES_WITH_PARAM_X(FN, PARAM) \
+    FN(WallTimeNs, PARAM)                                       \
+    FN(Samples, PARAM)
 
 #define ANGLE_DECLARE_PERF_COUNTER(COUNTER) uint64_t COUNTER;
 
@@ -176,6 +187,28 @@ struct VulkanPerfCounters
 
 #undef ANGLE_DECLARE_PERF_COUNTER
 
+#define ANGLE_DECLARE_VK_API_PERF_COUNTER_ENUM(NAME) NAME,
+
+enum class VulkanApiPerfCounterGroup
+{
+    ANGLE_VK_API_PERF_COUNTER_GROUPS_X(ANGLE_DECLARE_VK_API_PERF_COUNTER_ENUM)
+    // EnumCount enables PackedEnums support.
+    EnumCount
+};
+
+enum class VulkanApiPerfCounterType
+{
+    ANGLE_VK_API_PERF_COUNTER_TYPES_X(ANGLE_DECLARE_VK_API_PERF_COUNTER_ENUM)
+    // EnumCount enables PackedEnums support.
+    EnumCount
+};
+
+#undef ANGLE_DECLARE_VK_API_PERF_COUNTER_ENUM
+
+std::string_view GetVulkanApiPerfCounterGroupName(VulkanApiPerfCounterGroup group);
+std::string_view GetVulkanApiPerfCounterTypeName(VulkanApiPerfCounterType type);
+std::string_view GetVulkanApiPerfCounterName(VulkanApiPerfCounterGroup group,
+                                             VulkanApiPerfCounterType type);
 }  // namespace angle
 
 template <typename T, size_t N>
@@ -216,26 +249,6 @@ class WrappedArray final : angle::NonCopyable
     const T *mArray = nullptr;
     size_t mSize    = 0;
 };
-
-template <typename T, unsigned int N>
-void SafeRelease(T (&resourceBlock)[N])
-{
-    for (unsigned int i = 0; i < N; i++)
-    {
-        // SAFETY: size deduced by compiler from template.
-        SafeRelease(ANGLE_UNSAFE_BUFFERS(resourceBlock[i]));
-    }
-}
-
-template <typename T>
-void SafeRelease(T &resource)
-{
-    if (resource)
-    {
-        resource->Release();
-        resource = nullptr;
-    }
-}
 
 template <typename T>
 void SafeDelete(T *&resource)
@@ -342,6 +355,10 @@ inline bool IsLittleEndian()
 #    define snprintf _snprintf
 #endif
 
+// Standard 64-bit type enums (for internal use)
+#define GL_INT64 0x140E           // Same as GL_INT64_ARB
+#define GL_UNSIGNED_INT64 0x140F  // Same as GL_UNSIGNED_INT64_ARB
+
 // Note: when adding internal formats, update IsAngleInternalFormat() so they aren't accidentally
 // accessible by the application.
 #define GL_A1RGB5_ANGLEX 0x6AC5
@@ -349,8 +366,6 @@ inline bool IsLittleEndian()
 #define GL_BGR565_ANGLEX 0x6ABB
 #define GL_BGRA4_ANGLEX 0x6ABC
 #define GL_BGR5_A1_ANGLEX 0x6ABD
-#define GL_INT_64_ANGLEX 0x6ABE
-#define GL_UINT_64_ANGLEX 0x6ABF
 #define GL_BGRA8_SRGB_ANGLEX 0x6AC0
 #define GL_BGR10_A2_ANGLEX 0x6AF9
 #define GL_BGRX8_SRGB_ANGLEX 0x6AFC
@@ -481,6 +496,25 @@ class MsanScopedDisableInterceptorChecks final : angle::NonCopyable
 #    define ANGLE_NO_SANITIZE_CFI_ICALL __attribute__((no_sanitize("cfi-icall")))
 #else
 #    define ANGLE_NO_SANITIZE_CFI_ICALL
+#endif
+
+// Clang -Wthread-safety capability annotations for functions that acquire or
+// release a capability (such as a std::mutex member) named by their argument.
+#if defined(__clang__) && __has_attribute(acquire_capability)
+#    define ANGLE_ACQUIRE_CAPABILITY(...) __attribute__((acquire_capability(__VA_ARGS__)))
+#    define ANGLE_RELEASE_CAPABILITY(...) __attribute__((release_capability(__VA_ARGS__)))
+#else
+#    define ANGLE_ACQUIRE_CAPABILITY(...)
+#    define ANGLE_RELEASE_CAPABILITY(...)
+#endif
+
+// Clang -Wthread-safety opt-out for a function whose locking discipline the
+// analyzer cannot model, such as conditional or recursive locking or lock
+// ownership transferred into a returned guard.
+#if defined(__clang__) && __has_attribute(no_thread_safety_analysis)
+#    define ANGLE_NO_THREAD_SAFETY_ANALYSIS __attribute__((no_thread_safety_analysis))
+#else
+#    define ANGLE_NO_THREAD_SAFETY_ANALYSIS
 #endif
 
 // The below inlining code lifted from V8.

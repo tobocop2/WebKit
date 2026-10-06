@@ -90,7 +90,7 @@ set(WTF_PUBLIC_HEADERS
     EnumSet.h
     EnumTraits.h
     EnumeratedArray.h
-    Expected.h
+    EscapableByteSpan.h
     ExperimentalFeatureNames.h
     ExportMacros.h
     FailureAction.h
@@ -122,7 +122,6 @@ set(WTF_PUBLIC_HEADERS
     GlobalVersion.h
     GraphNodeWorklist.h
     GraphOrdering.h
-    GregorianDateTime.h
     HashCountedSet.h
     HashFunctions.h
     HashIterators.h
@@ -157,6 +156,7 @@ set(WTF_PUBLIC_HEADERS
     JSValueMalloc.h
     KeyValuePair.h
     LEBDecoder.h
+    LEBEncoder.h
     LLVMProfilingUtils.h
     Language.h
     LazyRef.h
@@ -208,6 +208,7 @@ set(WTF_PUBLIC_HEADERS
     NoLock.h
     NoTailCalls.h
     NoVirtualDestructorBase.h
+    Nonallocatable.h
     Noncopyable.h
     Nonmovable.h
     NotFound.h
@@ -241,6 +242,7 @@ set(WTF_PUBLIC_HEADERS
     ParallelJobsOpenMP.h
     ParallelVectorIterator.h
     ParkingLot.h
+    PlainGregorianDateTime.h
     Platform.h
     PlatformCallingConventions.h
     PlatformCPU.h
@@ -330,6 +332,7 @@ set(WTF_PUBLIC_HEADERS
     SpanningTree.h
     SparseBitVector.h
     Spectrum.h
+    SpinBackoff.h
     StackAllocation.h
     StackBounds.h
     StackCheck.h
@@ -378,6 +381,7 @@ set(WTF_PUBLIC_HEADERS
     ThreadingEnums.h
     ThreadingPrimitives.h
     TimeWithDynamicClockType.h
+    TimeZone.h
     TimingScope.h
     TinyLRUCache.h
     TinyPtrSet.h
@@ -582,7 +586,6 @@ set(WTF_SOURCES
     FileSystem.cpp
     FunctionDispatcher.cpp
     GlobalVersion.cpp
-    GregorianDateTime.cpp
     HashTable.cpp
     HexNumber.cpp
     Int128.cpp
@@ -610,6 +613,7 @@ set(WTF_SOURCES
     ParallelHelperPool.cpp
     ParallelJobsGeneric.cpp
     ParkingLot.cpp
+    PlainGregorianDateTime.cpp
     PreciseSum.cpp
     PrintStream.cpp
     ProcessPrivilege.cpp
@@ -642,6 +646,7 @@ set(WTF_SOURCES
     ThreadMessage.cpp
     Threading.cpp
     TimeWithDynamicClockType.cpp
+    TimeZone.cpp
     TimingScope.cpp
     URL.cpp
     URLHelpers.cpp
@@ -727,6 +732,7 @@ elseif (APPLE)
     list(APPEND WTF_SOURCES
         darwin/OSLogPrintStream.mm
     )
+    set_source_files_properties(darwin/OSLogPrintStream.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 
     list(APPEND WTF_PUBLIC_HEADERS
         cf/CFURLExtras.h
@@ -798,6 +804,7 @@ elseif (APPLE)
 elseif (CMAKE_SYSTEM_NAME MATCHES "Linux")
     list(APPEND WTF_PUBLIC_HEADERS
         linux/CurrentProcessMemoryStatus.h
+        linux/HighPriorityThreads.h
         linux/ProcessMemoryFootprint.h
     )
 endif ()
@@ -848,8 +855,7 @@ WEBKIT_INCLUDE_CONFIG_FILES_IF_EXISTS()
 WEBKIT_ADD_TARGET_UNSAFE_BUFFER_WARNINGS(WTF)
 
 WEBKIT_COPY_FILES(WTF_CopyHeaders
-    PRUNE_STALE
-    DESTINATION ${WTF_FRAMEWORK_HEADERS_DIR}/wtf
+    DESTINATION ${WTF_HEADERS_DIR}
     FILES ${WTF_PUBLIC_HEADERS}
 )
 
@@ -857,18 +863,23 @@ if (NOT APPLE AND SWIFT_REQUIRED)
     # module.modulemap has "umbrella spi" for the wtf.SPI submodule; Clang requires
     # the umbrella directory to be non-empty or it fails with "cannot create includes file".
     # Provide a stub header so the directory has at least one entry.
-    file(MAKE_DIRECTORY "${WTF_FRAMEWORK_HEADERS_DIR}/wtf/spi")
-    file(WRITE "${WTF_FRAMEWORK_HEADERS_DIR}/wtf/spi/wtf_spi_stub.h" "")
+    file(MAKE_DIRECTORY "${WTF_HEADERS_DIR}/spi")
+    file(WRITE "${WTF_HEADERS_DIR}/spi/wtf_spi_stub.h" "")
 
     # module.modulemap declares an explicit `WebCoreThread` submodule referencing
     # ios/WebCoreThread.h, which is Cocoa-only. Clang validates header existence
     # when parsing the modulemap even for unused explicit submodules, so provide
     # an empty stub.
-    file(MAKE_DIRECTORY "${WTF_FRAMEWORK_HEADERS_DIR}/wtf/ios")
-    file(WRITE "${WTF_FRAMEWORK_HEADERS_DIR}/wtf/ios/WebCoreThread.h" "")
+    file(MAKE_DIRECTORY "${WTF_HEADERS_DIR}/ios")
+    file(WRITE "${WTF_HEADERS_DIR}/ios/WebCoreThread.h" "")
 endif ()
 
 WEBKIT_FRAMEWORK(WTF)
+
+# WTF is statically linked into JavaScriptCore, so it uses JSC's PGO profile.
+if (USE_APPLE_INTERNAL_SDK)
+    WEBKIT_TARGET_USE_PGO(WTF PROFILE JavaScriptCore)
+endif ()
 
 if (MSVC)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /SUBSYSTEM:WINDOWS")
@@ -897,6 +908,9 @@ file(COPY
 
 set(WTF_PREFERENCES
     ../Scripts/GeneratePreferences.rb
+    ../Scripts/GenerateSecurityFlags.rb
+
+    ../Scripts/Preferences/SecurityFlags.yaml
     ../Scripts/Preferences/UnifiedWebPreferences.yaml
 )
 

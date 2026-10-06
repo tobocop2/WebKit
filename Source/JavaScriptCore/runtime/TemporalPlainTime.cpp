@@ -28,6 +28,7 @@
 #include "TemporalPlainTime.h"
 
 #include "DurationArithmetic.h"
+#include "InternalFunction.h"
 #include "IntlObjectInlines.h"
 #include "JSCInlines.h"
 #include "Rounding.h"
@@ -42,6 +43,7 @@ static constexpr bool verbose = false;
 }
 
 const ClassInfo TemporalPlainTime::s_info = { "Object"_s, &Base::s_info, nullptr, nullptr, CREATE_METHOD_TABLE(TemporalPlainTime) };
+CLASSINFO_KEEP_ADDRESS_UNIQUE(TemporalPlainTime);
 
 TemporalPlainTime* TemporalPlainTime::create(VM& vm, Structure* structure, ISO8601::PlainTime&& plainTime)
 {
@@ -115,18 +117,19 @@ ISO8601::PlainTime TemporalPlainTime::validateAndCreateTimeRecord(JSGlobalObject
     };
 }
 
-// CreateTemporalTime ( time [ , newTarget ] )
 // https://tc39.es/proposal-temporal/#sec-temporal-createtemporaltime
-TemporalPlainTime* TemporalPlainTime::tryCreateIfValid(JSGlobalObject* globalObject, Structure* structure, ISO8601::Duration&& duration)
+TemporalPlainTime* createTemporalTime(JSGlobalObject* globalObject, ISO8601::PlainTime&& plainTime, TemporalNewTarget newTarget)
 {
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
 
-    // IsValidTime + materialize the Time Record.
-    auto plainTime = validateAndCreateTimeRecord(globalObject, duration);
+    // Step 1: If newTarget is not present, set newTarget to %Temporal.PlainTime%.
+    // Step 2: Let object be ? OrdinaryCreateFromConstructor(newTarget, "%Temporal.PlainTime.prototype%", « ... »).
+    ASSERT(newTarget.newTarget && newTarget.constructor);
+    Structure* structure = JSC_GET_DERIVED_STRUCTURE(vm, plainTimeStructure, newTarget.newTarget, newTarget.constructor);
     RETURN_IF_EXCEPTION(scope, { });
 
-    // Steps 1-4: OrdinaryCreateFromConstructor + set [[Time]].
+    // Step 3: set [[Time]]. Step 4: Return object.
     return TemporalPlainTime::create(vm, structure, WTF::move(plainTime));
 }
 
@@ -516,9 +519,7 @@ TemporalPlainTime* TemporalPlainTime::from(JSGlobalObject* globalObject, JSValue
         // Return ! CreateTemporalTime(isoDateTime.[[Time]]).
         if (itemValue.inherits<TemporalZonedDateTime>()) {
             auto* zdt = uncheckedDowncast<TemporalZonedDateTime>(itemValue);
-            ISO8601::PlainDate date;
-            ISO8601::PlainTime time;
-            zdt->getLocalDateAndTime(globalObject, date, time);
+            auto [date, time] = zdt->getLocalDateTime(globalObject);
             RETURN_IF_EXCEPTION(scope, { });
             toTemporalOverflow(globalObject, optionsValue);
             RETURN_IF_EXCEPTION(scope, { });
@@ -632,45 +633,6 @@ ISO8601::Duration TemporalPlainTime::addTime(const ISO8601::PlainTime& plainTime
         static_cast<Int128>(plainTime.millisecond()) + static_cast<Int128>(duration.milliseconds()),
         static_cast<Int128>(plainTime.microsecond()) + static_cast<Int128>(duration.microseconds()),
         static_cast<Int128>(plainTime.nanosecond()) + static_cast<Int128>(duration.nanoseconds()));
-}
-
-// https://tc39.es/proposal-temporal/#sec-temporal.plaintime.prototype.with
-ISO8601::PlainTime TemporalPlainTime::with(JSGlobalObject* globalObject, JSObject* temporalTimeLike, JSValue optionsValue) const
-{
-    VM& vm = globalObject->vm();
-    auto scope = DECLARE_THROW_SCOPE(vm);
-
-    // Steps 1-2: branding done by caller.
-
-    // Step 3: If ? IsPartialTemporalObject(temporalTimeLike) is false, throw TypeError.
-    //   rejectObjectWithCalendarOrTimeZone handles both rejection cases (Temporal.* instance, or calendar/timeZone property).
-    rejectObjectWithCalendarOrTimeZone(globalObject, temporalTimeLike);
-    RETURN_IF_EXCEPTION(scope, { });
-
-    // Step 4: Let partialTime be ? ToTemporalTimeRecord(temporalTimeLike, ~partial~).
-    auto [hourOptional, minuteOptional, secondOptional, millisecondOptional, microsecondOptional, nanosecondOptional] = toPartialTime(globalObject, temporalTimeLike);
-    RETURN_IF_EXCEPTION(scope, { });
-
-    // Step 17: resolvedOptions = ? GetOptionsObject(options).
-    JSObject* options = intlGetOptionsObject(globalObject, optionsValue);
-    RETURN_IF_EXCEPTION(scope, { });
-
-    // Step 18: overflow = ? GetTemporalOverflowOption(resolvedOptions).
-    TemporalOverflow overflow = toTemporalOverflow(globalObject, options);
-    RETURN_IF_EXCEPTION(scope, { });
-
-    // Steps 5-16 (per field): if partialTime.X is not undefined, x = partialTime.X; else x = this.X.
-    ISO8601::Duration duration { };
-    duration.setField(TemporalUnit::Hour, hourOptional.value_or(hour()));
-    duration.setField(TemporalUnit::Minute, minuteOptional.value_or(minute()));
-    duration.setField(TemporalUnit::Second, secondOptional.value_or(second()));
-    duration.setField(TemporalUnit::Millisecond, millisecondOptional.value_or(millisecond()));
-    duration.setField(TemporalUnit::Microsecond, microsecondOptional.value_or(microsecond()));
-    duration.setField(TemporalUnit::Nanosecond, nanosecondOptional.value_or(nanosecond()));
-
-    // Step 19: result = ? RegulateTime(h, m, s, ms, us, ns, overflow).
-    // Step 20: Return ! CreateTemporalTime(result). (Caller wraps.)
-    RELEASE_AND_RETURN(scope, regulateTime(globalObject, WTF::move(duration), overflow));
 }
 
 // DifferenceTime ( time1, time2 ) — returns a time duration (in nanoseconds).

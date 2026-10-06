@@ -32,6 +32,7 @@
 #include "CaretAnimator.h"
 #include "CharacterData.h"
 #include "ColorBlending.h"
+#include "ColorLuminance.h"
 #include "ContainerNodeInlines.h"
 #include "DeleteSelectionCommand.h"
 #include "DictationCaretAnimator.h"
@@ -62,12 +63,18 @@
 #include "HitTestRequest.h"
 #include "HitTestResult.h"
 #include "ImageOverlay.h"
+#include "InlineIteratorBox.h"
+#include "InlineIteratorBoxInlines.h"
+#include "InlineIteratorInlineBox.h"
+#include "InlineIteratorLineBox.h"
 #include "InlineRunAndOffset.h"
 #include "LegacyInlineTextBox.h"
+#include "LineSelection.h"
 #include "LocalDOMWindow.h"
 #include "LocalFrame.h"
 #include "LocalFrameInlines.h"
 #include "LocalFrameView.h"
+#include "LocalFrameViewInlines.h"
 #include "Logging.h"
 #include "MutableStyleProperties.h"
 #include "OpacityCaretAnimator.h"
@@ -75,8 +82,11 @@
 #include "PositionInlines.h"
 #include "PseudoClassChangeInvalidation.h"
 #include "Range.h"
+#include "RenderBoxModelObject.h"
+#include "RenderInline.h"
 #include "RenderLayer.h"
 #include "RenderLayerScrollableArea.h"
+#include "RenderObjectStyle.h"
 #include "RenderText.h"
 #include "RenderTextControl.h"
 #include "RenderTheme.h"
@@ -185,7 +195,7 @@ static UniqueRef<CaretAnimator> createCaretAnimator(FrameSelection* frameSelecti
     if (redesignedTextCursorEnabled()) {
         std::optional<LayoutRect> existingExpansionRect;
         if (optionalCaretType)
-            existingExpansionRect = frameSelection->caretAnimator().caretRepaintRectForLocalRect(LayoutRect());
+            existingExpansionRect = protect(frameSelection->caretAnimator())->caretRepaintRectForLocalRect(LayoutRect());
 
         switch (optionalCaretType.value_or(CaretAnimatorType::Default)) {
         case CaretAnimatorType::Default:
@@ -392,7 +402,7 @@ bool FrameSelection::setSelectionWithoutUpdatingAppearance(const VisibleSelectio
     VisibleSelection oldSelection = m_selection;
     bool willMutateSelection = oldSelection != newSelection;
     if (willMutateSelection && document && !options.contains(SetSelectionOption::DoNotNotifyEditorClients))
-        document->editor().selectionWillChange();
+        protect(document->editor())->selectionWillChange();
 
     {
         ScriptDisallowedScope::InMainThread scriptDisallowedScope;
@@ -459,14 +469,14 @@ bool FrameSelection::setSelectionWithoutUpdatingAppearance(const VisibleSelectio
     m_xPosForVerticalArrowNavigation = std::nullopt;
     selectFrameElementInParentIfFullySelected();
     if (!options.contains(SetSelectionOption::DoNotNotifyEditorClients))
-        document->editor().respondToChangedSelection(oldSelection, options);
+        protect(document->editor())->respondToChangedSelection(oldSelection, options);
 
     if (shouldScheduleSelectionChangeEvent) {
         if (textControl)
             textControl->scheduleSelectionChangeEvent();
         else if (!m_hasScheduledSelectionChangeEventOnDocument) {
             m_hasScheduledSelectionChangeEventOnDocument = true;
-            document->eventLoop().queueTask(TaskSource::UserInteraction, [weakDocument = WeakPtr { document.get() }] {
+            protect(document->eventLoop())->queueTask(TaskSource::UserInteraction, [weakDocument = WeakPtr { document.get() }] {
                 if (RefPtr document = weakDocument.get()) {
                     document->selection().m_hasScheduledSelectionChangeEventOnDocument = false;
                     document->dispatchEvent(Event::create(eventNames().selectionchangeEvent, Event::CanBubble::No, Event::IsCancelable::No));
@@ -525,7 +535,7 @@ void FrameSelection::setSelection(const VisibleSelection& selection, OptionSet<S
 void FrameSelection::updateSelectionAppearanceNow()
 {
     RefPtr document = m_document.get();
-    if (!document || !document->hasLivingRenderTree())
+    if (!document || document->renderTreeState() != Document::RenderTreeState::Built)
         return;
 
 #if ENABLE(TEXT_CARET)
@@ -576,7 +586,7 @@ void FrameSelection::updateAndRevealSelection(const AXTextStateChangeIntent& int
 void FrameSelection::updateDataDetectorsForSelection()
 {
 #if ENABLE(TELEPHONE_NUMBER_DETECTION) && !PLATFORM(IOS_FAMILY)
-    m_document->editor().scanSelectionForTelephoneNumbers();
+    protect(protect(m_document)->editor())->scanSelectionForTelephoneNumbers();
 #endif
 }
 
@@ -711,7 +721,9 @@ void FrameSelection::respondToNodeModification(Node& node, bool anchorRemoved, b
             clearDOMTreeSelection = true;
 
         clearRenderTreeSelection = true;
-    } if (startRemoved || endRemoved) {
+    }
+
+    if (startRemoved || endRemoved) {
         Position start = m_selection.start();
         Position end = m_selection.end();
         if (startRemoved)
@@ -1772,7 +1784,7 @@ void FrameSelection::willBeRemovedFromFrame()
     m_granularity = TextGranularity::CharacterGranularity;
 
 #if ENABLE(TEXT_CARET)
-    caretAnimator().stop();
+    protect(caretAnimator())->stop();
 #endif
 
     if (CheckedPtr view = m_document->renderView())
@@ -1919,7 +1931,7 @@ bool FrameSelection::recomputeCaretRect()
 
     IntRect oldAbsCaretBounds = m_absCaretBounds;
     bool isInsideFixed;
-    m_absCaretBounds = absoluteBoundsForLocalCaretRect(rendererForCaretPainting(caretNode.get()), newRect, &isInsideFixed);
+    m_absCaretBounds = absoluteBoundsForLocalCaretRect(protect(rendererForCaretPainting(caretNode.get())), newRect, &isInsideFixed);
     m_caretInsidePositionFixed = isInsideFixed;
 
     if (m_absCaretBoundsDirty && m_selection.isCaret()) // We should be able to always assert this condition.
@@ -1932,12 +1944,12 @@ bool FrameSelection::recomputeCaretRect()
 
 #if ENABLE(TEXT_CARET)
     if (CheckedPtr view = document->renderView()) {
-        bool previousOrNewCaretNodeIsContentEditable = m_selection.isContentEditable() || (m_previousCaretNode && m_previousCaretNode->isContentEditable());
+        bool previousOrNewCaretNodeIsContentEditable = m_selection.isContentEditable() || (m_previousCaretNode && protect(m_previousCaretNode)->isContentEditable());
         if (shouldRepaintCaret(view.get(), previousOrNewCaretNodeIsContentEditable)) {
             if (m_previousCaretNode)
-                repaintCaretForLocalRect(m_previousCaretNode.get(), oldRect, m_caretAnimator.ptr());
+                repaintCaretForLocalRect(m_previousCaretNode.get(), oldRect, protect(m_caretAnimator).ptr());
             m_previousCaretNode = caretNode;
-            repaintCaretForLocalRect(caretNode.get(), newRect, m_caretAnimator.ptr());
+            repaintCaretForLocalRect(caretNode.get(), newRect, protect(m_caretAnimator).ptr());
         }
     }
 #endif
@@ -1956,7 +1968,7 @@ void FrameSelection::invalidateCaretRect()
     if (!isCaret())
         return;
 
-    CaretBase::invalidateCaretRect(protect(m_selection.start().deprecatedNode()), recomputeCaretRect(), m_caretAnimator.ptr());
+    CaretBase::invalidateCaretRect(protect(m_selection.start().deprecatedNode()), recomputeCaretRect(), protect(m_caretAnimator).ptr());
 }
 
 void CaretBase::invalidateCaretRect(Node* node, bool caretRectChanged, CaretAnimator* caretAnimator)
@@ -1986,14 +1998,57 @@ void CaretBase::invalidateCaretRect(Node* node, bool caretRectChanged, CaretAnim
 void FrameSelection::paintCaret(GraphicsContext& context, const LayoutPoint& paintOffset)
 {
     if (m_selection.isCaret() && m_selection.start().deprecatedNode())
-        CaretBase::paintCaret(*m_selection.start().deprecatedNode(), context, paintOffset, m_caretAnimator.ptr());
+        CaretBase::paintCaret(protect(*m_selection.start().deprecatedNode()), context, paintOffset, protect(m_caretAnimator).ptr());
 }
 
-Color CaretBase::computeCaretColor(const Style::ComputedStyle& elementStyle, const Node* node)
+#if !(PLATFORM(IOS_FAMILY) && !PLATFORM(MACCATALYST)) && HAVE(REDESIGNED_TEXT_CURSOR)
+static LayoutSize inFlowPositionOffsetToCaretPainter(const RenderBoxModelObject& inlineBox, const RenderBlock& caretPainter)
+{
+    LayoutSize offset;
+    for (CheckedPtr<const RenderElement> ancestor = &inlineBox; ancestor && ancestor != &caretPainter; ancestor = ancestor->parent()) {
+        CheckedPtr modelObject = dynamicDowncast<RenderBoxModelObject>(ancestor.get());
+        if (modelObject && modelObject->isInFlowPositioned())
+            offset += modelObject->offsetForInFlowPosition();
+    }
+    return offset;
+}
+
+static bool inlineBackgroundCoversCaret(const RenderBoxModelObject& inlineBox, const RenderBlock& caretPainter, const LayoutRect& caretRect)
+{
+    if (inlineBox.containingBlock() != &caretPainter)
+        return true;
+
+    auto offsetToCaretPainter = inFlowPositionOffsetToCaretPainter(inlineBox, caretPainter);
+    offsetToCaretPainter -= toLayoutSize(caretPainter.scrollPosition());
+
+    auto isHorizontal = caretPainter.isHorizontalWritingMode();
+    auto logicalOffset = isHorizontal ? offsetToCaretPainter : offsetToCaretPainter.transposedSize();
+    auto logicalCaretRect = isHorizontal ? caretRect : caretRect.transposedRect();
+    auto caretMiddleAlongBlockAxis = logicalCaretRect.y() + logicalCaretRect.height() / 2;
+
+    for (auto box = InlineIterator::lineLeftmostInlineBoxFor(inlineBox); box; box.traverseInlineBoxLineRightward()) {
+        auto lineRect = LayoutRect { LineSelection::logicalRect(*box->lineBox()) };
+        lineRect.move(logicalOffset);
+        if (caretMiddleAlongBlockAxis < lineRect.y())
+            break;
+        if (caretMiddleAlongBlockAxis >= lineRect.maxY())
+            continue;
+        auto boxRect = LayoutRect { box->logicalRectIgnoringInlineDirection() };
+        boxRect.move(logicalOffset);
+        if (logicalCaretRect.x() >= boxRect.x() && logicalCaretRect.maxX() <= boxRect.maxX())
+            return true;
+    }
+
+    return false;
+}
+#endif
+
+Color CaretBase::computeCaretColor(const Style::ComputedStyle& elementStyle, const Node* node, std::optional<LayoutRect> caretRectInPainterSpace)
 {
     // On iOS, we want to fall back to the tintColor, and only override if CSS has explicitly specified a custom color.
 #if PLATFORM(IOS_FAMILY) && !PLATFORM(MACCATALYST)
     UNUSED_PARAM(node);
+    UNUSED_PARAM(caretRectInPainterSpace);
     if (elementStyle.caretColor().isAuto())
         return { };
     return elementStyle.caretColorResolvingCurrentColor();
@@ -2004,7 +2059,7 @@ Color CaretBase::computeCaretColor(const Style::ComputedStyle& elementStyle, con
     auto appUsesCustomAccentColor = false;
 #endif
 
-    if (elementStyle.caretColor().isAuto() && (!elementStyle.hasExplicitlySetColor() || appUsesCustomAccentColor)) {
+    auto systemAccentCaretColor = [&] {
 #if PLATFORM(MAC)
         auto cssColorValue = CSSValueAppleSystemControlAccent;
 #else
@@ -2015,10 +2070,54 @@ Color CaretBase::computeCaretColor(const Style::ComputedStyle& elementStyle, con
 
         Style::ColorResolver colorResolver { elementStyle };
         return colorResolver.colorApplyingColorFilter(systemAccentColor);
+    };
+
+    if (elementStyle.caretColor().isAuto() && (!elementStyle.hasExplicitlySetColor() || appUsesCustomAccentColor))
+        return systemAccentCaretColor();
+
+    auto caretColor = elementStyle.visitedDependentCaretColorApplyingColorFilter();
+    if (!elementStyle.caretColor().isAuto() || !node || !caretColor.isVisible())
+        return caretColor;
+
+    CheckedPtr caretPainter = rendererForCaretPainting(node);
+    CheckedPtr firstRenderer = node->renderer();
+    if (is<RenderText>(firstRenderer.get()))
+        firstRenderer = firstRenderer->parent();
+
+    Color surface;
+    for (CheckedPtr renderer = firstRenderer; renderer && !surface.isOpaque(); renderer = renderer->parent()) {
+        auto background = protect(renderer->style())->visitedDependentBackgroundColorApplyingColorFilter();
+        if (CheckedPtr inlineBox = dynamicDowncast<RenderInline>(renderer.get())) {
+            if (!background.isVisible())
+                continue;
+            if (!caretPainter || !caretRectInPainterSpace)
+                continue;
+            if (!inlineBackgroundCoversCaret(*inlineBox, *caretPainter, *caretRectInPainterSpace))
+                continue;
+        }
+        surface = blendSourceOver(background, surface);
     }
 
-    return elementStyle.visitedDependentCaretColorApplyingColorFilter();
+    if (!surface.isOpaque())
+        return caretColor;
+
+    static constexpr auto minimumContrastRatio = 3.0;
+    if (contrastRatio(caretColor, surface) >= minimumContrastRatio)
+        return caretColor;
+
+    if (caretPainter) {
+        auto painterCaretColor = protect(caretPainter->style())->visitedDependentCaretColorApplyingColorFilter();
+        if (painterCaretColor.isVisible() && contrastRatio(painterCaretColor, surface) >= minimumContrastRatio)
+            return painterCaretColor;
+    }
+
+    auto accentColor = systemAccentCaretColor();
+    if (contrastRatio(accentColor, surface) >= minimumContrastRatio)
+        return accentColor;
+
+    return contrastRatio(Color::black, surface) >= contrastRatio(Color::white, surface) ? Color::black : Color::white;
 #else
+    UNUSED_PARAM(caretRectInPainterSpace);
     RefPtr parentElement = node ? node->parentElement() : nullptr;
     auto* parentStyle = parentElement && parentElement->renderer() ? &parentElement->renderer()->style() : nullptr;
     // CSS value "auto" is treated as an invalid color.
@@ -2031,6 +2130,36 @@ Color CaretBase::computeCaretColor(const Style::ComputedStyle& elementStyle, con
     }
     return elementStyle.visitedDependentCaretColorApplyingColorFilter();
 #endif
+}
+
+static Color caretColorForNode(const Node& node, const LayoutRect& caretRectInPainterSpace)
+{
+    RefPtr element = dynamicDowncast<Element>(node);
+    if (!element)
+        element = node.parentElement();
+    if (!element || !element->renderer())
+        return { };
+
+    std::optional<LayoutRect> rectForGeometry;
+    if (!caretRectInPainterSpace.isEmpty())
+        rectForGeometry = caretRectInPainterSpace;
+
+    return CaretBase::computeCaretColor(protect(element->renderer()->style()), &node, rectForGeometry);
+}
+
+Color FrameSelection::paintedCaretColor()
+{
+    RefPtr node = m_selection.start().deprecatedNode();
+    if (!node)
+        return { };
+
+    recomputeCaretRect();
+
+    auto caretColor = caretColorForNode(*node, localCaretRectWithoutUpdate());
+    if (!caretColor.isValid())
+        caretColor = Color::black;
+
+    return caretColor;
 }
 
 void CaretBase::paintCaret(const Node& node, GraphicsContext& context, const LayoutPoint& paintOffset, CaretAnimator* caretAnimator) const
@@ -2047,12 +2176,9 @@ void CaretBase::paintCaret(const Node& node, GraphicsContext& context, const Lay
     if (caret.isEmpty())
         return;
 
-    Color caretColor = Color::black;
-    RefPtr element = dynamicDowncast<Element>(node);
-    if (!element)
-        element = node.parentElement();
-    if (element && element->renderer())
-        caretColor = CaretBase::computeCaretColor(element->renderer()->style(), &node);
+    auto caretColor = caretColorForNode(node, localCaretRectWithoutUpdate());
+    if (!caretColor.isValid())
+        caretColor = Color::black;
 
     auto pixelSnappedCaretRect = snapRectToDevicePixels(caret, node.document().deviceScaleFactor());
     if (caretAnimator)
@@ -2069,7 +2195,7 @@ void CaretBase::paintCaret(const Node& node, GraphicsContext& context, const Lay
 
 void FrameSelection::setCaretBlinkingSuspended(bool suspended)
 {
-    caretAnimator().setBlinkingSuspended(suspended);
+    protect(caretAnimator())->setBlinkingSuspended(suspended);
 }
 
 bool FrameSelection::isCaretBlinkingSuspended() const
@@ -2093,7 +2219,7 @@ void FrameSelection::setPrefersNonBlinkingCursor(bool enabled)
 void FrameSelection::caretAnimatorInvalidated(CaretAnimatorType caretType)
 {
     m_caretAnimator = createCaretAnimator(this, caretType);
-    caretAnimationDidUpdate(m_caretAnimator);
+    caretAnimationDidUpdate(protect(m_caretAnimator));
     updateAppearance();
 }
 #endif
@@ -2136,7 +2262,7 @@ bool FrameSelection::contains(const LayoutPoint& point) const
         return false;
     }
 
-    return WebCore::contains<ComposedTree>(*range, makeBoundaryPoint(innerNode->renderer()->visiblePositionForPoint(result.localPoint(), HitTestSource::User)));
+    return WebCore::contains<ComposedTree>(*range, makeBoundaryPoint(protect(innerNode->renderer())->visiblePositionForPoint(result.localPoint(), HitTestSource::User)));
 }
 
 // Workaround for the fact that it's hard to delete a frame.
@@ -2187,13 +2313,13 @@ void FrameSelection::selectFrameElementInParentIfFullySelected()
 
     // Focus on the parent frame, and then select from before this element to after.
     VisibleSelection newSelection(beforeOwnerElement, afterOwnerElement);
-    if (parent->selection().shouldChangeSelection(newSelection)) {
+    if (protect(parent->selection())->shouldChangeSelection(newSelection)) {
         page->focusController().setFocusedFrame(parent.get());
         // Previous focus can trigger DOM events, ensure the selection did not become orphan.
         if (newSelection.isOrphan())
-            parent->selection().clear();
+            protect(parent->selection())->clear();
         else
-            parent->selection().setSelection(newSelection);
+            protect(parent->selection())->setSelection(newSelection);
     }
 }
 
@@ -2257,8 +2383,11 @@ bool FrameSelection::setSelectedRange(const std::optional<SimpleRange>& range, A
     if (&range->start.document() != &range->end.document())
         return false;
 
-    VisibleSelection newSelection(*range, affinity);
+    return setSelectedVisibleSelection(VisibleSelection { *range, affinity }, closeTyping, userTriggered);
+}
 
+bool FrameSelection::setSelectedVisibleSelection(const VisibleSelection& newSelection, ShouldCloseTyping closeTyping, UserTriggered userTriggered)
+{
 #if PLATFORM(IOS_FAMILY)
     // FIXME: Why do we need this check only in iOS?
     if (newSelection.isNone())
@@ -2364,7 +2493,9 @@ bool FrameSelection::isFocusedAndActive() const
 #if ENABLE(TEXT_CARET)
 inline static bool shouldStopBlinkingDueToTypingCommand(Document* document)
 {
-    return document->editor().lastEditCommand() && document->editor().lastEditCommand()->shouldStopCaretBlinking();
+    Ref editor = protect(document)->editor();
+    RefPtr lastEditCommand = editor->lastEditCommand();
+    return lastEditCommand && lastEditCommand->shouldStopCaretBlinking();
 }
 #endif
 
@@ -2390,15 +2521,15 @@ void FrameSelection::updateAppearance()
     // If the caret moved, stop the blink timer so we can restart with a
     // black caret in the new location.
     if (caretRectChangedOrCleared || !shouldBlink || shouldStopBlinkingDueToTypingCommand(document.get()))
-        caretAnimator().stop(CaretAnimatorStopReason::CaretRectChanged);
+        protect(caretAnimator())->stop(CaretAnimatorStopReason::CaretRectChanged);
 
     // Start blinking with a black caret. Be sure not to restart if we're
     // already blinking in the right location.
     if (shouldBlink && !caretAnimator().isActive()) {
         if (document && document->window())
-            caretAnimator().start();
+            protect(caretAnimator())->start();
 
-        caretAnimator().setVisible(true);
+        protect(caretAnimator())->setVisible(true);
     }
 #endif
 
@@ -2465,7 +2596,7 @@ void FrameSelection::updateCaretVisibility(ShouldUpdateAppearance doAppearanceUp
         return;
 
 #if ENABLE(TEXT_CARET)
-    caretAnimator().setVisible(false);
+    protect(caretAnimator())->setVisible(false);
 
     CaretBase::setCaretVisibility(visibility);
 #endif
@@ -2526,7 +2657,7 @@ void DragCaretController::paintDragCaret(LocalFrame* frame, GraphicsContext& p, 
 {
 #if ENABLE(TEXT_CARET)
     if (m_position.deepEquivalent().deprecatedNode() && m_position.deepEquivalent().deprecatedNode()->document().frame() == frame)
-        paintCaret(*m_position.deepEquivalent().deprecatedNode(), p, paintOffset, nullptr);
+        paintCaret(protect(*m_position.deepEquivalent().deprecatedNode()), p, paintOffset, nullptr);
 #else
     UNUSED_PARAM(frame);
     UNUSED_PARAM(p);
@@ -2538,7 +2669,7 @@ RefPtr<MutableStyleProperties> FrameSelection::copyTypingStyle() const
 {
     if (!m_typingStyle || !m_typingStyle->style())
         return nullptr;
-    return protect(m_typingStyle)->style()->mutableCopy();
+    return protect(protect(m_typingStyle)->style())->mutableCopy();
 }
 
 void FrameSelection::setTypingStyle(RefPtr<EditingStyle>&& style)
@@ -2610,7 +2741,7 @@ void FrameSelection::getClippedVisibleTextRectangles(Vector<FloatRect>& rectangl
     if (textRectHeight == TextRectangleHeight::SelectionHeight)
         behavior.add(RenderObject::BoundingRectBehavior::UseSelectionHeight);
 
-    auto visibleContentRect = m_document->view()->visibleContentRect(ScrollableArea::LegacyIOSDocumentVisibleRect);
+    auto visibleContentRect = protect(m_document->view())->visibleContentRect(ScrollableArea::LegacyIOSDocumentVisibleRect);
     for (auto& rect : boundingBoxes(RenderObject::absoluteTextQuads(*range, behavior))) {
         auto intersectionRect = intersection(rect, visibleContentRect);
         if (!intersectionRect.isEmpty())
@@ -2698,8 +2829,8 @@ void FrameSelection::revealSelection(const RevealSelectionOptions& revealSelecti
     // FIXME: This code only handles scrolling the startContainer's layer, but
     // the selection rect could intersect more than just that.
     // See <rdar://problem/4799899>.
-    protect(document())->frame()->view()->setLastUserScrollType(LocalFrameView::UserScrollType::Implicit);
-    LocalFrameView::scrollRectToVisible(rect, *start.deprecatedNode()->renderer(), insideFixed, { revealSelectionOptions.selectionRevealMode, revealSelectionOptions.scrollAlignment, revealSelectionOptions.scrollAlignment, ShouldAllowCrossOriginScrolling::Yes, revealSelectionOptions.scrollBehavior, revealSelectionOptions.onlyAllowForwardScrolling });
+    protect(protect(protect(document())->frame())->view())->setLastUserScrollType(LocalFrameView::UserScrollType::Implicit);
+    LocalFrameView::scrollRectToVisible(rect, protect(*start.deprecatedNode()->renderer()), insideFixed, { revealSelectionOptions.selectionRevealMode, revealSelectionOptions.scrollAlignment, revealSelectionOptions.scrollAlignment, ShouldAllowCrossOriginScrolling::Yes, revealSelectionOptions.scrollBehavior, revealSelectionOptions.onlyAllowForwardScrolling });
     updateAppearance();
 
 #if PLATFORM(IOS_FAMILY)

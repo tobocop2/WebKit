@@ -235,10 +235,6 @@
 #define ENABLE_FILE_REPLACEMENT 0
 #endif
 
-#if !defined(ENABLE_FTPDIR)
-#define ENABLE_FTPDIR 1
-#endif
-
 #if !defined(ENABLE_FULL_KEYBOARD_ACCESS)
 #define ENABLE_FULL_KEYBOARD_ACCESS 0
 #endif
@@ -275,10 +271,6 @@
 #define ENABLE_IMAGE_ANALYSIS 0
 #endif
 
-#if !defined(ENABLE_IMAGE_ANALYSIS_ENHANCEMENTS)
-#define ENABLE_IMAGE_ANALYSIS_ENHANCEMENTS 0
-#endif
-
 #if !defined(ENABLE_IMAGE_ANALYSIS_FOR_MACHINE_READABLE_CODES)
 #define ENABLE_IMAGE_ANALYSIS_FOR_MACHINE_READABLE_CODES 0
 #endif
@@ -295,15 +287,9 @@
 #define ENABLE_IOS_TOUCH_EVENTS 0
 #endif
 
-#if !defined(ENABLE_ISO18013_DOCUMENT_REQUEST_INFO)
-#define ENABLE_ISO18013_DOCUMENT_REQUEST_INFO 0
-#endif
-
 #if !defined(ENABLE_IPC_TESTING_API)
 /* Enable IPC testing on all ASAN builds and debug builds. Enable it in GLib ports when assertions are enabled. */
-/* In GLib ports, only enable for GCC builds, as this is what we currently test in EWS and clang-18 is significantly */
-/* slow to build when IPC testing is enabled. */
-#if ((ASAN_ENABLED || !defined(NDEBUG)) && PLATFORM(COCOA)) || (ASSERT_ENABLED && (PLATFORM(GTK) || PLATFORM(WPE)) && COMPILER(GCC))
+#if ((ASAN_ENABLED || !defined(NDEBUG)) && PLATFORM(COCOA)) || (ASSERT_ENABLED && (PLATFORM(GTK) || PLATFORM(WPE)))
 #define ENABLE_IPC_TESTING_API 1
 #endif
 #endif
@@ -495,6 +481,10 @@
 #define ENABLE_PIXEL_FORMAT_RGBA16F 0
 #endif
 
+#if !defined(ENABLE_PIXEL_FORMAT_RGBA16)
+#define ENABLE_PIXEL_FORMAT_RGBA16 0
+#endif
+
 #if !defined(ENABLE_PLATFORM_DRIVEN_TEXT_CHECKING)
 #define ENABLE_PLATFORM_DRIVEN_TEXT_CHECKING 0
 #endif
@@ -542,16 +532,16 @@
 #define ENABLE_SEPARATED_WX_HEAP 0
 #endif
 
+#if !defined(ENABLE_SPATIAL_PORTAL)
+#define ENABLE_SPATIAL_PORTAL 0
+#endif
+
 #if !defined(ENABLE_SPEECH_SYNTHESIS)
 #define ENABLE_SPEECH_SYNTHESIS 0
 #endif
 
 #if !defined(ENABLE_SPELLCHECK)
 #define ENABLE_SPELLCHECK 0
-#endif
-
-#if !defined(ENABLE_TEXT_AUTOSIZING)
-#define ENABLE_TEXT_AUTOSIZING 0
 #endif
 
 #if !defined(ENABLE_TEXT_CARET)
@@ -580,6 +570,10 @@
 
 #if !defined(ENABLE_TOUCH_ACTION_REGIONS)
 #define ENABLE_TOUCH_ACTION_REGIONS 0
+#endif
+
+#if !defined(ENABLE_UIPROCESS_PERIODIC_MEMORY_MONITOR)
+#define ENABLE_UIPROCESS_PERIODIC_MEMORY_MONITOR 0
 #endif
 
 #if !defined(ENABLE_UI_SIDE_COMPOSITING)
@@ -638,7 +632,7 @@
 #define ENABLE_WEBGPU PLATFORM(COCOA)
 #endif
 
-#if !defined(ENABLE_WEBGPU_BY_DEFAULT) && ((PLATFORM(MAC) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 260000) || PLATFORM(IOS) || PLATFORM(VISION))
+#if !defined(ENABLE_WEBGPU_BY_DEFAULT) && ((PLATFORM(MAC) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 260000) || PLATFORM(IOS) || PLATFORM(VISION) || PLATFORM(WATCHOS))
 #define ENABLE_WEBGPU_BY_DEFAULT 1
 #endif
 
@@ -723,7 +717,7 @@
 #define ENABLE_JIT 1
 #endif
 
-#if USE(JSVALUE32_64)
+#if !CPU(ADDRESS64)
 #undef ENABLE_JIT
 #define ENABLE_JIT 0
 #endif
@@ -745,15 +739,13 @@
 #endif
 #endif
 
-#if !defined(ENABLE_JUMP_ISLANDS) && ENABLE(JIT)
-#if (CPU(ARM64) && CPU(ADDRESS64)) || CPU(ARM_THUMB2)
+#if !defined(ENABLE_JUMP_ISLANDS) && ENABLE(JIT) && CPU(ARM64) && CPU(ADDRESS64)
 #define ENABLE_JUMP_ISLANDS 1
-#endif
 #endif
 
 /* FIXME: This should be turned into an #error invariant */
 /* The FTL *does not* work on 32-bit platforms. Disable it even if someone asked us to enable it. */
-#if USE(JSVALUE32_64)
+#if !CPU(ADDRESS64)
 #undef ENABLE_FTL_JIT
 #define ENABLE_FTL_JIT 0
 #undef ENABLE_DFG_JIT
@@ -786,6 +778,16 @@
 #if !defined(ENABLE_DISASSEMBLER)
 #define ENABLE_DISASSEMBLER 0
 #endif
+#endif
+
+/* JSDollarVM ($vm) is a debugging-only object reached via the restricted
+   JSC_useDollarVM option. It is large (~4600 lines that pull in many runtime
+   internals) and has no production use, so compile it out of release builds.
+   Like the disassembler above this defaults to ASSERT_ENABLED, and can be
+   forced on via a compiler flag. The jsc shell compiles it separately (see
+   tools/JSDollarVMShell.cpp) so $vm keeps working there regardless. */
+#if !defined(BUN_ENABLE_JSDOLLARVM)
+#define BUN_ENABLE_JSDOLLARVM ASSERT_ENABLED
 #endif
 
 /* If possible, try to enable a disassembler. This is optional. We proceed in two
@@ -830,7 +832,7 @@
 #define ENABLE_CONCURRENT_JS 1
 #endif
 
-#if (CPU(X86_64) || CPU(ARM64)) && HAVE(FAST_TLS)
+#if ENABLE(JIT) && (CPU(X86_64) || CPU(ARM64)) && HAVE(FAST_TLS)
 #define ENABLE_FAST_TLS_JIT 1
 #endif
 
@@ -930,23 +932,14 @@
 #define ENABLE_YARR_JIT_DEBUG 0
 #endif
 
-/* Enable JIT'ing Regular Expressions that have nested parenthesis . */
-#if ENABLE(YARR_JIT) && (CPU(ARM64) || CPU(X86_64) || CPU(RISCV64))
+/* Upstream removed these flags in 318417@main (every remaining JIT platform has them on) and
+   dropped the #if's from its YarrJIT. This fork's YarrJIT still carries them, so they stay
+   defined here until the fork's Yarr changes have landed upstream. */
+#if ENABLE(YARR_JIT) && (CPU(ARM64) || CPU(X86_64))
 #define ENABLE_YARR_JIT_ALL_PARENS_EXPRESSIONS 1
 #define ENABLE_YARR_JIT_REGEXP_TEST_INLINE 1
-#endif
-
-/* Enable JIT'ing Regular Expressions that have back references. */
-#if ENABLE(YARR_JIT) && (CPU(ARM64) || CPU(X86_64) || CPU(RISCV64))
 #define ENABLE_YARR_JIT_BACKREFERENCES 1
-#if CPU(ARM64) || CPU(X86_64)
 #define ENABLE_YARR_JIT_BACKREFERENCES_FOR_16BIT_EXPRS 1
-#else
-#define ENABLE_YARR_JIT_BACKREFERENCES_FOR_16BIT_EXPRS 0
-#endif
-#endif
-
-#if ENABLE(YARR_JIT) && (CPU(ARM64) || CPU(X86_64) || CPU(RISCV64))
 #define ENABLE_YARR_JIT_UNICODE_EXPRESSIONS 1
 #endif
 
@@ -994,7 +987,7 @@
 #endif
 
 #if ENABLE(JIT)
-#if CPU(ARM_THUMB2) || CPU(ARM64)
+#if CPU(ARM64)
 #define ENABLE_BRANCH_COMPACTION 1
 #endif
 #endif
@@ -1011,11 +1004,28 @@
 #define ENABLE_GC_VALIDATION 1
 #endif
 
-#if OS(DARWIN) && ENABLE(JIT) && USE(APPLE_INTERNAL_SDK) && CPU(ARM64E) && HAVE(JIT_CAGE) && !PLATFORM(MAC) && !PLATFORM(MACCATALYST)
+#if OS(DARWIN) && ENABLE(JIT) && USE(APPLE_INTERNAL_SDK) && CPU(ARM64E) && HAVE(JIT_CAGE)
+#if    HAVE(JIT_CAGE_RELAXATION) && !(PLATFORM(MAC) || PLATFORM(MACCATALYST))
 #define ENABLE_JIT_CAGE 1
+// FIXME: rdar://183646426
+#define ENABLE_JIT_CAGE_RELAXATION 0
+#elif  HAVE(JIT_CAGE_RELAXATION) &&  (PLATFORM(MAC) || PLATFORM(MACCATALYST))
+#define ENABLE_JIT_CAGE 0
+// FIXME: rdar://183649352
+#define ENABLE_JIT_CAGE_RELAXATION 0
+#elif !HAVE(JIT_CAGE_RELAXATION) && !(PLATFORM(MAC) || PLATFORM(MACCATALYST))
+#define ENABLE_JIT_CAGE 1
+#define ENABLE_JIT_CAGE_RELAXATION 0
+#elif !HAVE(JIT_CAGE_RELAXATION) &&  (PLATFORM(MAC) || PLATFORM(MACCATALYST))
+#define ENABLE_JIT_CAGE 0
+#define ENABLE_JIT_CAGE_RELAXATION 0
+#else
+#error "Should not be reached"
 #endif
+#endif // OS(DARWIN) && ENABLE(JIT) && USE(APPLE_INTERNAL_SDK) && CPU(ARM64E) && HAVE(JIT_CAGE)
 
-#if OS(DARWIN) && CPU(ADDRESS64) && ENABLE(JIT) && (ENABLE(JIT_CAGE) || ASSERT_ENABLED)
+#if !ENABLE(JIT_CAGE_RELAXATION) && (ENABLE(JIT_CAGE) \
+    || (ENABLE(JIT) && OS(DARWIN) && CPU(ADDRESS64) && ASSERT_ENABLED))
 #define ENABLE_JIT_OPERATION_VALIDATION 1
 #endif
 
@@ -1043,7 +1053,7 @@
    that executes each opcode. It cannot be supported by the CLoop since there's no way to embed the
    OpcodeID word in the CLoop's switch statement cases. It is also currently not implemented for MSVC.
 */
-#if !defined(ENABLE_LLINT_EMBEDDED_OPCODE_ID) && !ENABLE(C_LOOP) && (CPU(X86) || CPU(X86_64) || CPU(ARM64) || (CPU(ARM_THUMB2) && OS(DARWIN)) || CPU(RISCV64))
+#if !defined(ENABLE_LLINT_EMBEDDED_OPCODE_ID) && !ENABLE(C_LOOP) && (CPU(X86) || CPU(X86_64) || CPU(ARM64) || CPU(RISCV64))
 #define ENABLE_LLINT_EMBEDDED_OPCODE_ID 1
 #endif
 
@@ -1122,10 +1132,6 @@
 #define ENABLE_WRITING_SUGGESTIONS 1
 #endif
 
-#if !defined(ENABLE_COOKIE_STORE_API_BY_DEFAULT)
-#define ENABLE_COOKIE_STORE_API_BY_DEFAULT 0
-#endif
-
 #if !defined(ENABLE_ALL_LEGACY_REGISTERED_SPECIAL_URL_SCHEMES) && !PLATFORM(COCOA)
 #define ENABLE_ALL_LEGACY_REGISTERED_SPECIAL_URL_SCHEMES 1
 #endif
@@ -1145,14 +1151,20 @@
 #define ENABLE_TLS_1_2_DEFAULT_MINIMUM 1
 #endif
 
-#if !defined(ENABLE_IPC_TESTING_SWIFT)
-#define ENABLE_IPC_TESTING_SWIFT 0
+#if !defined(ENABLE_IPC_TESTING_SWIFT) \
+    && (PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500)
+#define ENABLE_IPC_TESTING_SWIFT 1
 #endif
 
 #if PLATFORM(MAC) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 270000
 #define ENABLE_SCROLL_POCKET_IN_FULLSCREEN 1
 #endif
 
-#if !defined(ENABLE_BACK_FORWARD_LIST_SWIFT)
-#define ENABLE_BACK_FORWARD_LIST_SWIFT 0
+#if !defined(ENABLE_BACK_FORWARD_LIST_SWIFT) \
+    && ((PLATFORM(MAC) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260500) \
+    || ((PLATFORM(IOS) || PLATFORM(MACCATALYST)) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 270000) \
+    || (PLATFORM(VISION) && __VISION_OS_VERSION_MAX_ALLOWED >= 270000) \
+    || (PLATFORM(WATCHOS) && __WATCH_OS_VERSION_MAX_ALLOWED >= 270000) \
+    || (PLATFORM(APPLETV) && __TV_OS_VERSION_MAX_ALLOWED >= 270000))
+#define ENABLE_BACK_FORWARD_LIST_SWIFT 1
 #endif

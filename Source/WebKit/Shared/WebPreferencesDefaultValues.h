@@ -76,8 +76,6 @@
 #define Modelelement_feature_status Testable
 #endif
 
-#define Web_transport_status Stable
-
 namespace WebKit {
 
 #if HAVE(LIQUID_GLASS)
@@ -90,9 +88,7 @@ bool defaultPassiveTouchListenersAsDefaultOnDocument();
 bool defaultShouldPrintBackgrounds();
 bool defaultUseAsyncUIKitInteractions();
 bool defaultWriteRichTextDataWhenCopyingOrDragging();
-#if ENABLE(TEXT_AUTOSIZING)
 bool defaultTextAutosizingUsesIdempotentMode();
-#endif
 #endif
 
 #if ENABLE(FULLSCREEN_API)
@@ -163,6 +159,7 @@ bool NODELETE defaultLinearMediaPlayerEnabled();
 bool NODELETE defaultShouldEnableScreenOrientationAPI();
 bool defaultPopoverAttributeEnabled();
 bool defaultUseGPUProcessForDOMRenderingEnabled();
+unsigned NODELETE defaultMaximumNestedInlineFormattingContextCount();
 
 #if USE(LIBWEBRTC)
 bool defaultPeerConnectionEnabledAvailable();
@@ -197,6 +194,8 @@ bool defaultScreenTimeEnabled();
 #if ENABLE(CONTENT_EXTENSIONS)
 bool defaultIFrameResourceMonitoringEnabled();
 #endif
+
+bool defaultSearchInputResultsAttributeEnabled();
 
 #if HAVE(SPATIAL_AUDIO_EXPERIENCE)
 bool defaultPreferSpatialAudioExperience();
@@ -241,5 +240,7 @@ bool defaultContentChangeObserverEnabled();
 #if HAVE(WEBCONTENTRESTRICTIONS_ASK_TO)
 bool NODELETE defaultWebContentRestrictionsAskToEnabled();
 #endif
+
+bool defaultWebTransportEnabled();
 
 } // namespace WebKit

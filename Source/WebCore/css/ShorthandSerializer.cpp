@@ -141,6 +141,7 @@ private:
     String serializeGridArea() const;
     String serializeGridRowColumn() const;
     String serializeGridTemplate() const;
+    String serializeHyphenateLimitChars() const;
     String serializeOffset() const;
     String serializePageBreak() const;
     String serializePositionTry() const;
@@ -243,8 +244,18 @@ bool ShorthandSerializer::commonSerializationChecks(const StyleProperties& prope
         auto longhand = longhandProperty(i);
 
         int propertyIndex = properties.findPropertyIndex(longhand);
-        if (propertyIndex == -1)
+        if (propertyIndex == -1) {
+            // Internal-only longhands can never be set (or removed) independently through the
+            // CSSOM, so a shorthand containing one should never fail to serialize purely because
+            // it happens to be absent from the property set — treat it as if it were present and
+            // set to its initial value instead.
+            if (isInternal(longhand)) {
+                if (m_shorthand.id() != CSSPropertyAll)
+                    m_longhandValues[i] = initialCSSValueForLonghand(longhand);
+                continue;
+            }
             return true;
+        }
         auto property = properties.propertyAt(propertyIndex);
 
         // Don't serialize if longhands have different importance.
@@ -346,6 +357,8 @@ String ShorthandSerializer::serialize()
     case CSSPropertyInsetInline:
     case CSSPropertyMarginBlock:
     case CSSPropertyMarginInline:
+    case CSSPropertyMaxSize:
+    case CSSPropertyMinSize:
     case CSSPropertyOverflow:
     case CSSPropertyOverscrollBehavior:
     case CSSPropertyPaddingBlock:
@@ -357,6 +370,7 @@ String ShorthandSerializer::serialize()
     case CSSPropertyScrollMarginInline:
     case CSSPropertyScrollPaddingBlock:
     case CSSPropertyScrollPaddingInline:
+    case CSSPropertySize:
         return serializePair();
     case CSSPropertyBlockStep:
     case CSSPropertyBorderBlockEnd:
@@ -416,6 +430,8 @@ String ShorthandSerializer::serialize()
         return serializeGridRowColumn();
     case CSSPropertyGridTemplate:
         return serializeGridTemplate();
+    case CSSPropertyHyphenateLimitChars:
+        return serializeHyphenateLimitChars();
     case CSSPropertyLineClamp:
         return serializeLineClamp();
     case CSSPropertyMarker:
@@ -450,6 +466,8 @@ String ShorthandSerializer::serialize()
     case CSSPropertyViewTimeline:
         return serializeCoordinatingListPropertyGroup();
     case CSSPropertyAnimationRange:
+    case CSSPropertyTimelineTriggerActivationRange:
+    case CSSPropertyTimelineTriggerActiveRange:
         return serializeAnimationRange();
     default:
         ASSERT_NOT_REACHED();
@@ -1065,7 +1083,7 @@ String ShorthandSerializer::serializeFont() const
                 return std::nullopt;
             },
             [](const CSSPrimitiveValue::Raw& raw) -> std::optional<CSSValueID> {
-                if (raw.unit != CSSUnitType::CSS_PERCENTAGE)
+                if (raw.unit != CSSUnitType::Percentage)
                     return std::nullopt;
                 return fontWidthKeyword(raw.value);
             }
@@ -1485,6 +1503,24 @@ String ShorthandSerializer::serializePositionTry() const
     return makeString(serializeLonghandValue(positionTryOrderIndex), " "_s, positionTryFallbacksSerialization);
 }
 
+String ShorthandSerializer::serializeHyphenateLimitChars() const
+{
+    ASSERT(length() == 3);
+
+    auto total = serializeLonghandValue(0);
+    auto before = serializeLonghandValue(1);
+    auto after = serializeLonghandValue(2);
+
+    bool showAfter = after != before;
+    bool showBefore = showAfter || !isLonghandValueID(1, CSSValueAuto);
+
+    if (showAfter)
+        return makeString(total, ' ', before, ' ', after);
+    if (showBefore)
+        return makeString(total, ' ', before);
+    return total;
+}
+
 String ShorthandSerializer::serializeLineClamp() const
 {
     auto isMaxLinesInitial = isLonghandInitialValue(0);
@@ -1544,7 +1580,7 @@ String ShorthandSerializer::serializeSingleAnimationRange(const CSSValue& value,
                 return false;
             },
             [type](const CSSPrimitiveValue::Raw& raw) {
-                if (raw.unit != CSSUnitType::CSS_PERCENTAGE)
+                if (raw.unit != CSSUnitType::Percentage)
                     return false;
                 if (type == Style::SingleAnimationRangeType::Start)
                     return raw.value == 0;
@@ -1618,24 +1654,38 @@ String ShorthandSerializer::serializeWhiteSpace() const
 {
     auto whiteSpaceCollapse = longhandValueID(0);
     auto textWrapMode = longhandValueID(1);
+    auto hasInitialWhiteSpaceTrim = isLonghandValueNone(2);
 
-    // Convert to backwards-compatible keywords if possible.
-    if (whiteSpaceCollapse == CSSValueCollapse && textWrapMode == CSSValueWrap)
-        return nameString(CSSValueNormal);
-    if (whiteSpaceCollapse == CSSValuePreserve && textWrapMode == CSSValueNowrap)
-        return nameString(CSSValuePre);
-    if (whiteSpaceCollapse == CSSValuePreserve && textWrapMode == CSSValueWrap)
-        return nameString(CSSValuePreWrap);
-    if (whiteSpaceCollapse == CSSValuePreserveBreaks && textWrapMode == CSSValueWrap)
-        return nameString(CSSValuePreLine);
+    if (hasInitialWhiteSpaceTrim) {
+        // Convert to backwards-compatible keywords if possible.
+        if (whiteSpaceCollapse == CSSValueCollapse && textWrapMode == CSSValueWrap)
+            return nameString(CSSValueNormal);
+        if (whiteSpaceCollapse == CSSValuePreserve && textWrapMode == CSSValueNowrap)
+            return nameString(CSSValuePre);
+        if (whiteSpaceCollapse == CSSValuePreserve && textWrapMode == CSSValueWrap)
+            return nameString(CSSValuePreWrap);
+        if (whiteSpaceCollapse == CSSValuePreserveBreaks && textWrapMode == CSSValueWrap)
+            return nameString(CSSValuePreLine);
 
+        // Omit default longhand values.
+        if (whiteSpaceCollapse == CSSValueCollapse)
+            return nameString(textWrapMode);
+        if (textWrapMode == CSSValueWrap)
+            return nameString(whiteSpaceCollapse);
+
+        return makeString(nameLiteral(whiteSpaceCollapse), ' ', nameLiteral(textWrapMode));
+    }
+
+    // white-space-trim has a non-initial value, so the backwards-compatible keywords don't apply.
     // Omit default longhand values.
+    if (whiteSpaceCollapse == CSSValueCollapse && textWrapMode == CSSValueWrap)
+        return serializeLonghandValue(2);
     if (whiteSpaceCollapse == CSSValueCollapse)
-        return nameString(textWrapMode);
+        return makeString(nameLiteral(textWrapMode), ' ', serializeLonghandValue(2));
     if (textWrapMode == CSSValueWrap)
-        return nameString(whiteSpaceCollapse);
+        return makeString(nameLiteral(whiteSpaceCollapse), ' ', serializeLonghandValue(2));
 
-    return makeString(nameLiteral(whiteSpaceCollapse), ' ', nameLiteral(textWrapMode));
+    return makeString(nameLiteral(whiteSpaceCollapse), ' ', nameLiteral(textWrapMode), ' ', serializeLonghandValue(2));
 }
 
 String serializeShorthandValue(const CSS::SerializationContext& context, const StyleProperties& properties, CSSPropertyID shorthand)

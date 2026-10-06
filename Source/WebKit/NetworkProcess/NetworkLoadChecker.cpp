@@ -33,6 +33,7 @@
 #include "NetworkProcess.h"
 #include "NetworkResourceLoader.h"
 #include "NetworkSchemeRegistry.h"
+#include "NetworkSession.h"
 #include "WebPageMessages.h"
 #include <WebCore/ContentRuleListResults.h>
 #include <WebCore/ContentSecurityPolicy.h>
@@ -43,6 +44,7 @@
 #include <WebCore/LegacySchemeRegistry.h>
 #include <WebCore/OriginAccessPatterns.h>
 #include <WebCore/RegistrableDomain.h>
+#include <WebCore/TimingAllowOrigin.h>
 #include <wtf/Scope.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/MakeString.h>
@@ -79,7 +81,7 @@ NetworkLoadChecker::NetworkLoadChecker(NetworkProcess& networkProcess, NetworkRe
     if (m_requestLoadType == LoadType::MainFrame)
         m_origin = m_topOrigin;
 
-    m_isSameOriginRequest = isSameOrigin(m_url, m_origin.get());
+    m_isSameOriginRequest = isSameOrigin(m_url, protect(m_origin));
     switch (options.credentials) {
     case FetchOptions::Credentials::Include:
         m_storedCredentialsPolicy = StoredCredentialsPolicy::Use;
@@ -148,7 +150,7 @@ void NetworkLoadChecker::checkRedirection(ResourceRequest&& request, ResourceReq
     // FIXME: We should check that redirections are only HTTP(s) as per fetch spec.
     // See https://github.com/whatwg/fetch/issues/393
 
-    if (m_options.mode == FetchOptions::Mode::Cors && (!m_isSameOriginRequest || !isSameOrigin(request.url(), m_origin.get()))) {
+    if (m_options.mode == FetchOptions::Mode::Cors && (!m_isSameOriginRequest || !isSameOrigin(request.url(), protect(m_origin)))) {
         auto location = URL(redirectResponse.url(), redirectResponse.httpHeaderField(HTTPHeaderName::Location));
         if (m_schemeRegistry && !m_schemeRegistry->shouldTreatURLSchemeAsCORSEnabled(location.protocol())) {
             handler(redirectionError(redirectResponse, makeString("Cross-origin redirection to "_s, redirectRequest.url().string(), " denied by Cross-Origin Resource Sharing policy: not allowed to follow a cross-origin CORS redirection with non CORS scheme"_s)));
@@ -164,6 +166,9 @@ void NetworkLoadChecker::checkRedirection(ResourceRequest&& request, ResourceReq
         handler(redirectionError(redirectResponse, "Load cannot follow more than 20 redirections"_s));
         return;
     }
+
+    if (m_options.mode == FetchOptions::Mode::Navigate)
+        appendToNavigationTimingAllowValuesList(redirectResponse);
 
     m_previousURL = WTF::move(m_url);
     m_url = redirectRequest.url();
@@ -237,6 +242,10 @@ ResourceError NetworkLoadChecker::validateResponse(const ResourceRequest& reques
                 response.setDeprecatedNetworkLoadMetrics(WTF::move(metrics));
             }
         }
+
+        // https://fetch.spec.whatwg.org/#navigation-tao-check
+        if (m_options.mode == FetchOptions::Mode::Navigate && !response.isRedirection())
+            m_navigationTAOCheckPassed = WebCore::passesNavigationTAOCheck(m_navigationTimingAllowValuesList, SecurityOrigin::create(m_url).get());
     });
 
     if (m_redirectCount)
@@ -307,6 +316,19 @@ bool NetworkLoadChecker::checkTAO(const ResourceResponse& response)
     return !m_timingAllowFailedFlag;
 }
 
+// https://fetch.spec.whatwg.org/#append-to-a-requests-navigation-timing-allow-values-list
+void NetworkLoadChecker::appendToNavigationTimingAllowValuesList(const ResourceResponse& response)
+{
+    Vector<String> taoValues;
+    const auto& timingAllowOriginString = response.httpHeaderField(HTTPHeaderName::TimingAllowOrigin);
+    for (auto valueWithSpace : StringView(timingAllowOriginString).split(',')) {
+        auto value = valueWithSpace.trim(isASCIIWhitespaceWithoutFF<char16_t>);
+        if (!value.isEmpty())
+            taoValues.append(value.toString());
+    }
+    m_navigationTimingAllowValuesList.append(WTF::move(taoValues));
+}
+
 auto NetworkLoadChecker::accessControlErrorForValidationHandler(String&& message) -> RequestOrRedirectionTripletOrError
 {
     return ResourceError { String { }, 0, m_url, WTF::move(message), ResourceError::Type::AccessControl };
@@ -366,8 +388,11 @@ bool NetworkLoadChecker::shouldBlockForTrackingPolicy(const ResourceRequest& req
     if (!networkResourceLoader)
         return false;
 
-    auto mayBlock = networkResourceLoader->parameters().mayBlockNetworkRequest;
-    if (!mayBlock)
+    if (!networkResourceLoader->parameters().mayBlockNetworkRequest)
+        return false;
+
+    CheckedPtr networkSession = m_networkProcess->networkSession(m_sessionID);
+    if (!networkSession || !networkSession->isTrackingPreventionEnabled())
         return false;
 
     if (RefPtr topOrigin = networkResourceLoader->parameters().topOrigin) {
@@ -375,16 +400,9 @@ bool NetworkLoadChecker::shouldBlockForTrackingPolicy(const ResourceRequest& req
             return false;
     }
 
-    if (*mayBlock && networkResourceLoader->parameters().options.destination != FetchOptionsDestination::Script) {
-        LOAD_CHECKER_RELEASE_LOG("shouldBlockForTrackingPolicy - Blocked non-script load by tracking protections");
+    if (NetworkSession::isRequestBlockable(request)) {
+        LOAD_CHECKER_RELEASE_LOG("shouldBlockForTrackingPolicy - Blocked by tracking protections");
         return true;
-    }
-
-    if (CheckedPtr networkSession = m_networkProcess->networkSession(m_sessionID)) {
-        if (networkSession->shouldBlockRequestForTrackingPolicyAndUpdatePolicy(request, *m_webPageProxyID, *mayBlock)) {
-            LOAD_CHECKER_RELEASE_LOG("shouldBlockForTrackingPolicy - Blocked by tracking protections");
-            return true;
-        }
     }
 
     return false;
@@ -419,6 +437,7 @@ bool NetworkLoadChecker::isAllowedByContentSecurityPolicy(const ResourceRequest&
     case FetchOptions::Destination::Serviceworker:
     case FetchOptions::Destination::Sharedworker:
         return contentSecurityPolicy->allowWorkerFromSource(request.url(), { }, redirectResponseReceived, preRedirectURL);
+    case FetchOptions::Destination::Text:
     case FetchOptions::Destination::Json:
     case FetchOptions::Destination::Script:
     case FetchOptions::Destination::Speculationrules:
@@ -426,6 +445,7 @@ bool NetworkLoadChecker::isAllowedByContentSecurityPolicy(const ResourceRequest&
             return false;
         // FIXME: Check CSP for non-importScripts() initiated loads.
         return true;
+    case FetchOptions::Destination::CompressionDictionary:
     case FetchOptions::Destination::EmptyString:
         return contentSecurityPolicy->allowConnectToSource(request.url(), { }, redirectResponseReceived, preRedirectURL);
     case FetchOptions::Destination::Audio:
@@ -455,7 +475,7 @@ void NetworkLoadChecker::continueCheckingRequest(ResourceRequest&& request, Vali
     if (m_options.credentials == FetchOptions::Credentials::SameOrigin)
         m_storedCredentialsPolicy = m_isSameOriginRequest && protect(origin())->canRequest(request.url(), originAccessPatterns()) ? StoredCredentialsPolicy::Use : StoredCredentialsPolicy::DoNotUse;
 
-    m_isSameOriginRequest = m_isSameOriginRequest && isSameOrigin(request.url(), m_origin.get());
+    m_isSameOriginRequest = m_isSameOriginRequest && isSameOrigin(request.url(), protect(m_origin));
 
     if (doesNotNeedCORSCheck(request.url())) {
         handler(WTF::move(request));

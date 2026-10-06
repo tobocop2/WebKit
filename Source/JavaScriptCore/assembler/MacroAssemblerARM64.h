@@ -191,6 +191,10 @@ public:
     void add32(TrustedImm32 imm, RegisterID src, RegisterID dest)
     {
         auto immediate = imm.m_value;
+        if (!immediate) {
+            zeroExtend32ToWord(src, dest);
+            return;
+        }
         if (auto tuple = tryExtractShiftedImm(immediate)) {
             auto [u12, shift, inverted] = tuple.value();
             if (!inverted)
@@ -322,6 +326,10 @@ public:
     void add64(TrustedImm32 imm, RegisterID src, RegisterID dest)
     {
         auto immediate = imm.m_value;
+        if (!immediate) {
+            move(src, dest);
+            return;
+        }
         if (auto tuple = tryExtractShiftedImm(immediate)) {
             auto [u12, shift, inverted] = tuple.value();
             if (!inverted)
@@ -352,6 +360,10 @@ public:
     void add64(TrustedImm64 imm, RegisterID src, RegisterID dest)
     {
         auto immediate = imm.m_value;
+        if (!immediate) {
+            move(src, dest);
+            return;
+        }
         if (auto tuple = tryExtractShiftedImm(immediate)) {
             auto [u12, shift, inverted] = tuple.value();
             if (!inverted)
@@ -1503,6 +1515,10 @@ public:
     void sub32(RegisterID left, TrustedImm32 imm, RegisterID dest)
     {
         auto immediate = imm.m_value;
+        if (!immediate) {
+            zeroExtend32ToWord(left, dest);
+            return;
+        }
         if (auto tuple = tryExtractShiftedImm(immediate)) {
             auto [u12, shift, inverted] = tuple.value();
             if (!inverted)
@@ -1575,6 +1591,10 @@ public:
     void sub64(RegisterID left, TrustedImm32 imm, RegisterID dest)
     {
         auto immediate = imm.m_value;
+        if (!immediate) {
+            move(left, dest);
+            return;
+        }
         if (auto tuple = tryExtractShiftedImm(immediate)) {
             auto [u12, shift, inverted] = tuple.value();
             if (!inverted)
@@ -1595,6 +1615,10 @@ public:
     void sub64(RegisterID left, TrustedImm64 imm, RegisterID dest)
     {
         auto immediate = imm.m_value;
+        if (!immediate) {
+            move(left, dest);
+            return;
+        }
         if (auto tuple = tryExtractShiftedImm(immediate)) {
             auto [u12, shift, inverted] = tuple.value();
             if (!inverted)
@@ -2469,6 +2493,21 @@ public:
 
         load64(src, getCachedDataTempRegisterIDAndInvalidate());
         store64(getCachedDataTempRegisterIDAndInvalidate(), dest);
+    }
+
+    void transfer64(PostIndexAddress src, PostIndexAddress dest)
+    {
+        auto temp = getCachedDataTempRegisterIDAndInvalidate();
+        load64(src, temp);
+        store64(temp, dest);
+    }
+
+    void transferPair64(PostIndexAddress src, PostIndexAddress dest)
+    {
+        auto temp1 = getCachedDataTempRegisterIDAndInvalidate();
+        auto temp2 = getCachedMemoryTempRegisterIDAndInvalidate();
+        loadPair64(src, temp1, temp2);
+        storePair64(temp1, temp2, dest);
     }
 
     void transferPtr(auto src, auto dest) { transfer64(src, dest); }
@@ -5007,9 +5046,9 @@ public:
         move(TrustedImmPtr(reinterpret_cast<void*>(address.offset)), getCachedMemoryTempRegisterIDAndInvalidate());
 
         if (MacroAssemblerHelpers::isUnsigned<MacroAssemblerARM64>(cond))
-            m_assembler.ldrb(memoryTempRegister, address.base, memoryTempRegister);
+            m_assembler.ldrb(memoryTempRegister, memoryTempRegister, address.base);
         else
-            m_assembler.ldrsb<32>(memoryTempRegister, address.base, memoryTempRegister);
+            m_assembler.ldrsb<32>(memoryTempRegister, memoryTempRegister, address.base);
 
         return branchTest32(cond, memoryTempRegister, mask8);
     }
@@ -5041,9 +5080,9 @@ public:
         move(TrustedImmPtr(reinterpret_cast<void*>(address.offset)), getCachedMemoryTempRegisterIDAndInvalidate());
 
         if (MacroAssemblerHelpers::isUnsigned<MacroAssemblerARM64>(cond))
-            m_assembler.ldrh(memoryTempRegister, address.base, memoryTempRegister);
+            m_assembler.ldrh(memoryTempRegister, memoryTempRegister, address.base);
         else
-            m_assembler.ldrsh<32>(memoryTempRegister, address.base, memoryTempRegister);
+            m_assembler.ldrsh<32>(memoryTempRegister, memoryTempRegister, address.base);
 
         return branchTest32(cond, memoryTempRegister, mask16);
     }
@@ -7295,6 +7334,12 @@ public:
         case GreaterThanOrEqual:
             return PositiveOrZero;
             break;
+        case Above:
+            // Unsigned x > 0 is exactly x != 0.
+            return NonZero;
+        case BelowOrEqual:
+            // Unsigned x <= 0 is exactly x == 0.
+            return Zero;
         default:
             return std::nullopt;
         }

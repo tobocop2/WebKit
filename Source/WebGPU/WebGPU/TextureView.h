@@ -71,7 +71,7 @@ public:
     uint32_t width() const;
     uint32_t height() const;
     uint32_t depthOrArrayLayers() const;
-    WGPUTextureUsageFlags NODELETE usage() const;
+    WGPUTextureUsage NODELETE usage() const;
     uint32_t NODELETE sampleCount() const;
     WGPUTextureFormat NODELETE parentFormat() const;
     WGPUTextureFormat NODELETE format() const;
@@ -105,7 +105,7 @@ private:
 
     const Ref<Device> m_device;
     const Ref<Texture> m_parentTexture;
-} SWIFT_SHARED_REFERENCE(refTextureView, derefTextureView);
+} SWIFT_SHARED_REFERENCE(refTextureView, derefTextureView) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
 
 } // namespace WebGPU
 

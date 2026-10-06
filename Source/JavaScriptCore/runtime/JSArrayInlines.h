@@ -95,9 +95,8 @@ inline Structure* JSArray::createStructure(VM& vm, JSGlobalObject* globalObject,
     return Structure::create(vm, globalObject, prototype, TypeInfo(ArrayType, StructureFlags), info(), indexingType);
 }
 
-inline IndexingType JSArray::mergeIndexingTypeForCopying(IndexingType other, bool allowPromotion)
+inline IndexingType mergeIndexingTypesForCopying(IndexingType type, IndexingType other, bool allowPromotion)
 {
-    IndexingType type = indexingType();
     if (!(type & IsArray && other & IsArray))
         return NonArray;
 
@@ -131,6 +130,11 @@ inline IndexingType JSArray::mergeIndexingTypeForCopying(IndexingType other, boo
         return NonArray;
 
     return type;
+}
+
+inline IndexingType JSArray::mergeIndexingTypeForCopying(IndexingType other, bool allowPromotion)
+{
+    return mergeIndexingTypesForCopying(indexingType(), other, allowPromotion);
 }
 
 ALWAYS_INLINE bool JSArray::holesMustForwardToPrototype() const
@@ -232,12 +236,20 @@ ALWAYS_INLINE void JSArray::pushInline(JSGlobalObject* globalObject, JSValue val
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
 
-    ensureWritable(vm);
+    if (!tryMakeWritable(vm)) [[unlikely]] {
+        throwTypeError(globalObject, scope, ReadonlyPropertyWriteError);
+        return;
+    }
 
     Butterfly* butterfly = this->butterfly();
 
     switch (indexingMode()) {
     case ArrayClass: {
+        // (Elsewhere such an array has copy-on-write storage, refused above, or dictionary indexing, which putByIndex() refuses.)
+        if (structure()->hasImmutableProperties()) [[unlikely]] {
+            throwTypeError(globalObject, scope, ReadonlyPropertyWriteError);
+            return;
+        }
         createInitialUndecided(vm, 0);
         [[fallthrough]];
     }
@@ -336,6 +348,11 @@ ALWAYS_INLINE void JSArray::pushInline(JSGlobalObject* globalObject, JSValue val
     }
 
     case ArrayWithSlowPutArrayStorage: {
+        // (A put with such an array as its own receiver fails before the prototype chain is asked for a setter.)
+        if (structure()->hasImmutableProperties()) [[unlikely]] {
+            throwTypeError(globalObject, scope, ReadonlyPropertyWriteError);
+            return;
+        }
         unsigned oldLength = length();
         bool putResult = false;
         bool result = attemptToInterceptPutByIndexOnHole(globalObject, oldLength, value, true, putResult);

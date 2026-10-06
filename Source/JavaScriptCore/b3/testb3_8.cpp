@@ -42,9 +42,6 @@ void testAtomicWeakCAS()
         if (isX86()) {
             checkUsesInstruction(compilation, "lock");
             checkUsesInstruction(compilation, "cmpxchg");
-        } else if (isARM_THUMB2()) {
-            checkUsesInstruction(compilation, "ldrex");
-            checkUsesInstruction(compilation, "strex");
         } else {
             if (isARM64_LSE())
                 checkUsesInstruction(compilation, "casal");
@@ -303,9 +300,6 @@ void testAtomicStrongCAS()
         if (isX86()) {
             checkUsesInstruction(compilation, "lock");
             checkUsesInstruction(compilation, "cmpxchg");
-        } else if (isARM_THUMB2()) {
-            checkUsesInstruction(compilation, "ldrex");
-            checkUsesInstruction(compilation, "strex");
         } else {
             if (isARM64_LSE())
                 checkUsesInstruction(compilation, "casal");
@@ -681,9 +675,6 @@ void testAtomicXchg(B3::Opcode opcode)
                 default:
                     RELEASE_ASSERT_NOT_REACHED();
                 }
-            } else if (isARM_THUMB2()) {
-                checkUsesInstruction(compilation, "ldrex");
-                checkUsesInstruction(compilation, "strex");
             } else {
                 if (fenced) {
                     checkUsesInstruction(compilation, "ldax");
@@ -1094,14 +1085,6 @@ void testStoreAfterClobberExitsSideways()
     RegisterSet csrs;
     csrs.merge(RegisterSet::calleeSaveRegisters());
     csrs.exclude(RegisterSet::stackRegisters());
-#if CPU(ARM)
-    csrs.remove(MacroAssembler::fpTempRegister);
-    // FIXME We should allow this to be used. See the note
-    // in https://commits.webkit.org/257808@main for more
-    // info about why masm is using scratch registers on
-    // ARM-only.
-    csrs.remove(MacroAssembler::addressTempRegister);
-#endif
     csrs.forEach(
         [&] (Reg reg) {
             CHECK(reg != pinnedBaseGPR);
@@ -1123,8 +1106,7 @@ void testStoreAfterClobberExitsSideways()
     auto* resultAddress = root->appendNew<WasmAddressValue>(proc, Origin(), pointer, pinnedBaseGPR);
     root->appendNew<MemoryValue>(proc, Store, Origin(), root->appendNew<Const32Value>(proc, Origin(), 10), resultAddress, 0);
 
-    if (is64Bit())
-        pointer = root->appendNew<Value>(proc, Trunc, Origin(), pointer);
+    pointer = root->appendNew<Value>(proc, Trunc, Origin(), pointer);
     root->appendNew<WasmBoundsCheckValue>(proc, Origin(), pinnedSizeGPR, pointer, 0);
 
     root->appendNew<MemoryValue>(proc, Store, Origin(), root->appendNew<Const32Value>(proc, Origin(), 20), resultAddress, 0);
@@ -1284,14 +1266,6 @@ void testStoreAfterClobberExitsSidewaysSuccessor()
     RegisterSet csrs;
     csrs.merge(RegisterSet::calleeSaveRegisters());
     csrs.exclude(RegisterSet::stackRegisters());
-#if CPU(ARM)
-    csrs.remove(MacroAssembler::fpTempRegister);
-    // FIXME We should allow this to be used. See the note
-    // in https://commits.webkit.org/257808@main for more
-    // info about why masm is using scratch registers on
-    // ARM-only.
-    csrs.remove(MacroAssembler::addressTempRegister);
-#endif
     csrs.forEach(
         [&] (Reg reg) {
             CHECK(reg != pinnedBaseGPR);
@@ -1323,8 +1297,7 @@ void testStoreAfterClobberExitsSidewaysSuccessor()
     switchValue->appendCase(SwitchCase(0, FrequentedBlock(a)));
     switchValue->appendCase(SwitchCase(1, FrequentedBlock(b)));
 
-    if (is64Bit())
-        pointer = b->appendNew<Value>(proc, Trunc, Origin(), pointer);
+    pointer = b->appendNew<Value>(proc, Trunc, Origin(), pointer);
     b->appendNew<WasmBoundsCheckValue>(proc, Origin(), pinnedSizeGPR, pointer, 0);
 
     UpsilonValue* takeA = a->appendNew<UpsilonValue>(proc, Origin(), a->appendNew<Const64Value>(proc, Origin(), 10));
@@ -2657,6 +2630,43 @@ void testCCmpMixedWidth64And32(int64_t a, int32_t b)
 
     int32_t expected = (a == 5000 && b == 10) ? 1 : 0;
     CHECK_EQ(compileAndRun<int32_t>(proc, a, b), expected);
+}
+
+// Regression for findCompareChain rollback: pre-fix, BitOr's BitXor-child
+// failure leaked an inner logic node, dropping LessThan from the chain.
+void testCCmpChainRollback(int32_t i, int32_t len, int32_t a, int32_t b, int32_t c, int32_t d)
+{
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    BasicBlock* thenCase = proc.addBlock();
+    BasicBlock* elseCase = proc.addBlock();
+    auto arguments = cCallArgumentValues<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>(proc, root);
+
+    Value* iLtLen = root->appendNew<Value>(proc, LessThan, Origin(), arguments[0], arguments[1]);
+    Value* eqAB = root->appendNew<Value>(proc, Equal, Origin(), arguments[2], arguments[3]);
+    Value* eqCD = root->appendNew<Value>(proc, Equal, Origin(), arguments[4], arguments[5]);
+    Value* innerAnd = root->appendNew<Value>(proc, BitAnd, Origin(), eqAB, eqCD);
+    Value* xorAC = root->appendNew<Value>(proc, BitXor, Origin(), arguments[2], arguments[4]);
+    Value* outerOr = root->appendNew<Value>(proc, BitOr, Origin(), innerAnd, xorAC);
+    Value* eqZero = root->appendNew<Value>(proc, Equal, Origin(),
+        outerOr, root->appendNew<Const32Value>(proc, Origin(), 0));
+    Value* condition = root->appendNew<Value>(proc, BitAnd, Origin(), iLtLen, eqZero);
+
+    root->appendNewControlValue(
+        proc, Branch, Origin(), condition,
+        FrequentedBlock(thenCase), FrequentedBlock(elseCase));
+
+    thenCase->appendNewControlValue(
+        proc, Return, Origin(),
+        thenCase->appendNew<Const32Value>(proc, Origin(), 1));
+
+    elseCase->appendNewControlValue(
+        proc, Return, Origin(),
+        elseCase->appendNew<Const32Value>(proc, Origin(), 0));
+
+    int zero = 0; // style checker complains about == 0
+    int32_t expected = (i < len && ((((a == b) & (c == d)) | (a ^ c)) == zero)) ? 1 : 0;
+    CHECK_EQ(compileAndRun<int32_t>(proc, i, len, a, b, c, d), expected);
 }
 
 void testConstDoubleZero()

@@ -46,6 +46,7 @@
 #include "CSSLightDarkImageValue.h"
 #include "CSSNamedImageValue.h"
 #include "CSSPaintImageValue.h"
+#include "CSSParserIdioms.h"
 #include "DocumentInlines.h"
 #include "DocumentView.h"
 #include "ElementInlines.h"
@@ -83,12 +84,7 @@ namespace Style {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(BuilderState);
 
-BuilderState::BuilderState(Style::ComputedStyle& style)
-    : m_style(style)
-{
-}
-
-BuilderState::BuilderState(Style::ComputedStyle& style, BuilderContext&& context)
+BuilderState::BuilderState(ComputedStyle& style, BuilderContext&& context)
     : m_style(style)
     , m_context(WTF::move(context))
     , m_cssToLengthConversionData(style, *this)
@@ -97,19 +93,25 @@ BuilderState::BuilderState(Style::ComputedStyle& style, BuilderContext&& context
 
 const CSSRegisteredCustomProperty* BuilderState::registeredProperty(const AtomString& name) const
 {
-    if (m_context.localPropertyRegistry)
-        return m_context.localPropertyRegistry->get(name);
+    // "Only the custom property registrations in registrations are visible" covers the names a custom
+    // function introduces. A name it does not introduce arrives by inheritance carrying the calling
+    // element's computed value, so it keeps the document registration.
+    // https://drafts.csswg.org/css-mixins/#resolve-function-styles
+    if (m_context.localPropertyRegistry) {
+        if (auto* local = m_context.localPropertyRegistry->get(name))
+            return local;
+        // The result descriptor is never registered document-wide.
+        if (!isCustomPropertyName(name))
+            return nullptr;
+    }
     return document().customPropertyRegistry().get(name);
 }
 
 float BuilderState::zoomWithTextZoomFactor()
 {
-    if (auto* frame = document().frame()) {
-        float textZoomFactor = style().textZoom() != TextZoom::Reset ? frame->textZoomFactor() : 1.0f;
-        float usedZoom = evaluationTimeZoomEnabled(*this) ? 1.0f : style().usedZoom();
-        return usedZoom * textZoomFactor;
-    }
-    return cssToLengthConversionData().zoom();
+    if (auto* frame = document().frame())
+        return style().textZoom() != TextZoom::Reset ? frame->textZoomFactor() : 1.0f;
+    return 1.0f;
 }
 
 // SVG handles zooming in a different way compared to CSS. The whole document is scaled instead
@@ -183,9 +185,7 @@ void BuilderState::updateFont()
     if (!needsUpdate())
         return;
 
-#if ENABLE(TEXT_AUTOSIZING)
     updateFontForTextSizeAdjust();
-#endif
     updateFontForGenericFamilyChange();
     updateFontForZoomChange();
     updateFontForOrientationChange();
@@ -196,7 +196,6 @@ void BuilderState::updateFont()
     m_fontDirty = false;
 }
 
-#if ENABLE(TEXT_AUTOSIZING)
 void BuilderState::updateFontForTextSizeAdjust()
 {
     if (m_style.textSizeAdjust().isAuto()
@@ -207,25 +206,24 @@ void BuilderState::updateFontForTextSizeAdjust()
         return;
 
     auto newFontDescription = m_style.fontDescription();
-    auto baseSize = newFontDescription.specifiedSize();
+    auto baseSize = newFontDescription.computedSize();
     if (!m_style.textSizeAdjust().isNone())
         baseSize *= m_style.textSizeAdjust().multiplier();
 
     float zoomFactor = m_style.usedZoom();
     if (auto* frame = document().frame(); frame && m_style.textZoom() != TextZoom::Reset)
         zoomFactor *= frame->textZoomFactor();
-    newFontDescription.setComputedSize(baseSize * zoomFactor, zoomFactor);
+    newFontDescription.setComputedSize(baseSize);
+    newFontDescription.setUsedSize(baseSize * zoomFactor, zoomFactor);
 
     m_style.setFontDescriptionWithoutUpdate(WTF::move(newFontDescription));
 }
-#endif
 
 void BuilderState::updateFontForZoomChange()
 {
     if (m_style.usedZoom() == parentStyle().usedZoom() && m_style.textZoom() == parentStyle().textZoom())
         return;
 
-#if ENABLE(TEXT_AUTOSIZING)
     // When text-size-adjust has an active percentage, updateFontForTextSizeAdjust() has already
     // computed the correct size (incorporating both the multiplier and the current zoom factor).
     // Skip recalculation here to avoid overwriting that result, which would lose the
@@ -236,9 +234,8 @@ void BuilderState::updateFontForZoomChange()
         && (!document().settings().textAutosizingUsesIdempotentMode()
             || document().settings().idempotentModeAutosizingOnlyHonorsPercentages()))
         return;
-#endif
 
-    setFontDescriptionFontSize(m_style.fontDescription().specifiedSize());
+    setFontDescriptionFontSize(m_style.fontDescription().computedSize());
 }
 
 void BuilderState::updateFontForGenericFamilyChange()
@@ -263,7 +260,7 @@ void BuilderState::updateFontForGenericFamilyChange()
         auto fixedSize =  document().settings().defaultFixedFontSize();
         auto defaultSize =  document().settings().defaultFontSize();
         float fixedScaleFactor = (fixedSize && defaultSize) ? static_cast<float>(fixedSize) / defaultSize : 1;
-        return parentFont.useFixedDefaultSize() ? childFont.specifiedSize() / fixedScaleFactor : childFont.specifiedSize() * fixedScaleFactor;
+        return parentFont.useFixedDefaultSize() ? childFont.computedSize() / fixedScaleFactor : childFont.computedSize() * fixedScaleFactor;
     }();
 
     auto newFontDescription = childFont;
@@ -293,14 +290,24 @@ void BuilderState::updateFontForSizeChange()
 
 void BuilderState::setFontSize(FontCascadeDescription& fontDescription, float size)
 {
-    fontDescription.setSpecifiedSize(size);
-    auto computedFontSize = Style::computedFontSizeFromSpecifiedSize(size, fontDescription.isAbsoluteSize(), useSVGZoomRules(), style(), document());
-    fontDescription.setComputedSize(computedFontSize.size, computedFontSize.usedZoomFactor);
+    fontDescription.setComputedSize(size);
+    auto usedFontSize = Style::usedFontSizeFromComputedSize(size, fontDescription.isAbsoluteSize(), useSVGZoomRules(), style(), document());
+    fontDescription.setUsedSize(usedFontSize.size, usedFontSize.zoomFactor);
 }
 
 CSSPropertyID BuilderState::cssPropertyID() const
 {
     return m_currentProperty ? m_currentProperty->id : CSSPropertyInvalid;
+}
+
+// Every custom property shares CSSPropertyCustom, so anything keying on cssPropertyID() needs this to
+// tell them apart. Null unless a custom property is being applied.
+AtomString BuilderState::customPropertyName() const
+{
+    if (cssPropertyID() != CSSPropertyCustom)
+        return nullAtom();
+    RefPtr customPropertyValue = dynamicDowncast<CSSCustomPropertyValue>(m_currentProperty->cssValue[SelectorChecker::MatchDefault]);
+    return customPropertyValue ? customPropertyValue->name() : nullAtom();
 }
 
 bool BuilderState::isCurrentPropertyInvalidAtComputedValueTime() const
@@ -318,9 +325,9 @@ void BuilderState::setUsesViewportUnits()
     m_style.setUsesViewportUnits();
 }
 
-void BuilderState::setUsesContainerUnits()
+void BuilderState::setIsContainerDependent()
 {
-    m_style.setUsesContainerUnits();
+    m_style.setIsContainerDependent();
 }
 
 double BuilderState::lookupCSSRandomBaseValue(const CSSCalc::RandomCachingKey& key, std::optional<CSS::Keyword::ElementScoped> elementScoped) const
@@ -333,24 +340,36 @@ double BuilderState::lookupCSSRandomBaseValue(const CSSCalc::RandomCachingKey& k
 
 // MARK: - Tree Counting Functions
 
+static void NODELETE markTreeCountingFunctionUsed(const Element& element, ComputedStyle& style)
+{
+    style.setUsesTreeCountingFunctions();
+
+    auto* parent = element.parentElement();
+    if (!parent)
+        return;
+
+    // FIXME: This should mark through Style::Relations.
+    parent->setChildrenAffectedByBackwardPositionalRules();
+    parent->setChildrenAffectedByForwardPositionalRules();
+}
+
+// "Loosely-matched tree-scoped references" count as 0 for cross-tree styling.
+// https://drafts.csswg.org/css-shadow-1/#tree-scoped-name-loosely-matched
+static bool isLooselyMatchedTreeScopedReference(const PropertyCascade::Property* property)
+{
+    return property && property->styleScopeOrdinal <= ScopeOrdinal::ContainingHost;
+}
+
 unsigned BuilderState::siblingCount()
 {
     // https://drafts.csswg.org/css-values-5/#funcdef-sibling-count
 
     ASSERT(element());
 
-    // https://drafts.csswg.org/css-shadow-1/#tree-scoped-name-loosely-matched
-    // "loosely-matched tree-scoped references" return 0 for cross-tree styling.
-    if (m_currentProperty && m_currentProperty->styleScopeOrdinal <= ScopeOrdinal::ContainingHost)
+    if (isLooselyMatchedTreeScopedReference(m_currentProperty))
         return 0;
 
-    auto* parent = element()->parentElement();
-    if (!parent)
-        return 1;
-
-    m_style.setUsesTreeCountingFunctions();
-    parent->setChildrenAffectedByBackwardPositionalRules();
-    parent->setChildrenAffectedByForwardPositionalRules();
+    markTreeCountingFunctionUsed(*element(), m_style);
 
     unsigned count = 1;
     for (const auto* sibling = ElementTraversal::previousSibling(*element()); sibling; sibling = ElementTraversal::previousSibling(*sibling))
@@ -366,18 +385,10 @@ unsigned BuilderState::siblingIndex()
 
     ASSERT(element());
 
-    // https://drafts.csswg.org/css-shadow-1/#tree-scoped-name-loosely-matched
-    // "loosely-matched tree-scoped references" return 0 for cross-tree styling.
-    if (m_currentProperty && m_currentProperty->styleScopeOrdinal <= ScopeOrdinal::ContainingHost)
+    if (isLooselyMatchedTreeScopedReference(m_currentProperty))
         return 0;
 
-    auto* parent = element()->parentElement();
-    if (!parent)
-        return 1;
-
-    m_style.setUsesTreeCountingFunctions();
-    parent->setChildrenAffectedByBackwardPositionalRules();
-    parent->setChildrenAffectedByForwardPositionalRules();
+    markTreeCountingFunctionUsed(*element(), m_style);
 
     unsigned count = 1;
     for (const auto* sibling = ElementTraversal::previousSibling(*element()); sibling; sibling = ElementTraversal::previousSibling(*sibling))

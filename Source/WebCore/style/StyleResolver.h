@@ -77,6 +77,9 @@ struct UnadjustedStyle;
 
 struct ResolutionContext {
     const Style::ComputedStyle* parentStyle;
+    // For highlight pseudo-elements: the corresponding highlight pseudo-element style of the
+    // originating element's parent. https://drafts.csswg.org/css-pseudo-4/#highlight-cascade
+    const Style::ComputedStyle* parentHighlightStyle { nullptr };
     const Style::ComputedStyle* parentBoxStyle { nullptr };
     // This needs to be provided during style resolution when up-to-date document element style is not available via DOM.
     const Style::ComputedStyle* documentElementStyle { nullptr };
@@ -94,7 +97,7 @@ public:
     // Style resolvers are shared between shadow trees with identical styles. That's why we don't simply provide a Style::Scope.
     enum class ScopeType : bool { Document, ShadowTree };
     static Ref<Resolver> create(Document&, ScopeType);
-    ~Resolver();
+    WEBCORE_EXPORT ~Resolver();
 
     UnadjustedStyle unadjustedStyleForElement(Element&, const ResolutionContext&, RuleMatchingBehavior = RuleMatchingBehavior::MatchAllRules);
     UnadjustedStyle unadjustedStyleForCachedMatchResult(Element&, const ResolutionContext&, CachedMatchResult&&);

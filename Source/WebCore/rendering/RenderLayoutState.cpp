@@ -26,8 +26,10 @@
 #include "config.h"
 #include "RenderLayoutState.h"
 
+#include "PositionedLayoutConstraints.h"
 #include "RenderBoxModelObjectInlines.h"
 #include "RenderElementInlines.h"
+#include "RenderElementStyleInlines.h"
 #include "RenderFragmentedFlow.h"
 #include "RenderInline.h"
 #include "RenderLayer.h"
@@ -89,10 +91,8 @@ void RenderLayoutState::computeOffsets(const RenderLayoutState& ancestor, Render
         m_paintOffset = ancestor.paintOffset() + offset;
 
     if (renderer.isOutOfFlowPositioned() && !fixed) {
-        if (CheckedPtr container = dynamicDowncast<RenderInline>(renderer.container())) {
-            if (container && container->isInFlowPositioned())
-                m_paintOffset += container->offsetForInFlowPositionedInline(&renderer);
-        }
+        if (CheckedPtr container = renderer.container(); container && container->isInlineBox() && container->canContainAbsolutelyPositionedObjects())
+            m_paintOffset += PositionedLayoutConstraints::containingBlockOffsetForNonStaticAxes(downcast<RenderBoxModelObject>(*container), renderer.style());
     }
 
     m_layoutOffset = m_paintOffset;
@@ -113,8 +113,8 @@ void RenderLayoutState::computeOffsets(const RenderLayoutState& ancestor, Render
     }();
     m_layoutDeltaForRepaint = isRepaintContainer ? LayoutSize() : ancestor.layoutDelta();
 #if ASSERT_ENABLED
-    m_layoutDeltaForRepaintXSaturated = isRepaintContainer ? false : ancestor.m_layoutDeltaForRepaintXSaturated;
-    m_layoutDeltaForRepaintYSaturated = isRepaintContainer ? false : ancestor.m_layoutDeltaForRepaintYSaturated;
+    m_layoutDeltaForRepaintXSaturated = !isRepaintContainer && ancestor.m_layoutDeltaForRepaintXSaturated;
+    m_layoutDeltaForRepaintYSaturated = !isRepaintContainer && ancestor.m_layoutDeltaForRepaintYSaturated;
 #endif
 }
 
@@ -209,7 +209,7 @@ void RenderLayoutState::computeLineGridPaginationOrigin(const RenderMultiColumnF
 
     // Shift to the next highest line grid multiple past the page logical top. Cache the delta
     // between this new value and the page logical top as the pagination origin.
-    auto lineBoxHeight = LayoutUnit::fromFloatCeil(m_lineGrid->style().computedLineHeight());
+    auto lineBoxHeight = LayoutUnit::fromFloatCeil(m_lineGrid->style().usedLineHeight());
     if (!roundToInt(lineBoxHeight))
         return;
     LayoutUnit remainder = roundToInt(pageLogicalTop - firstLineTop) % roundToInt(lineBoxHeight);
@@ -344,6 +344,18 @@ FlexPercentResolveDisabler::FlexPercentResolveDisabler(LocalFrameViewLayoutConte
 FlexPercentResolveDisabler::~FlexPercentResolveDisabler()
 {
     m_layoutContext->enablePercentHeightResolveFor(m_flexItem);
+}
+
+IntrinsicLogicalHeightComputationScope::IntrinsicLogicalHeightComputationScope(LocalFrameViewLayoutContext& layoutContext, const RenderBox& box)
+    : m_layoutContext(layoutContext)
+    , m_box(box)
+{
+    m_layoutContext->addIntrinsicLogicalHeightComputationFor(box);
+}
+
+IntrinsicLogicalHeightComputationScope::~IntrinsicLogicalHeightComputationScope()
+{
+    m_layoutContext->removeIntrinsicLogicalHeightComputationFor(m_box);
 }
 
 ContentVisibilityOverrideScope::ContentVisibilityOverrideScope(LocalFrameViewLayoutContext& layoutContext, OptionSet<OverrideType> overrideTypes)

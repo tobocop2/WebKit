@@ -100,6 +100,20 @@ ALWAYS_INLINE bool RegExp::hasCodeFor(Yarr::CharSize charSize)
     return false;
 }
 
+// The low bits of the heap's marking version: one per full collection.
+ALWAYS_INLINE uint8_t RegExp::currentUseEpoch(VM& vm)
+{
+    return static_cast<uint8_t>(vm.heap.objectSpace().markingVersion());
+}
+
+// Only the VM's thread notes the use. A compiler thread (matchConcurrently()) runs code that is already there, and writes nothing here.
+template<Yarr::MatchFrom matchFrom>
+ALWAYS_INLINE void RegExp::noteUse(VM& vm)
+{
+    if constexpr (matchFrom == Yarr::MatchFrom::VMThread)
+        m_lastUseEpoch = currentUseEpoch(vm);
+}
+
 ALWAYS_INLINE void RegExp::compileIfNecessary(VM& vm, Yarr::CharSize charSize, std::optional<StringView> sampleString)
 {
     if (hasCodeFor(charSize))
@@ -112,13 +126,42 @@ ALWAYS_INLINE void RegExp::compileIfNecessary(VM& vm, Yarr::CharSize charSize, s
 }
 
 template<Yarr::MatchFrom matchFrom>
+NEVER_INLINE int RegExp::matchInlineAtCodePointBoundaries(JSGlobalObject* nullOrGlobalObject, VM& vm, StringView s, unsigned startOffset, std::span<int> ovector)
+{
+    if (splitsSurrogatePair(s, startOffset))
+        --startOffset;
+    int result = matchInlineOnce<matchFrom>(nullOrGlobalObject, vm, s, startOffset, ovector);
+    while (result > static_cast<int>(startOffset) && splitsSurrogatePair(s, result)) {
+        startOffset = result + 1;
+        result = matchInlineOnce<matchFrom>(nullOrGlobalObject, vm, s, startOffset, ovector);
+    }
+    return result;
+}
+
+template<Yarr::MatchFrom matchFrom>
 ALWAYS_INLINE int RegExp::matchInline(JSGlobalObject* nullOrGlobalObject, VM& vm, StringView s, unsigned startOffset, std::span<int> ovector)
+{
+    // Two separate predictable branches keep the common paths to a flag test plus a
+    // tail call; only a unicode pattern on a 16-bit subject needs the boundary fixup.
+    if (!eitherUnicode()) [[likely]]
+        return matchInlineOnce<matchFrom>(nullOrGlobalObject, vm, s, startOffset, ovector);
+    if (s.is8Bit()) [[likely]]
+        return matchInlineOnce<matchFrom>(nullOrGlobalObject, vm, s, startOffset, ovector);
+    return matchInlineAtCodePointBoundaries<matchFrom>(nullOrGlobalObject, vm, s, startOffset, ovector);
+}
+
+template<Yarr::MatchFrom matchFrom>
+ALWAYS_INLINE int RegExp::matchInlineOnce(JSGlobalObject* nullOrGlobalObject, VM& vm, StringView s, unsigned startOffset, std::span<int> ovector)
 {
 #if ENABLE(REGEXP_TRACING)
     m_rtMatchCallCount++;
     m_rtMatchTotalSubjectStringLen += (double)(s.length() - startOffset);
 #endif
 
+    if (s.length() - startOffset < m_minimumSize)
+        return -1;
+
+    noteUse<matchFrom>(vm);
     compileIfNecessary(vm, s.is8Bit() ? Yarr::CharSize::Char8 : Yarr::CharSize::Char16, s);
 
     auto throwError = [&] {
@@ -172,8 +215,10 @@ ALWAYS_INLINE int RegExp::matchInline(JSGlobalObject* nullOrGlobalObject, VM& vm
                 if (m_state == ParseError)
                     return throwError();
             }
-            if (!m_regExpBytecode)
-                return -1;
+            if (!m_regExpBytecode) {
+                ASSERT(matchFrom == Yarr::MatchFrom::CompilerThread);
+                return result;
+            }
             {
                 Yarr::MatchingContextHolder regExpContext(vm, this, matchFrom);
                 result = Yarr::interpret(m_regExpBytecode.get(), s, startOffset, reinterpret_cast<unsigned*>(offsetVector));
@@ -241,13 +286,40 @@ ALWAYS_INLINE void RegExp::compileIfNecessaryMatchOnly(VM& vm, Yarr::CharSize ch
 }
 
 template<Yarr::MatchFrom matchFrom>
+NEVER_INLINE MatchResult RegExp::matchInlineAtCodePointBoundaries(JSGlobalObject* nullOrGlobalObject, VM& vm, StringView s, unsigned startOffset)
+{
+    if (splitsSurrogatePair(s, startOffset))
+        --startOffset;
+    MatchResult result = matchInlineOnce<matchFrom>(nullOrGlobalObject, vm, s, startOffset);
+    while (result && result.start > startOffset && splitsSurrogatePair(s, result.start)) {
+        startOffset = result.start + 1;
+        result = matchInlineOnce<matchFrom>(nullOrGlobalObject, vm, s, startOffset);
+    }
+    return result;
+}
+
+template<Yarr::MatchFrom matchFrom>
 ALWAYS_INLINE MatchResult RegExp::matchInline(JSGlobalObject* nullOrGlobalObject, VM& vm, StringView s, unsigned startOffset)
+{
+    if (!eitherUnicode()) [[likely]]
+        return matchInlineOnce<matchFrom>(nullOrGlobalObject, vm, s, startOffset);
+    if (s.is8Bit()) [[likely]]
+        return matchInlineOnce<matchFrom>(nullOrGlobalObject, vm, s, startOffset);
+    return matchInlineAtCodePointBoundaries<matchFrom>(nullOrGlobalObject, vm, s, startOffset);
+}
+
+template<Yarr::MatchFrom matchFrom>
+ALWAYS_INLINE MatchResult RegExp::matchInlineOnce(JSGlobalObject* nullOrGlobalObject, VM& vm, StringView s, unsigned startOffset)
 {
 #if ENABLE(REGEXP_TRACING)
     m_rtMatchOnlyCallCount++;
     m_rtMatchOnlyTotalSubjectStringLen += (double)(s.length() - startOffset);
 #endif
 
+    if (s.length() - startOffset < m_minimumSize)
+        return MatchResult::failed();
+
+    noteUse<matchFrom>(vm);
     compileIfNecessaryMatchOnly(vm, s.is8Bit() ? Yarr::CharSize::Char8 : Yarr::CharSize::Char16, s);
 
     auto throwError = [&] {
@@ -302,8 +374,10 @@ ALWAYS_INLINE MatchResult RegExp::matchInline(JSGlobalObject* nullOrGlobalObject
             if (m_state == ParseError)
                 return throwError();
         }
-        if (!m_regExpBytecode)
-            return MatchResult::failed();
+        if (!m_regExpBytecode) {
+            ASSERT(matchFrom == Yarr::MatchFrom::CompilerThread);
+            return result;
+        }
     }
 #endif
 

@@ -56,16 +56,15 @@ inline JSC::Heap* Heap::heap(const JSValue v)
     return heap(v.asCell());
 }
 
-// Defined in Heap.cpp with NEVER_INLINE to prevent LTO from breaking compiler barriers
-// ALWAYS_INLINE bool Heap::isMarked(const void* rawCell)
-// {
-//     ASSERT(!m_isMarkingForGCVerifier);
-//     HeapCell* cell = std::bit_cast<HeapCell*>(rawCell);
-//     if (cell->isPreciseAllocation())
-//         return cell->preciseAllocation().isMarked();
-//     MarkedBlock& block = cell->markedBlock();
-//     return block.isMarked(m_objectSpace.markingVersion(), cell);
-// }
+ALWAYS_INLINE bool Heap::isMarked(const void* rawCell)
+{
+    ASSERT(!m_isMarkingForGCVerifier);
+    HeapCell* cell = std::bit_cast<HeapCell*>(rawCell);
+    if (cell->isPreciseAllocation())
+        return cell->preciseAllocation().isMarked();
+    MarkedBlock& block = cell->markedBlock();
+    return block.isMarked(m_objectSpace.markingVersion(), cell);
+}
 
 ALWAYS_INLINE bool Heap::testAndSetMarked(HeapVersion markingVersion, const void* rawCell)
 {
@@ -133,19 +132,19 @@ inline void Heap::mutatorFence()
 
 template<typename Functor> inline void Heap::forEachCodeBlock(NOESCAPE const Functor& func)
 {
-    forEachCodeBlockImpl(scopedLambdaRef<void(CodeBlock*)>(func));
+    forEachCodeBlockImpl(func);
 }
 
 template<typename Functor> inline void Heap::forEachCodeBlockIgnoringJITPlans(const AbstractLocker& codeBlockSetLocker, NOESCAPE const Functor& func)
 {
-    forEachCodeBlockIgnoringJITPlansImpl(codeBlockSetLocker, scopedLambdaRef<void(CodeBlock*)>(func));
+    forEachCodeBlockIgnoringJITPlansImpl(codeBlockSetLocker, func);
 }
 
 template<typename Functor> inline void Heap::forEachProtectedCell(const Functor& functor)
 {
     for (auto& pair : m_protectedValues)
         functor(pair.key);
-    m_handleSet.forEachStrongHandle(functor, m_protectedValues);
+    m_strongSet.forEachStrongHandle(functor, m_protectedValues);
 }
 
 #if USE(FOUNDATION)

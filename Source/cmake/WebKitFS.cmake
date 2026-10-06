@@ -47,6 +47,8 @@ set(TestRunnerShared_DERIVED_SOURCES_DIR "${CMAKE_BINARY_DIR}/TestRunnerShared/D
 set(DumpRenderTree_DERIVED_SOURCES_DIR "${CMAKE_BINARY_DIR}/DumpRenderTree/DerivedSources")
 set(WebKitTestRunner_DERIVED_SOURCES_DIR "${CMAKE_BINARY_DIR}/WebKitTestRunner/DerivedSources")
 
+# FRAMEWORK_HEADERS_DIR variables include the name of the framework as a child
+# directory, and are suitable for use as include paths.
 set(bmalloc_FRAMEWORK_HEADERS_DIR "${CMAKE_BINARY_DIR}/bmalloc/Headers")
 set(bmalloc_PRIVATE_FRAMEWORK_HEADERS_DIR "${CMAKE_BINARY_DIR}/bmalloc/PrivateHeaders")
 set(ANGLE_FRAMEWORK_HEADERS_DIR "${CMAKE_BINARY_DIR}/ANGLE/Headers")
@@ -59,7 +61,62 @@ set(WebCore_PRIVATE_FRAMEWORK_HEADERS_DIR "${CMAKE_BINARY_DIR}/WebCore/PrivateHe
 set(WebKitLegacy_FRAMEWORK_HEADERS_DIR "${CMAKE_BINARY_DIR}/WebKitLegacy/Headers")
 set(WebKit_FRAMEWORK_HEADERS_DIR "${CMAKE_BINARY_DIR}/WebKit/Headers")
 set(WebKit_PRIVATE_FRAMEWORK_HEADERS_DIR "${CMAKE_BINARY_DIR}/WebKit/PrivateHeaders")
+set(WebGPU_FRAMEWORK_HEADERS_DIR "${CMAKE_BINARY_DIR}/WebGPU/Headers")
+set(WebGPU_PRIVATE_FRAMEWORK_HEADERS_DIR "${CMAKE_BINARY_DIR}/WebGPU/PrivateHeaders")
 set(WebKitAdditions_FRAMEWORK_HEADERS_DIR "${CMAKE_BINARY_DIR}/WebKitAdditions/Headers")
+
+# HEADER_DIR variables are the directory that a framework's headers are
+# actually copied into.
+set(bmalloc_HEADERS_DIR "${bmalloc_FRAMEWORK_HEADERS_DIR}/bmalloc")
+set(bmalloc_PRIVATE_HEADERS_DIR "${bmalloc_PRIVATE_FRAMEWORK_HEADERS_DIR}/bmalloc")
+set(ANGLE_HEADERS_DIR "${ANGLE_FRAMEWORK_HEADERS_DIR}/ANGLE")
+set(WTF_HEADERS_DIR "${WTF_FRAMEWORK_HEADERS_DIR}/wtf")
+set(JavaScriptCore_HEADERS_DIR "${JavaScriptCore_FRAMEWORK_HEADERS_DIR}/JavaScriptCore")
+set(JavaScriptCore_PRIVATE_HEADERS_DIR "${JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS_DIR}/JavaScriptCore")
+set(PAL_HEADERS_DIR "${PAL_FRAMEWORK_HEADERS_DIR}/pal")
+set(WebCore_PRIVATE_HEADERS_DIR "${WebCore_PRIVATE_FRAMEWORK_HEADERS_DIR}/WebCore")
+set(WebKitLeagcy_HEADERS_DIR "${WebKitLegacy_FRAMEWORK_HEADERS_DIR}/WebKitLegacy")
+set(WebKit_HEADERS_DIR "${WebKit_FRAMEWORK_HEADERS_DIR}/WebKit")
+set(WebKit_PRIVATE_HEADERS_DIR "${WebKit_PRIVATE_FRAMEWORK_HEADERS_DIR}/WebKit")
+set(WebGPU_HEADERS_DIR "${WebGPU_FRAMEWORK_HEADERS_DIR}/WebGPU")
+set(WebGPU_PRIVATE_HEADERS_DIR "${WebGPU_PRIVATE_FRAMEWORK_HEADERS_DIR}/WebGPU")
+set(WebKitAdditions_HEADERS_DIR "${WebKitAdditions_FRAMEWORK_HEADERS_DIR}/WebKitAdditions")
 
 set(WTF_SCRIPTS_DIR "${CMAKE_BINARY_DIR}/WTF/Scripts")
 set(JavaScriptCore_SCRIPTS_DIR "${CMAKE_BINARY_DIR}/JavaScriptCore/Scripts")
+
+# Anything reading a header out of the WebKitAdditions headers directory has to
+# depend on the target which stages them, and the preferences additions are one
+# of those inputs. Both variables stay unset without the internal SDK.
+if (USE_APPLE_INTERNAL_SDK)
+    set(WEB_PREFERENCES_ADDITIONS "${WebKitAdditions_HEADERS_DIR}/WebPreferencesAdditions.yaml")
+    set(WEBKITADDITIONS_HEADERS_DEPENDENCIES WebKitAdditions_CopyHeaders)
+endif ()
+
+# On Apple platforms, some targets build as framework bundles. Point their
+# HEADERS variables to the inside of the framework bundle.
+# Bun's JSCOnly packaging (Dockerfile.macos and the prebuilt tarballs)
+# expects the flat JavaScriptCore/Headers layout on every platform, so
+# keep the non-framework paths when USE_BUN_JSC_ADDITIONS is on.
+set(USE_FRAMEWORK_BUNDLES OFF)
+if (APPLE AND NOT USE_BUN_JSC_ADDITIONS)
+    set(USE_FRAMEWORK_BUNDLES ON)
+    if (WEBKIT_SDK_IS_MACOS)
+        # macOS uses a versioned bundle (Versions/A/ + Versions/Current/
+        # symlinks); other platforms are flat.
+        set(WEBKIT_FRAMEWORK_VERSION_PATH "Versions/A/")
+    endif ()
+
+    set(JavaScriptCore_HEADERS_DIR         "${CMAKE_BINARY_DIR}/JavaScriptCore.framework/${WEBKIT_FRAMEWORK_VERSION_PATH}Headers")
+    set(JavaScriptCore_PRIVATE_HEADERS_DIR "${CMAKE_BINARY_DIR}/JavaScriptCore.framework/${WEBKIT_FRAMEWORK_VERSION_PATH}PrivateHeaders")
+    set(WebCore_PRIVATE_HEADERS_DIR        "${CMAKE_BINARY_DIR}/WebCore.framework/${WEBKIT_FRAMEWORK_VERSION_PATH}PrivateHeaders")
+    set(WebKitLegacy_HEADERS_DIR           "${CMAKE_BINARY_DIR}/WebKitLegacy.framework/${WEBKIT_FRAMEWORK_VERSION_PATH}PrivateHeaders")
+    set(WebKit_HEADERS_DIR                 "${CMAKE_BINARY_DIR}/WebKit.framework/${WEBKIT_FRAMEWORK_VERSION_PATH}Headers")
+    set(WebKit_PRIVATE_HEADERS_DIR         "${CMAKE_BINARY_DIR}/WebKit.framework/${WEBKIT_FRAMEWORK_VERSION_PATH}PrivateHeaders")
+    set(WebGPU_HEADERS_DIR                 "${CMAKE_BINARY_DIR}/WebGPU.framework/${WEBKIT_FRAMEWORK_VERSION_PATH}Headers")
+    set(WebGPU_PRIVATE_HEADERS_DIR         "${CMAKE_BINARY_DIR}/WebGPU.framework/${WEBKIT_FRAMEWORK_VERSION_PATH}PrivateHeaders")
+
+    # The code generators sit alongside the private headers, which is where
+    # clients above WebKit look for them.
+    set(JavaScriptCore_SCRIPTS_DIR         "${JavaScriptCore_PRIVATE_HEADERS_DIR}")
+endif ()

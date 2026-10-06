@@ -55,15 +55,15 @@ public:
     LayoutRect captureLocalOverflowRect() const { return m_localOverflowRect; }
 
     // Inset of the scaled capture from the visualOverflowRect()
-    LayoutPoint NODELETE captureContentInset() const;
+    LayoutPoint captureContentInset() const;
 
-    bool canUseExistingLayers() const { return !hasNonVisibleOverflow(); }
+    bool canUseExistingLayers() const;
 
     bool NODELETE paintsContent() const final;
 
     bool isRootElementCapture() const { return m_isRootElementCapture; }
 
-    RefPtr<ImageBuffer> image() { return m_oldImage; }
+    RefPtr<ImageBuffer> image();
 
 private:
     ASCIILiteral renderName() const override { return "RenderViewTransitionCapture"_s; }

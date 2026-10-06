@@ -31,6 +31,7 @@
 #include <wtf/CurrentThread.h>
 #include <wtf/EnumeratedArray.h>
 #include <wtf/Forward.h>
+#include <wtf/Function.h>
 #include <wtf/HashFunctions.h>
 #include <wtf/HashMap.h>
 #include <wtf/HashTraits.h>
@@ -154,6 +155,11 @@ public:
     WEBCORE_EXPORT const FontRanges& realizeFallbackRangesAt(const FontCascadeDescription&, FontSelector*, unsigned fallbackIndex);
 
     void pruneSystemFallbacks();
+
+    void addSystemFallbackFont(Ref<Font>&&);
+
+    // Only visits fonts that have already been realized; never triggers realization/loading.
+    void forEachRealizedFont(NOESCAPE const Function<void(const Font&)>&) const;
 
 private:
     FontCascadeFonts();

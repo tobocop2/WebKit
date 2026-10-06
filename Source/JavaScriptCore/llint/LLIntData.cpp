@@ -26,6 +26,7 @@
 #include "config.h"
 #include "LLIntData.h"
 
+#include "CallLinkInfo.h"
 #include "InPlaceInterpreter.h"
 #include "JSCConfig.h"
 #include "LLIntCLoop.h"
@@ -211,8 +212,10 @@ void initialize()
 #if CPU(ARM64E)
 
 #if ENABLE(JIT_CAGE)
-    if (Options::useJITCage())
+    if (Options::useJITCage()) {
         g_jscConfig.llint.gateMap[static_cast<unsigned>(Gate::jitCagePtr)] = jitCagePtrThunk().code().taggedPtr();
+        JSC_JIT_CAGE_PROBE(removeCodePtrTag<void*>(jitCageProbeThunk().code().taggedPtr()));
+    }
 #endif
 
 #if ENABLE(JIT)
@@ -443,6 +446,7 @@ void initialize()
 #endif // CPU(ARM64E)
 #endif // ENABLE(C_LOOP)
     g_jscConfig.defaultCallThunk = defaultCall().code().taggedPtr();
+    LazyCallLinkInfo::initialize(unlinkedCall().code());
 #if ENABLE(JIT)
     if (Options::useJIT())
         g_jscConfig.arityFixupThunk = arityFixupThunk().code().taggedPtr();

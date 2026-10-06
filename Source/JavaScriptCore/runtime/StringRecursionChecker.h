@@ -19,6 +19,13 @@
 
 #pragma once
 
+// Upstream removed this guard (https://commits.webkit.org/318399@main) and lets a cyclic
+// Array#join, Array#toString or Array#toLocaleString recurse until the stack overflows.
+// V8 and SpiderMonkey return the empty string for an array that is already being joined, and
+// code that runs under Node depends on that (three.js hashes arrays that contain themselves).
+// Bun keeps the guard for arrays so that these conversions match Node.
+#if USE(BUN_JSC_ADDITIONS)
+
 #include "CallFrame.h"
 #include "GetVM.h"
 #include "VMInlines.h"
@@ -93,3 +100,5 @@ inline StringRecursionChecker::~StringRecursionChecker()
 }
 
 } // namespace JSC
+
+#endif // USE(BUN_JSC_ADDITIONS)

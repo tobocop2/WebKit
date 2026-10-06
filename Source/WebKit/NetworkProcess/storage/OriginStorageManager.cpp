@@ -73,7 +73,7 @@ public:
     void NODELETE setMode(StorageBucketMode mode) { m_mode = mode; }
     void connectionClosed(IPC::Connection::UniqueID);
     String typeStoragePath(StorageType) const;
-    FileSystemStorageManager& fileSystemStorageManager(FileSystemStorageHandleRegistry&, FileSystemStorageManager::QuotaCheckFunction&&);
+    FileSystemStorageManager& fileSystemStorageManager(FileSystemStorageHandleRegistry&, const WebCore::ClientOrigin&, FileSystemStorageManager::QuotaCheckFunction&&);
     FileSystemStorageManager* NODELETE existingFileSystemStorageManager() { return m_fileSystemStorageManager.get(); }
     LocalStorageManager& localStorageManager(StorageAreaRegistry&);
     LocalStorageManager* NODELETE existingLocalStorageManager() { return m_localStorageManager.get(); }
@@ -214,10 +214,10 @@ String OriginStorageManager::StorageBucket::typeStoragePath(StorageType type) co
     return FileSystem::pathByAppendingComponent(m_rootPath, storageIdentifier);
 }
 
-FileSystemStorageManager& OriginStorageManager::StorageBucket::fileSystemStorageManager(FileSystemStorageHandleRegistry& registry, FileSystemStorageManager::QuotaCheckFunction&& quotaCheckFunction)
+FileSystemStorageManager& OriginStorageManager::StorageBucket::fileSystemStorageManager(FileSystemStorageHandleRegistry& registry, const WebCore::ClientOrigin& origin, FileSystemStorageManager::QuotaCheckFunction&& quotaCheckFunction)
 {
     if (!m_fileSystemStorageManager)
-        m_fileSystemStorageManager = FileSystemStorageManager::create(typeStoragePath(StorageType::FileSystem), registry, WTF::move(quotaCheckFunction));
+        m_fileSystemStorageManager = FileSystemStorageManager::create(typeStoragePath(StorageType::FileSystem), registry, origin, WTF::move(quotaCheckFunction));
 
     return *m_fileSystemStorageManager;
 }
@@ -248,10 +248,8 @@ IDBStorageManager& OriginStorageManager::StorageBucket::idbStorageManager(IDBSto
 CacheStorageManager& OriginStorageManager::StorageBucket::cacheStorageManager(CacheStorageRegistry& registry, const WebCore::ClientOrigin& origin, CacheStorageManager::QuotaCheckFunction&& quotaCheckFunction, Ref<WorkQueue>&& queue)
 {
     if (!m_cacheStorageManager) {
-        std::optional<WebCore::ClientOrigin> optionalOrigin;
-        if (m_level < UnifiedOriginStorageLevel::Standard)
-            optionalOrigin = origin;
-        m_cacheStorageManager = CacheStorageManager::create(resolvedCacheStoragePath(), registry, optionalOrigin, WTF::move(quotaCheckFunction), WTF::move(queue));
+        auto shouldWriteOriginFile = m_level < UnifiedOriginStorageLevel::Standard ? ShouldWriteOriginFile::Yes : ShouldWriteOriginFile::No;
+        m_cacheStorageManager = CacheStorageManager::create(resolvedCacheStoragePath(), registry, origin, shouldWriteOriginFile, WTF::move(quotaCheckFunction), WTF::move(queue));
     }
 
     return *m_cacheStorageManager;
@@ -430,6 +428,8 @@ void OriginStorageManager::StorageBucket::deleteLocalStorageData(WallTime time)
     if (FileSystem::fileModificationTime(currentLocalStoragePath) >= time) {
         if (m_localStorageManager)
             m_localStorageManager->clearDataOnDisk();
+
+        RELEASE_LOG(Storage, "OriginStorageManager::StorageBucket::deleteLocalStorageData deletes database file %" PRIVATE_LOG_STRING, currentLocalStoragePath.utf8());
         WebCore::SQLiteFileSystem::deleteDatabaseFile(currentLocalStoragePath);
     }
 
@@ -528,7 +528,7 @@ String OriginStorageManager::StorageBucket::resolvedLocalStoragePath()
         auto localStorageDirectory = typeStoragePath(StorageType::LocalStorage);
         auto localStoragePath = LocalStorageManager::localStorageFilePath(localStorageDirectory);
         if (!m_customLocalStoragePath.isEmpty() && !FileSystem::fileExists(localStoragePath) && FileSystem::fileExists(m_customLocalStoragePath)) {
-            RELEASE_LOG(Storage, "%p - StorageBucket::resolvedLocalStoragePath New path '%" PUBLIC_LOG_STRING "'", this, localStoragePath.utf8().data());
+            RELEASE_LOG(Storage, "%p - StorageBucket::resolvedLocalStoragePath New path '%" PUBLIC_LOG_STRING "'", this, localStoragePath.utf8());
             FileSystem::makeAllDirectories(localStorageDirectory);
             auto moved = WebCore::SQLiteFileSystem::moveDatabaseFile(m_customLocalStoragePath, localStoragePath);
             if (!moved && !FileSystem::fileExists(localStoragePath))
@@ -580,7 +580,7 @@ String OriginStorageManager::StorageBucket::resolvedCacheStoragePath()
     case UnifiedOriginStorageLevel::Standard:
         m_resolvedCacheStoragePath = typeStoragePath(StorageType::CacheStorage);
         if (!m_resolvedCacheStoragePath.isEmpty() && !m_customCacheStoragePath.isEmpty() && !FileSystem::fileExists(m_resolvedCacheStoragePath) && FileSystem::fileExists(m_customCacheStoragePath)) {
-            RELEASE_LOG(Storage, "%p - StorageBucket::resolvedCacheStoragePath New path '%" PUBLIC_LOG_STRING "'", this, m_resolvedCacheStoragePath.utf8().data());
+            RELEASE_LOG(Storage, "%p - StorageBucket::resolvedCacheStoragePath New path '%" PUBLIC_LOG_STRING "'", this, m_resolvedCacheStoragePath.utf8());
             FileSystem::moveFile(m_customCacheStoragePath, m_resolvedCacheStoragePath);
         }
     }
@@ -684,9 +684,9 @@ OriginQuotaManager& OriginStorageManager::quotaManager()
     return m_quotaManager.get();
 }
 
-FileSystemStorageManager& OriginStorageManager::fileSystemStorageManager(FileSystemStorageHandleRegistry& registry)
+FileSystemStorageManager& OriginStorageManager::fileSystemStorageManager(FileSystemStorageHandleRegistry& registry, const WebCore::ClientOrigin& origin)
 {
-    return defaultBucket().fileSystemStorageManager(registry, [quotaManager = ThreadSafeWeakPtr { this->quotaManager() }](uint64_t spaceRequested, CompletionHandler<void(bool)>&& completionHandler) mutable {
+    return defaultBucket().fileSystemStorageManager(registry, origin, [quotaManager = ThreadSafeWeakPtr { this->quotaManager() }](uint64_t spaceRequested, CompletionHandler<void(bool)>&& completionHandler) mutable {
         auto strongReference = quotaManager.get();
         if (!strongReference)
             return completionHandler(false);

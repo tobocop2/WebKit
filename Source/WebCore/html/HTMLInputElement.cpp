@@ -610,12 +610,8 @@ void HTMLInputElement::updateType(const AtomString& typeAttributeValue)
     bool nowSelectable = m_inputType->supportsSelectionAPI();
     // 9. If previouslySelectable is false and nowSelectable is true, set the element's text entry cursor position to the beginning of the text control, and set its selection direction to "none".
     if (!previouslySelectable && nowSelectable) {
-        TextFieldSelectionDirection direction = SelectionHasNoDirection;
         // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#set-the-selection-direction
-        RefPtr frame = document().frame();
-        if (isTextField() && frame && frame->editor().behavior().shouldConsiderSelectionAsDirectional())
-            direction = SelectionHasForwardDirection;
-        cacheSelection(0, 0, direction);
+        cacheSelection(0, 0, normalizeSelectionDirection(SelectionHasNoDirection));
     }
 
     updateValidity();
@@ -850,7 +846,8 @@ void HTMLInputElement::attributeChanged(const QualifiedName& name, const AtomStr
         break;
     }
     case AttributeNames::resultsAttr:
-        m_maxResults = newValue.isNull() ? -1 : std::min(parseHTMLInteger(newValue).value_or(0), maxSavedResults);
+        if (document().settings().searchInputResultsAttributeEnabled())
+            m_maxResults = newValue.isNull() ? -1 : std::min(parseHTMLInteger(newValue).value_or(0), maxSavedResults);
         break;
     case AttributeNames::autosaveAttr:
         invalidateStyleForSubtree();
@@ -888,7 +885,7 @@ void HTMLInputElement::attributeChanged(const QualifiedName& name, const AtomStr
         break;
     case AttributeNames::alphaAttr:
     case AttributeNames::colorspaceAttr:
-        if (isColorControl() && document().settings().inputTypeColorEnhancementsEnabled()) {
+        if (isColorControl()) {
             updateValueIfNeeded();
             updateValidity();
         }
@@ -1093,8 +1090,6 @@ void HTMLInputElement::setChecked(bool isChecked, WasSetByJavaScript wasCheckedB
         if (CheckedPtr cache = renderer->document().existingAXObjectCache())
             cache->checkedStateChanged(*this);
     }
-
-    invalidateStyle();
 }
 
 void HTMLInputElement::setIndeterminate(bool newValue)
@@ -1236,8 +1231,8 @@ double HTMLInputElement::valueAsNumber() const
 
 ExceptionOr<void> HTMLInputElement::setValueAsNumber(double newValue, TextFieldEventBehavior eventBehavior)
 {
-    if (!std::isfinite(newValue))
-        return Exception { ExceptionCode::NotSupportedError };
+    if (std::isinf(newValue))
+        return Exception { ExceptionCode::TypeError, "The value provided is infinite."_s };
     return m_inputType->setValueAsDouble(newValue, eventBehavior);
 }
 
@@ -1410,6 +1405,11 @@ bool HTMLInputElement::willRespondToMouseClickEventsWithEditability(Editability 
     return HTMLTextFormControlElement::willRespondToMouseClickEventsWithEditability(editability);
 }
 
+bool HTMLInputElement::hasActivationBehavior() const
+{
+    return true;
+}
+
 bool HTMLInputElement::isURLAttribute(const Attribute& attribute) const
 {
     return attribute.name() == srcAttr || attribute.name() == formactionAttr || HTMLTextFormControlElement::isURLAttribute(attribute);
@@ -1524,8 +1524,10 @@ void HTMLInputElement::setAutofilled(bool autoFilled)
     if (autoFilled == m_isAutoFilled)
         return;
 
-    if (autoFilled)
+    if (autoFilled) {
         logUserInteraction();
+        didCompleteAutofill();
+    }
 
     Style::PseudoClassChangeInvalidation styleInvalidation(*this, CSSSelector::PseudoClass::Autofill, autoFilled);
     m_isAutoFilled = autoFilled;
@@ -1601,26 +1603,23 @@ void HTMLInputElement::setAutofillVisibility(AutofillVisibility state)
     }
 }
 
+void HTMLInputElement::didCompleteAutofill()
+{
+    if (RefPtr page = document().page())
+        page->chrome().client().didCompleteAutofill(*this);
+}
+
 bool HTMLInputElement::alpha()
 {
-    return document().settings().inputTypeColorEnhancementsEnabled() && hasAttributeWithoutSynchronization(alphaAttr);
+    return hasAttributeWithoutSynchronization(alphaAttr);
 }
 
 String HTMLInputElement::colorSpace()
 {
-    if (!document().settings().inputTypeColorEnhancementsEnabled())
-        return nullString();
-
     if (equalLettersIgnoringASCIICase(attributeWithoutSynchronization(colorspaceAttr), "display-p3"_s))
         return "display-p3"_s;
 
     return "limited-srgb"_s;
-}
-
-void HTMLInputElement::setColorSpace(const AtomString& value)
-{
-    ASSERT(document().settings().inputTypeColorEnhancementsEnabled());
-    setAttributeWithoutSynchronization(colorspaceAttr, value);
 }
 
 FileList* HTMLInputElement::files()
@@ -2261,7 +2260,7 @@ bool HTMLInputElement::shouldTruncateText(const Style::ComputedStyle& style) con
 {
     if (!isTextField())
         return false;
-    return document().focusedElement() != this && style.textOverflow() == TextOverflow::Ellipsis;
+    return document().focusedElement() != this && !style.textOverflow().isClip();
 }
 
 void HTMLInputElement::invalidateStyleOnFocusChangeIfNeeded()
@@ -2269,7 +2268,7 @@ void HTMLInputElement::invalidateStyleOnFocusChangeIfNeeded()
     if (!isTextField())
         return;
     // Focus change may affect the result of shouldTruncateText().
-    if (CheckedPtr style = renderStyle(); style && style->textOverflow() == TextOverflow::Ellipsis)
+    if (CheckedPtr style = renderStyle(); style && !style->textOverflow().isClip())
         invalidateStyleForSubtree();
 }
 
@@ -2360,7 +2359,10 @@ Style::ComputedStyle HTMLInputElement::createInnerTextStyle(const Style::Compute
     textBlockStyle.setOverflowWrap(OverflowWrap::Normal);
     textBlockStyle.setOverflowX(Overflow::Hidden);
     textBlockStyle.setOverflowY(Overflow::Hidden);
-    textBlockStyle.setTextOverflow(shouldTruncateText(style) ? TextOverflow::Ellipsis : TextOverflow::Clip);
+    if (shouldTruncateText(style))
+        textBlockStyle.setTextOverflow(Style::TextOverflow { style.textOverflow() });
+    else
+        textBlockStyle.setTextOverflow(CSS::Keyword::Clip { });
 
     textBlockStyle.setDisplay(Style::DisplayType::BlockFlow);
 
@@ -2368,7 +2370,7 @@ Style::ComputedStyle HTMLInputElement::createInnerTextStyle(const Style::Compute
         textBlockStyle.setDisplay(Style::DisplayType::InlineFlowRoot);
         textBlockStyle.setLogicalMaxWidth(100_css_percentage);
         textBlockStyle.setColor(Color::black.colorWithAlphaByte(153));
-        textBlockStyle.setTextOverflow(TextOverflow::Clip);
+        textBlockStyle.setTextOverflow(CSS::Keyword::Clip { });
         textBlockStyle.setMaskLayers(Style::MaskLayer { autoFillStrongPasswordMaskImage() });
         // A stacking context is needed for the mask.
         if (textBlockStyle.usedZIndex().isAuto())
@@ -2377,12 +2379,14 @@ Style::ComputedStyle HTMLInputElement::createInnerTextStyle(const Style::Compute
 
     auto shouldUseInitialLineHeight = [&] {
         // Do not allow line-height to be smaller than our default.
-        if (textBlockStyle.metricsOfPrimaryFont().intLineSpacing() > style.computedLineHeight())
+        if (textBlockStyle.metricsOfPrimaryFont().intLineSpacing() > style.usedLineHeight())
             return true;
         return isText() && !style.logicalHeight().isAuto() && !hasAutofillStrongPasswordButton();
     };
-    if (shouldUseInitialLineHeight())
+    if (shouldUseInitialLineHeight()) {
         textBlockStyle.setLineHeight(Style::ComputedStyle::initialLineHeight());
+        textBlockStyle.setTextAutosizingAdjustedLineHeight(Style::ComputedStyle::initialLineHeight());
+    }
 
     return textBlockStyle;
 }

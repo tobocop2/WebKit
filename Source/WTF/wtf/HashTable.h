@@ -470,6 +470,22 @@ DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(HashTable);
         size_t byteSize() const { return metadataSize + tableSize() * sizeof(ValueType); }
         bool isEmpty() const { return !keyCount(); }
 
+        // Grow now, once, if holding `keyCount` keys in total would otherwise rehash along the way.
+        void reserveCapacity(unsigned keyCount)
+        {
+            if (!m_table) {
+                reserveInitialCapacity(keyCount);
+                return;
+            }
+            if (keyCount <= this->keyCount() || !HashTableSizePolicy::shouldExpand(keyCount + deletedCount(), tableSize()))
+                return;
+            unsigned newTableSize = computeBestTableSize(keyCount);
+            if (newTableSize <= tableSize())
+                return;
+            invalidateIterators(this);
+            rehash(newTableSize, nullptr);
+        }
+
         void reserveInitialCapacity(unsigned keyCount)
         {
             ASSERT(!m_table);
@@ -531,7 +547,7 @@ DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(HashTable);
             if constexpr (shouldValidateKey == ShouldValidateKey::No)
                 ASSERT(isValidKey(value));
             else
-                RELEASE_ASSERT(isValidKey(value));
+                RELEASE_ASSERT_WITH_UNQUALIFIED_FUNCTION_NAME(isValidKey(value));
         }
 
         template<ShouldValidateKey shouldValidateKey = ShouldValidateKey::Yes> ValueType* lookup(const Key& key) { return lookup<IdentityTranslatorType, shouldValidateKey>(key); }
@@ -539,6 +555,12 @@ DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(HashTable);
         template<typename HashTranslator, ShouldValidateKey, typename T> ValueType* inlineLookup(const T&);
 
         ALWAYS_INLINE bool isNullStorage() const { return !m_table; }
+        // Starts the cache miss a lookup/add of a key with this hash will take on its first probe.
+        ALWAYS_INLINE void prefetchForHash(unsigned hash) const
+        {
+            if (ValueType* table = m_table)
+                __builtin_prefetch(table + (hash & tableSizeMask()));
+        }
 
 #if ASSERT_ENABLED
         void checkTableConsistency() const;
@@ -571,7 +593,6 @@ DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(HashTable);
         void remove(ValueType*);
 
         void deleteWeakNullEntries();
-        void deleteReleasedWeakBuckets();
 
         static constexpr unsigned computeBestTableSize(unsigned keyCount);
         bool shouldExpand() const { return HashTableSizePolicy::shouldExpand(keyCount() + deletedCount(), tableSize()); }
@@ -840,7 +861,7 @@ DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(HashTable);
     }
 
     template<typename Traits, typename Value>
-    static void initializeHashTableBucket(Value& bucket)
+    static inline void initializeHashTableBucket(Value& bucket)
     {
         if constexpr (Traits::emptyValueIsZero) {
             // This initializes the bucket without copying the empty value.
@@ -1299,24 +1320,6 @@ DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(HashTable);
     void HashTable<Key, Value, Extractor, HashFunctions, Traits, KeyTraits, Malloc>::shrinkToBestSize()
     {
         rehash(computeBestTableSize(keyCount()), nullptr);
-    }
-
-    template<typename Key, typename Value, typename Extractor, typename HashFunctions, typename Traits, typename KeyTraits, typename Malloc>
-    void HashTable<Key, Value, Extractor, HashFunctions, Traits, KeyTraits, Malloc>::deleteReleasedWeakBuckets()
-    {
-        unsigned removedBucketCount = 0;
-        unsigned tableSize = this->tableSize();
-        for (unsigned i = 0; i < tableSize; ++i) {
-            auto& entry = m_table[i];
-            if (isReleasedWeakBucket(entry)) {
-                deleteBucket(entry);
-                ++removedBucketCount;
-            }
-        }
-        if (removedBucketCount) {
-            setDeletedCount(deletedCount() + removedBucketCount);
-            setKeyCount(keyCount() - removedBucketCount);
-        }
     }
 
     template<typename Key, typename Value, typename Extractor, typename HashFunctions, typename Traits, typename KeyTraits, typename Malloc>

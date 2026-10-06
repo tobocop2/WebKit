@@ -29,6 +29,7 @@
 #include <wtf/Assertions.h>
 #include <wtf/CurrentThread.h>
 #include <wtf/HashMap.h>
+#include <wtf/MainThread.h>
 #include <wtf/text/ASCIILiteral.h>
 
 namespace WebCore {
@@ -107,7 +108,6 @@ public:
     virtual bool isNavigatorPermissions() const { return false; }
     virtual bool isNavigatorScreenWakeLock() const { return false; }
     virtual bool isNavigatorUserActivation() const { return false; }
-    virtual bool isNavigatorWebDriver() const { return false; }
     virtual bool isNotificationController() const { return false; }
     virtual bool isServiceWorkerRegistrationBackgroundFetchAPI() const { return false; }
     virtual bool isServiceWorkerRegistrationPushAPI() const { return false; }
@@ -145,14 +145,14 @@ class Supplementable {
 public:
     void provideSupplement(ASCIILiteral key, std::unique_ptr<Supplement<T>> supplement)
     {
-        ASSERT(m_creationThreadID == currentThreadID());
+        ASSERT(canCurrentThreadIDAccessThreadLocalData(m_creationThreadID));
         ASSERT(!m_supplements.get(key));
         m_supplements.add(key, WTF::move(supplement));
     }
 
     Supplement<T>* requireSupplement(ASCIILiteral key)
     {
-        ASSERT(m_creationThreadID == currentThreadID());
+        ASSERT(canCurrentThreadIDAccessThreadLocalData(m_creationThreadID));
         return m_supplements.get(key);
     }
 

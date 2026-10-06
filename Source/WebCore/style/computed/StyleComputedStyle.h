@@ -103,9 +103,6 @@ public:
 
     static inline PageSize initialPageSize();
     static constexpr ZIndex initialUsedZIndex();
-#if ENABLE(TEXT_AUTOSIZING)
-    static inline LineHeight initialSpecifiedLineHeight();
-#endif
 
     // MARK: - Logical Values
 
@@ -140,7 +137,6 @@ public:
 
     // MARK: - Derived Values
 
-    WEBCORE_EXPORT float computedLineHeight() const;
     LayoutBoxExtent imageOutsets(const Style::BorderImage&, float deviceScaleFactor) const;
     LayoutBoxExtent imageOutsets(const Style::MaskBorder&, float deviceScaleFactor) const;
     LayoutBoxExtent borderImageOutsets(float deviceScaleFactor) const;
@@ -149,6 +145,7 @@ public:
 
     // MARK: - Used Values
 
+    WEBCORE_EXPORT float usedLineHeight() const;
     const WTF::String& hyphenString() const LIFETIME_BOUND;
     float usedStrokeWidth(const IntSize& viewportSize) const;
     WebCore::Color usedStrokeColor() const;
@@ -159,7 +156,6 @@ public:
     WEBCORE_EXPORT UserSelect NODELETE usedUserSelect() const;
     Style::Contain usedContain() const;
     inline TransformStyle3D usedTransformStyle3D() const;
-    inline float usedPerspective() const;
     WebCore::Color usedScrollbarThumbColor() const;
     WebCore::Color usedScrollbarTrackColor() const;
     WebCore::Color usedAccentColor(OptionSet<StyleColorOptions>) const;
@@ -168,7 +164,7 @@ public:
 
     Style::LineWidth NODELETE usedColumnRuleWidth() const;
 
-    Style::Length<CSS::AllUnzoomed> usedOutlineOffset() const;
+    WEBCORE_EXPORT Style::UsedOutlineOffset usedOutlineOffset() const;
     Style::LineWidth usedOutlineWidth() const;
     float usedOutlineSize(Style::ZoomFactor, float deviceScaleFactor) const; // used value combining `outline-width` and `outline-offset`
 
@@ -214,11 +210,13 @@ public:
     // MARK: - Other predicates
 
     inline bool isColumnFlexDirection() const;
+    inline bool isRowFlexDirection() const;
+    inline bool isReverseFlexDirection() const;
+    inline FlowMode flexFlowMode() const; // This is not trivial so cache it.
+
     inline bool isFixedTableLayout() const;
     inline bool isInterCharacterRubyPosition() const;
     inline bool isOverflowVisible() const;
-    inline bool isReverseFlexDirection() const;
-    inline bool isRowFlexDirection() const;
     inline bool isSkippedRootOrSkippedContent() const;
 
     bool isListItemType() const;
@@ -248,17 +246,6 @@ public:
 private:
     ComputedStyle(ComputedStyle&, ComputedStyle&&);
 };
-
-WEBCORE_EXPORT TextAlign NODELETE textAlign(const ComputedStyle&);
-WEBCORE_EXPORT FontWeight NODELETE fontWeight(const ComputedStyle&);
-WEBCORE_EXPORT FontStyle NODELETE fontStyle(const ComputedStyle&);
-WEBCORE_EXPORT TextDecorationLine NODELETE textDecorationLineInEffect(const ComputedStyle&);
-WEBCORE_EXPORT const FontCascade& NODELETE fontCascade(const ComputedStyle&);
-
-SpeakAs NODELETE speakAs(const ComputedStyle&);
-const VerticalAlign& NODELETE verticalAlign(const ComputedStyle&);
-const TextShadows& NODELETE textShadow(const ComputedStyle&);
-bool NODELETE effectiveInert(const ComputedStyle&);
 
 } // namespace Style
 } // namespace WebCore

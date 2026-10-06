@@ -621,14 +621,7 @@ void Value::dump(PrintStream& out) const
     }, [&](const String& string) {
         StringBuilder builder;
         builder.appendQuotedJSONString(string);
-        // PrintStream truncates >5 MB CStrings for log readability, which would corrupt JSON. Bypass via const char*.
-        // FIXME: needs a systematic fix in PrintStream — log-output truncation
-        // should not apply to file persistence. Every site that prints large
-        // Strings to disk (this JSON dumper, SamplingProfiler reports, future
-        // text dumps, ...) is silently exposed to the same corruption; this
-        // patch only covers the JSON path.
-        auto utf8 = builder.toString().utf8();
-        out.print(utf8.data());
+        out.print(builder.toString());
     }, [&](ObjectTypeTag) {
         // Safety: This lambda runs synchronously so it is safe to capture `this` without refing.
         SUPPRESS_UNCOUNTED_LAMBDA_CAPTURE auto& object = *static_cast<const ObjectBase*>(this);
@@ -817,6 +810,42 @@ Ref<Value> ArrayBase::get(size_t index) const
 {
     RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(index < m_map.size());
     return m_map[index];
+}
+
+void ArrayBase::setBoolean(size_t index, bool value)
+{
+    setValue(index, Value::create(value));
+}
+
+void ArrayBase::setInteger(size_t index, int value)
+{
+    setValue(index, Value::create(value));
+}
+
+void ArrayBase::setDouble(size_t index, double value)
+{
+    setValue(index, Value::create(value));
+}
+
+void ArrayBase::setString(size_t index, const String& value)
+{
+    setValue(index, Value::create(value));
+}
+
+void ArrayBase::setValue(size_t index, Ref<Value>&& value)
+{
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(index < m_map.size());
+    m_map[index] = WTF::move(value);
+}
+
+void ArrayBase::setObject(size_t index, Ref<ObjectBase>&& value)
+{
+    setValue(index, WTF::move(value));
+}
+
+void ArrayBase::setArray(size_t index, Ref<ArrayBase>&& value)
+{
+    setValue(index, WTF::move(value));
 }
 
 Ref<Object> Object::create()

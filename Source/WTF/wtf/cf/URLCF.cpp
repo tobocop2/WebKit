@@ -37,10 +37,9 @@ namespace WTF {
 URL::URL(CFURLRef url)
 {
     // FIXME: Why is it OK to ignore the base URL in the CFURL here?
-    if (!url)
-        invalidate();
-    else
-        *this = URLParser(bytesAsString(url)).result();
+    invalidate();
+    if (url)
+        URLParser(*this, bytesAsString(url));
 }
 
 RetainPtr<CFURLRef> URL::createCFURL(const String& string)
@@ -49,7 +48,7 @@ RetainPtr<CFURLRef> URL::createCFURL(const String& string)
         auto characters = string.span8();
         return adoptCF(CFURLCreateAbsoluteURLWithBytes(nullptr, byteCast<UInt8>(characters.data()), characters.size(), kCFStringEncodingUTF8, nullptr, true));
     }
-    CString utf8 = string.utf8();
+    auto utf8 = string.utf8();
     auto utf8Span = utf8.span();
     return adoptCF(CFURLCreateAbsoluteURLWithBytes(nullptr, byteCast<UInt8>(utf8Span.data()), utf8Span.size(), kCFStringEncodingUTF8, nullptr, true));
 }

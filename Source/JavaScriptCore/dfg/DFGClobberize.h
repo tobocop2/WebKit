@@ -39,6 +39,14 @@
 
 namespace JSC { namespace DFG {
 
+// The independently cached pieces of a Date, used to keep their heap locations apart.
+enum class DateField : int64_t {
+    LocalBreakdown,
+    UTCBreakdown,
+    TimeValue,
+    Milliseconds,
+};
+
 template<typename ReadFunctor, typename WriteFunctor, typename DefFunctor>
 void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFunctor& write, const DefFunctor& def)
 {
@@ -190,6 +198,9 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
         case ArraySortCompact:
         case ArraySortCommit:
         case GetCellButterflySlot:
+        case BufferReadInt:
+        case BufferReadFloat:
+        case BufferWrite:
             return clobberTop();
         default:
             DFG_CRASH(graph, node, "Unhandled ArrayMode opcode.");
@@ -255,7 +266,6 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
     case IsBigInt:
     case NumberIsInteger:
     case IsObject:
-    case IsTypedArrayView:
     case CheckInBounds:
     case CheckInBoundsInt52:
     case DoubleRep:
@@ -362,7 +372,7 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
         return;
 
     case IsCellWithType:
-        def(PureValue(node, node->queriedType()));
+        def(PureValue(node, node->queriedType().rawValue()));
         return;
 
     case ValueBitNot:
@@ -626,7 +636,10 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
 
     case InvalidationPoint:
         write(SideState);
-        def(HeapLocation(InvalidationPointLoc, Watchpoint_fire), LazyNode(node));
+        // A trap-check InvalidationPoint must stay where it is (see Node::isVMTrapsBreakpointSite()); every other
+        // one is redundant with a dominating InvalidationPoint that no watchpoint fire separates it from.
+        if (!node->isVMTrapsBreakpointSite())
+            def(HeapLocation(InvalidationPointLoc, Watchpoint_fire), LazyNode(node));
         return;
 
     case Flush:
@@ -784,19 +797,6 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
         return;
     }
 
-    case TryGetById:
-        read(World);
-#define ABSTRACT_HEAP_NOT_RegExpObject_lastIndex(name) if (name != InvalidAbstractHeap && \
-    name != InvalidAbstractHeap && \
-    name != World && \
-    name != Stack && \
-    name != Heap && \
-    name != RegExpObject_lastIndex) \
-        write(name);
-    FOR_EACH_ABSTRACT_HEAP_KIND(ABSTRACT_HEAP_NOT_RegExpObject_lastIndex)
-#undef ABSTRACT_HEAP_NOT_RegExpObject_lastIndex
-        return;
-
     case GetById:
     case GetByIdFlush:
     case GetByIdMegamorphic:
@@ -847,6 +847,7 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
     case CallDirectEval:
     case CallWasm:
     case TailCallInlinedCallerWasm:
+    case CallFFI:
     case CallCustomAccessorGetter:
     case CallCustomAccessorSetter:
     case ToPrimitive:
@@ -863,11 +864,13 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
     case HasOwnProperty:
     case ValueNegate:
     case SetFunctionName:
+    case EnqueueAsyncGeneratorDriver:
     case GetDynamicVar:
     case PutDynamicVar:
     case ResolveScopeForHoistingFuncDeclInEval:
     case ResolveScope:
     case ToObject:
+    case OpenAsyncFromSyncIterator:
     case GetPropertyEnumerator:
     case InstanceOfCustom:
     case ToNumeric:
@@ -1945,6 +1948,17 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
         return;
     }
         
+    case GetLazyClosureVar: {
+        // The slow path instantiates a function declaration into the slot.
+        read(HeapObjectCount);
+        write(HeapObjectCount);
+        read(AbstractHeap(ScopeProperties, node->scopeOffset().offset()));
+        write(AbstractHeap(ScopeProperties, node->scopeOffset().offset()));
+        write(Watchpoint_fire);
+        def(HeapLocation(ClosureVariableLoc, AbstractHeap(ScopeProperties, node->scopeOffset().offset()), node->child1()), LazyNode(node));
+        return;
+    }
+
     case PutClosureVar: {
         auto location = node->child2().useKind() == DoubleRepUse ? ClosureVariableDoubleLoc : ClosureVariableLoc;
         write(AbstractHeap(ScopeProperties, node->scopeOffset().offset()));
@@ -2352,6 +2366,13 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
         write(RegExpObject_lastIndex);
         return;
 
+    case RegExpExecSticky:
+        read(RegExpState);
+        read(RegExpObject_lastIndex);
+        write(RegExpState);
+        write(RegExpObject_lastIndex);
+        return;
+
     case RegExpExecNonGlobalOrSticky:
     case RegExpMatchFastGlobal:
         read(RegExpState);
@@ -2667,14 +2688,31 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
         def(PureValue(node));
         return;
 
+    case StringTrim:
+        def(PureValue(node, static_cast<uint64_t>(node->intrinsic())));
+        return;
+
     case NumberToStringWithValidRadixConstant:
         def(PureValue(node, node->validRadixConstant()));
         return;
 
-    case DateGetTime:
-    case DateGetInt32OrNaN: {
+    case DateGetStorage: {
         read(JSDateFields);
-        def(HeapLocation(DateFieldLoc, AbstractHeap(JSDateFields, static_cast<uint64_t>(node->intrinsic())), node->child1()), LazyNode(node));
+        def(HeapLocation(DateFieldLoc, AbstractHeap(JSDateFields, static_cast<int64_t>(node->isUTC() ? DateField::UTCBreakdown : DateField::LocalBreakdown)), node->child1()), LazyNode(node));
+        return;
+    }
+
+    // The individual fields are extracted from the storage node's payload, so they carry no
+    // dependency on the Date beyond it.
+    case DateGetInt32OrNaN: {
+        def(PureValue(node, static_cast<uint64_t>(node->intrinsic())));
+        return;
+    }
+
+    case DateGetTime:
+    case DateGetMilliseconds: {
+        read(JSDateFields);
+        def(HeapLocation(DateFieldLoc, AbstractHeap(JSDateFields, static_cast<int64_t>(node->op() == DateGetTime ? DateField::TimeValue : DateField::Milliseconds)), node->child1()), LazyNode(node));
         return;
     }
 
@@ -2702,6 +2740,37 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
         read(TypedArrayProperties);
         if (node->dataViewData().isResizable)
             write(MiscFields);
+        write(TypedArrayProperties);
+        return;
+    }
+
+    case BufferReadInt:
+    case BufferReadFloat: {
+        if (node->arrayMode().type() == Array::ForceExit) {
+            write(SideState);
+            return;
+        }
+        DataViewData data = node->bufferAccessData();
+        read(MiscFields);
+        read(TypedArrayProperties);
+        if (node->arrayMode().mayBeResizableOrGrowableSharedTypedArray()) {
+            write(MiscFields);
+            write(TypedArrayProperties);
+        } else
+            def(HeapLocation(indexedPropertyLocForResultType(node->result()), AbstractHeap(TypedArrayProperties, data.asQuadWord), graph.varArgChild(node, 0), graph.varArgChild(node, 1)), LazyNode(node));
+        return;
+    }
+
+    case BufferWrite: {
+        if (node->arrayMode().type() == Array::ForceExit) {
+            write(SideState);
+            return;
+        }
+        read(MiscFields);
+        if (node->arrayMode().mayBeResizableOrGrowableSharedTypedArray()) {
+            read(TypedArrayProperties);
+            write(MiscFields);
+        }
         write(TypedArrayProperties);
         return;
     }
@@ -2738,7 +2807,7 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
         return;
     }
     
-    DFG_CRASH(graph, node, toCString("Unrecognized node type: ", Graph::opName(node->op())).data());
+    DFG_CRASH(graph, node, toUTF8CString("Unrecognized node type: ", Graph::opName(node->op())).legacyCStringPointer());
 }
 
 class NoOpClobberize {

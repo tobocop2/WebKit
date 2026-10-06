@@ -29,13 +29,17 @@
 
 #include "AuxiliaryProcess.h"
 #include "GPUProcessPreferences.h"
+#include "RemoteSerializedImageBufferIdentifier.h"
+#include <WebCore/ImageBufferTransferIdentifier.h>
 #include "RemoteSnapshotIdentifier.h"
 #include "SandboxExtension.h"
+#include "SecurityFlags.h"
 #include "WebPageProxyIdentifier.h"
 #include <WebCore/FrameIdentifier.h>
 #include <WebCore/ImageBuffer.h>
 #include <WebCore/IntDegrees.h>
 #include <WebCore/MediaPlayerIdentifier.h>
+#include <WebCore/MediaSessionIdentifier.h>
 #include <WebCore/PageIdentifier.h>
 #include <WebCore/ProcessIdentity.h>
 #include <WebCore/ShareableBitmap.h>
@@ -45,6 +49,7 @@
 #include <wtf/Lock.h>
 #include <wtf/MemoryPressureHandler.h>
 #include <wtf/MonotonicTime.h>
+#include <wtf/NativePromise.h>
 #include <wtf/WeakPtr.h>
 
 #if PLATFORM(MAC)
@@ -114,6 +119,9 @@ public:
 
     GPUConnectionToWebProcess* webProcessConnection(WebCore::ProcessIdentifier) const;
 
+    // Never sent to the WebContent process.
+    const SecurityFlags& securityFlags() const LIFETIME_BOUND { return m_securityFlags; }
+
     const String& NODELETE mediaCacheDirectory(PAL::SessionID) const LIFETIME_BOUND;
 #if ENABLE(LEGACY_ENCRYPTED_MEDIA) || ENABLE(ENCRYPTED_MEDIA)
     const String& NODELETE mediaKeysStorageDirectory(PAL::SessionID) const LIFETIME_BOUND;
@@ -124,6 +132,17 @@ public:
 #endif
 
     WebCore::NowPlayingManager& nowPlayingManager() LIFETIME_BOUND;
+
+    void recomputeNowPlayingOwner();
+    void setNowPlayingFallbackSession(std::optional<WebCore::QualifiedMediaSessionIdentifier>);
+    void withdrawNowPlayingCandidate(WebCore::QualifiedPageIdentifier);
+    void nowPlayingClientDidClose(WebCore::ProcessIdentifier);
+    bool isActiveNowPlayingPage(WebCore::ProcessIdentifier process, WebCore::PageIdentifier page) const { return m_activeNowPlayingOwner && m_activeNowPlayingOwner->process == process && m_activeNowPlayingOwner->page == page; }
+    bool isActiveNowPlayingSession(WebCore::ProcessIdentifier process, WebCore::MediaSessionIdentifier session) const { return m_activeNowPlayingOwner && m_activeNowPlayingOwner->process == process && m_activeNowPlayingOwner->session == session; }
+    // Unlike remoteCommandTargetSessionInProcess(), safe to ask from any process: it compares rather than assuming
+    // the caller owns the target.
+    bool isRemoteCommandTargetSession(WebCore::ProcessIdentifier process, WebCore::MediaSessionIdentifier session) const { return m_remoteCommandTarget && *m_remoteCommandTarget == WebCore::QualifiedMediaSessionIdentifier { session, process }; }
+    std::optional<WebCore::MediaSessionIdentifier> remoteCommandTargetSessionInProcess(WebCore::ProcessIdentifier) const;
 
 #if ENABLE(MEDIA_STREAM) && PLATFORM(COCOA)
     WorkQueue& videoMediaStreamTrackRendererQueue();
@@ -163,6 +182,14 @@ public:
     Ref<RemoteSnapshot> getOrCreateSnapshot(RemoteSnapshotIdentifier);
     RefPtr<RemoteSnapshot> snapshot(RemoteSnapshotIdentifier);
 
+    // Hands an ImageBuffer from one web process's rendering backend to another's. Unlike
+    // m_snapshots, a buffer is claimable only by its current owner, so an identifier alone is not
+    // enough to obtain one. A depositing process cannot name its successor: it owns the buffer until
+    // the process brokering delivery hands ownership on.
+    bool depositTransferredImageBuffer(WebCore::ImageBufferTransferIdentifier, WebCore::ProcessIdentifier owner, Ref<WebCore::ImageBuffer>&&);
+    RefPtr<WebCore::ImageBuffer> takeTransferredImageBuffer(WebCore::ImageBufferTransferIdentifier, WebCore::ProcessIdentifier claimingProcess);
+    void removeTransferredImageBuffersForProcess(WebCore::ProcessIdentifier);
+
 #if PLATFORM(VISION) && ENABLE(MODEL_PROCESS)
 #if HAVE(CORE_RE)
     void requestSharedSimulationConnection(CoreIPCAuditToken&&, CompletionHandler<void(std::optional<IPC::SharedFileHandle>)>&&);
@@ -178,7 +205,9 @@ public:
     void registerFonts(Vector<SandboxExtension::Handle>&&);
 #endif
 
-    void terminateWebProcess(WebCore::ProcessIdentifier);
+    void terminateWebProcess(WebCore::ProcessIdentifier, IPC::MessageName);
+
+    void authorizeImageBufferTransfers(Vector<WebCore::ImageBufferTransferIdentifier>&&, WebCore::ProcessIdentifier destinationProcess, CompletionHandler<void()>&&);
 
 private:
     GPUProcess();
@@ -189,6 +218,7 @@ private:
     void initializeProcess(const AuxiliaryProcessInitializationParameters&) override;
     void initializeProcessName(const AuxiliaryProcessInitializationParameters&) override;
     void initializeSandbox(const AuxiliaryProcessInitializationParameters&, SandboxInitializationParameters&) override;
+    Thread::QOS connectionReceiveQueueQOS() const override { return Thread::QOS::UserInteractive; }
     bool shouldTerminate() override;
 
     void tryExitIfUnused();
@@ -203,6 +233,7 @@ private:
     void updateGPUProcessPreferences(GPUProcessPreferences&&);
     void createGPUConnectionToWebProcess(WebCore::ProcessIdentifier, PAL::SessionID, IPC::Connection::Handle&&, GPUProcessConnectionParameters&&, CompletionHandler<void()>&&);
     void sharedPreferencesForWebProcessDidChange(WebCore::ProcessIdentifier, SharedPreferencesForWebProcess&&, CompletionHandler<void()>&&);
+    void securityFlagsDidChange(SecurityFlags&&);
     void addSession(PAL::SessionID, GPUProcessSessionParameters&&);
     void removeSession(PAL::SessionID);
     void updateSandboxAccess(const Vector<SandboxExtension::Handle>&);
@@ -215,7 +246,7 @@ private:
     void enableMicrophoneMuteStatusAPI();
     void setOrientationForMediaCapture(WebCore::IntDegrees);
     void rotationAngleForCaptureDeviceChanged(const String&, WebCore::VideoFrameRotation);
-    void updateCaptureAccess(bool allowAudioCapture, bool allowVideoCapture, bool allowDisplayCapture, WebCore::ProcessIdentifier, CompletionHandler<void()>&&);
+    void updateCaptureAccess(bool allowAudioCapture, bool allowVideoCapture, bool allowDisplayCapture, bool willUseEchoCancellation, WebCore::ProcessIdentifier, CompletionHandler<void()>&&);
     void updateCaptureOrigin(const WebCore::SecurityOriginData&, WebCore::ProcessIdentifier);
     void addMockMediaDevice(const WebCore::MockMediaDevice&);
     void clearMockMediaDevices();
@@ -270,6 +301,7 @@ private:
         bool allowAudioCapture { false };
         bool allowVideoCapture { false };
         bool allowDisplayCapture { false };
+        bool willUseEchoCancellation { false };
     };
     HashMap<WebCore::ProcessIdentifier, MediaCaptureAccess> m_mediaCaptureAccessMap;
 #if ENABLE(MEDIA_STREAM) && PLATFORM(COCOA)
@@ -291,6 +323,24 @@ private:
     Lock m_globalResourceLocker;
     HashMap<RemoteSnapshotIdentifier, Ref<RemoteSnapshot>> m_snapshots WTF_GUARDED_BY_LOCK(m_globalResourceLocker);
 
+    struct TransferredImageBuffer {
+        Markable<WebCore::ProcessIdentifier> owner;
+        RefPtr<WebCore::ImageBuffer> imageBuffer;
+    };
+    HashMap<WebCore::ImageBufferTransferIdentifier, TransferredImageBuffer> m_transferredImageBuffers WTF_GUARDED_BY_LOCK(m_globalResourceLocker);
+
+    // An authorization can arrive before the buffers it names have been deposited: a deposit travels
+    // on the depositing process's rendering backend work queue while the authorization arrives on the
+    // UI process's connection, so neither orders against the other. The reply is held back until
+    // every named buffer has landed, which is what lets the broker guarantee the recipient's claim
+    // cannot overtake the handover.
+    struct PendingImageBufferTransferAuthorization {
+        HashSet<WebCore::ImageBufferTransferIdentifier> awaitingDeposit;
+        CompletionHandler<void()> completionHandler;
+    };
+    Vector<PendingImageBufferTransferAuthorization> m_pendingImageBufferTransferAuthorizations WTF_GUARDED_BY_LOCK(m_globalResourceLocker);
+    Vector<CompletionHandler<void()>> takeSettledImageBufferTransferAuthorizations(NOESCAPE const Function<void(HashSet<WebCore::ImageBufferTransferIdentifier>&)>& prune) WTF_REQUIRES_LOCK(m_globalResourceLocker);
+
     struct GPUSession {
         String mediaCacheDirectory;
 #if ENABLE(LEGACY_ENCRYPTED_MEDIA) || ENABLE(ENCRYPTED_MEDIA)
@@ -300,6 +350,15 @@ private:
     HashMap<PAL::SessionID, GPUSession> m_sessions;
     WebCore::Timer m_idleExitTimer;
     std::unique_ptr<WebCore::NowPlayingManager> m_nowPlayingManager;
+    SecurityFlags m_securityFlags;
+    struct NowPlayingOwner {
+        WebCore::ProcessIdentifier process;
+        WebCore::PageIdentifier page;
+        WebCore::MediaSessionIdentifier session;
+    };
+    std::optional<NowPlayingOwner> m_activeNowPlayingOwner;
+    std::optional<WebCore::QualifiedMediaSessionIdentifier> m_nowPlayingFallbackSession;
+    std::optional<WebCore::QualifiedMediaSessionIdentifier> m_remoteCommandTarget;
     String m_applicationVisibleName;
 #if PLATFORM(MAC)
     String m_uiProcessName;
@@ -314,7 +373,6 @@ private:
     bool m_haveEnabledVP9Decoder { false };
     bool m_haveEnabledSWVP9Decoder { false };
 #endif
-
 };
 
 } // namespace WebKit

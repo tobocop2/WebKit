@@ -208,12 +208,14 @@ void MediaRecorderPrivateBackend::stopRecording(CompletionHandler<void()>&& comp
     gst_element_get_state(m_pipeline.get(), &state, nullptr, GST_CLOCK_TIME_NONE);
     if (state != GST_STATE_VOID_PENDING && state < GST_STATE_PLAYING) {
         GST_DEBUG_OBJECT(m_pipeline.get(), "Pipeline is not in playing state, not sending EOS event");
+        Locker lock(m_eosLock);
         m_eos = true;
         return;
     }
 
     if (!webkitMediaStreamSrcHasPrerolled(WEBKIT_MEDIA_STREAM_SRC(m_src.get()))) {
         GST_DEBUG_OBJECT(m_pipeline.get(), "Source element hasn't prerolled yet, no need to send EOS event");
+        Locker lock(m_eosLock);
         m_eos = true;
         return;
     }
@@ -225,12 +227,14 @@ void MediaRecorderPrivateBackend::stopRecording(CompletionHandler<void()>&& comp
     GST_DEBUG_OBJECT(m_pipeline.get(), "Emitting EOS event(s)");
     if (!gst_element_send_event(m_pipeline.get(), gst_event_new_eos())) {
         GST_WARNING_OBJECT(m_pipeline.get(), "EOS event wasn't handled");
+        Locker lock(m_eosLock);
         m_eos = true;
         return;
     }
 
     if (gst_app_sink_is_eos(GST_APP_SINK(m_sink.get()))) {
         GST_DEBUG_OBJECT(m_pipeline.get(), "Sink received EOS already");
+        Locker lock(m_eosLock);
         m_eos = true;
         return;
     }
@@ -241,8 +245,10 @@ void MediaRecorderPrivateBackend::stopRecording(CompletionHandler<void()>&& comp
     while (!isEOS) {
         Locker lock(m_eosLock);
         m_eosCondition.waitFor(m_eosLock, 200_ms, [weakThis = ThreadSafeWeakPtr { *this }]() -> bool {
-            if (auto protectedThis = weakThis.get())
+            if (auto protectedThis = weakThis.get()) {
+                assertIsHeld(protectedThis->m_eosLock);
                 return protectedThis->m_eos;
+            }
             return true;
         });
         isEOS = m_eos;
@@ -392,12 +398,12 @@ GRefPtr<GstEncodingContainerProfile> MediaRecorderPrivateBackend::containerProfi
         else if (containerType.endsWith("mp4"_s))
             audioCapsName = "audio/mpeg, mpegversion=4"_s;
         else {
-            GST_WARNING("Audio codec for %s not supported", contentType.raw().utf8().data());
+            GST_WARNING("Audio codec for %s not supported", contentType.raw().utf8().legacyCStringPointer());
             return nullptr;
         }
 
         RELEASE_ASSERT(!audioCapsName.isEmpty());
-        GRefPtr audioCaps = adoptGRef(gst_caps_from_string(audioCapsName.utf8().data()));
+        GRefPtr audioCaps = adoptGRef(gst_caps_from_string(audioCapsName.utf8().legacyCStringPointer()));
         GST_DEBUG("Creating audio encoding profile for caps %" GST_PTR_FORMAT, audioCaps.get());
         m_audioEncodingProfile = adoptGRef(GST_ENCODING_PROFILE(gst_encoding_audio_profile_new(audioCaps.get(), nullptr, nullptr, 1)));
 
@@ -552,7 +558,7 @@ bool MediaRecorderPrivateBackend::preparePipeline()
             return;
         }
 
-        String elementClass = unsafeSpan(gst_element_get_metadata(element, GST_ELEMENT_METADATA_KLASS));
+        String elementClass = String::fromLatin1(unsafeSpan(gst_element_get_metadata(element, GST_ELEMENT_METADATA_KLASS)));
         auto classifiers = elementClass.split('/');
         if (classifiers.contains("Audio"_s) && classifiers.contains("Codec"_s) && classifiers.contains("Encoder"_s))
             recorder->configureAudioEncoder(element);

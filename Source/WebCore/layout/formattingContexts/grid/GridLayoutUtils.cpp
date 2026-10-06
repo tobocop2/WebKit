@@ -28,6 +28,7 @@
 
 #include "GridFormattingContext.h"
 #include "GridSizeTypes.h"
+#include "LayoutElementBox.h"
 #include "LayoutIntegrationUtils.h"
 #include "NotImplemented.h"
 #include "PlacedGridItem.h"
@@ -35,6 +36,7 @@
 #include "StylePrimitiveNumericTypes+Evaluation.h"
 #include "TrackSizingAlgorithm.h"
 #include "TrackSizingFunctions.h"
+#include "WritingMode.h"
 #include <wtf/Range.h>
 
 namespace WebCore {
@@ -44,7 +46,139 @@ namespace GridLayoutUtils {
 LayoutUnit totalGuttersSize(size_t tracksCount, LayoutUnit gapsSize)
 {
     ASSERT(tracksCount);
-    return gapsSize * (tracksCount - 1);
+    return tracksCount ? gapsSize * (tracksCount - 1) : LayoutUnit { };
+}
+
+// Resolves a grid item's used margins in one axis.
+// FIXME: Resolve percentage and calc() margins against the grid area's inline size.
+UsedMargins usedMarginsForAxis(const PlacedGridItem& gridItem, const ComputedSizes& axisSizes)
+{
+    auto marginStart = [&] -> LayoutUnit {
+        if (auto fixedMarginStart = axisSizes.marginStart.tryFixed())
+            return LayoutUnit { fixedMarginStart->resolveZoom(gridItem.usedZoom()) };
+
+        if (axisSizes.marginStart.isKnownZero())
+            return { };
+
+        ASSERT_NOT_IMPLEMENTED_YET();
+        return { };
+    };
+
+    auto marginEnd = [&] -> LayoutUnit {
+        if (auto fixedMarginEnd = axisSizes.marginEnd.tryFixed())
+            return LayoutUnit { fixedMarginEnd->resolveZoom(gridItem.usedZoom()) };
+
+        if (axisSizes.marginEnd.isKnownZero())
+            return { };
+
+        ASSERT_NOT_IMPLEMENTED_YET();
+        return { };
+    };
+
+    return UsedMargins { marginStart(), marginEnd() };
+}
+
+// https://drafts.csswg.org/css-sizing-4/#aspect-ratio
+std::optional<double> preferredAspectRatio(const ElementBox& gridItem)
+{
+    ASSERT(gridItem.isGridItem());
+
+    auto& computedAspectRatio = gridItem.style().aspectRatio();
+
+    auto isDegenerateRatio = [&] {
+        auto ratio = computedAspectRatio.tryRatio();
+        return !ratio || !ratio->numerator.value || !ratio->denominator.value;
+    };
+
+    // "If the <ratio> is degenerate, the property instead behaves as auto."
+    //
+    // auto: "Replaced elements with a natural aspect ratio use that aspect ratio;
+    // otherwise the box has no preferred aspect ratio."
+    if (computedAspectRatio.isAuto() || isDegenerateRatio()) {
+        if (gridItem.isReplacedBox() && gridItem.hasIntrinsicRatio())
+            return gridItem.intrinsicRatio();
+        return { };
+    }
+
+    // <ratio>: "The box's preferred aspect ratio is the specified ratio of width / height."
+    if (computedAspectRatio.isRatio()) {
+        auto ratio = *computedAspectRatio.tryRatio();
+        return ratio.numerator.value / ratio.denominator.value;
+    }
+
+    // auto && <ratio>: "The preferred aspect ratio is the specified ratio of width / height
+    // unless it is a replaced element with a natural aspect ratio, in which case that aspect
+    // ratio is used instead."
+    if (computedAspectRatio.isAutoAndRatio()) {
+        if (gridItem.isReplacedBox() && gridItem.hasIntrinsicRatio())
+            return gridItem.intrinsicRatio();
+        auto ratio = *computedAspectRatio.tryRatio();
+        return ratio.numerator.value / ratio.denominator.value;
+    }
+
+    ASSERT_NOT_REACHED();
+    return { };
+}
+
+// https://drafts.csswg.org/css-grid-1/#grid-item-sizing
+// A grid item with an automatic preferred size fills its grid area (i.e. is sized as for
+// align-self: stretch) in two cases:
+//
+// normal:
+// If the grid item has no preferred aspect ratio, and no natural size in the relevant axis
+// (if it is a replaced element), the grid item is sized as for align-self: stretch.
+//
+// stretch:
+// Always uses the stretch-fit size. Unlike the normal case this applies even to replaced
+// items or items with a preferred aspect ratio (which can distort the ratio).
+//
+// In both cases the stretch keyword only takes effect when the box's size in the axis is auto
+// and neither of its margins in the axis are auto.
+// https://drafts.csswg.org/css-align-3/#valdef-justify-self-stretch
+static bool isStretchedForAutomaticSize(const PlacedGridItem& placedGridItem, const ComputedSizes& axisSizes, const StyleSelfAlignmentData& axisAlignment)
+{
+    ASSERT(axisSizes.preferredSize.isAuto());
+
+    if (axisSizes.marginStart.isAuto() || axisSizes.marginEnd.isAuto())
+        return false;
+
+    auto alignmentPosition = axisAlignment.position();
+    if (alignmentPosition == ItemPosition::Normal)
+        return !preferredAspectRatio(placedGridItem.layoutBox()) && !placedGridItem.isReplacedElement();
+
+    return alignmentPosition == ItemPosition::Stretch;
+}
+
+bool inlineContributionMayRequireFullSizingAlgorithmForIntrinsicWidth(const ElementBox& gridItem, WritingMode containerWritingMode)
+{
+    CheckedRef itemStyle = gridItem.style();
+
+    // The inline contribution of an orthogonal grid item is the grid item's block contribution. We should run the full sizing algorithm.
+    if (itemStyle->writingMode().isOrthogonal(containerWritingMode))
+        return true;
+
+    // Grid items with an aspect ratio may transfers block size into inline size, so we should run the full sizing algorithm.
+    // FIXME: This is only the case when inline size is indefinite, so we can tighten this constraint.
+    if (preferredAspectRatio(gridItem))
+        return true;
+
+    // A wrapped column flex container (flex-flow: column wrap) lays out its flex lines along the cross (inline) axis,
+    // so the number of lines - and thus its inline contribution - grows as the available block size shrinks.
+    if (itemStyle->display().isFlexibleBox() && itemStyle->isColumnFlexDirection() && itemStyle->flexWrap().isMultiline())
+        return true;
+
+    // A multi-column container fills its columns based on the available block size, so its column count - and thus
+    // its inline contribution - depends on the block size.
+    if (itemStyle->specifiesColumns())
+        return true;
+
+    // If the computed size of an item depends on the size of its containing block, we should run the full sizing algorithm.
+    if (sizeDependsOnContainingBlockSize(itemStyle->logicalHeight())
+        || sizeDependsOnContainingBlockSize(itemStyle->logicalMinHeight())
+        || sizeDependsOnContainingBlockSize(itemStyle->logicalMaxHeight()))
+        return true;
+
+    return false;
 }
 
 static bool NODELETE spansAutoMinTrackSizingFunction(WTF::Range<size_t> spannedTrackIndexes, const TrackSizingFunctionsList& trackSizingFunctions)
@@ -67,14 +201,39 @@ static bool NODELETE spansFlexMaxTrackSizingFunction(WTF::Range<size_t> spannedT
 
 // https://www.w3.org/TR/css-grid-2/#specified-size-suggestion
 // If the item's preferred size in the relevant axis is definite, then the specified size suggestion is that size. It is otherwise undefined.
-static std::optional<BorderBoxSize> inlineSpecifiedSizeSuggestion(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding, LayoutUnit containingBlockSize)
+static std::optional<BorderBoxSize> inlineSpecifiedSizeSuggestion(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding, std::optional<LayoutUnit> containingBlockSize)
 {
     auto& preferredSize = gridItem.inlineAxisSizes().preferredSize;
-    if (preferredSize.isFixed() || preferredSize.isPercent() || preferredSize.isCalculated())
-        return BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(preferredSize, containingBlockSize, gridItem.usedZoom()) }, borderAndPadding };
+    if (auto fixedSize = preferredSize.tryFixed())
+        return BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(*fixedSize, gridItem.usedZoom()) }, borderAndPadding };
+    // A percentage or calc() preferred size depends on the containing block size. When it is not
+    // known (e.g. during track sizing, before the available space is resolved) the size is not
+    // definite and there is no specified size suggestion.
+    if (preferredSize.isPercent() || preferredSize.isCalculated()) {
+        if (!containingBlockSize)
+            return { };
+        return BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(preferredSize, *containingBlockSize, gridItem.usedZoom()) }, borderAndPadding };
+    }
     if (preferredSize.isAuto())
         return { };
-    ASSERT_NOT_IMPLEMENTED_YET();
+
+    // https://drafts.csswg.org/css-sizing-3/#definite
+    // The intrinsic sizing keywords (min-content, max-content, fit-content, and the non-standard
+    // intrinsic/min-intrinsic) size the box from its contents, so the preferred size is not
+    // definite and there is no specified size suggestion.
+    if (preferredSize.isIntrinsic() || preferredSize.isIntrinsicKeyword() || preferredSize.isMinIntrinsic())
+        return { };
+
+    // stretch/-webkit-fill-available resolve to the stretch-fit size, which is only definite when
+    // the grid area size is known.
+    if (preferredSize.isStretch()) {
+        if (!containingBlockSize)
+            return { };
+        ASSERT_NOT_IMPLEMENTED_YET();
+        return { };
+    }
+
+    ASSERT_NOT_REACHED();
     return { };
 }
 
@@ -84,22 +243,47 @@ static std::optional<LayoutUnit> NODELETE inlineTransferredSizeSuggestion(const 
     return { };
 }
 
-static BorderBoxSize inlineContentSizeSuggestion(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding, const IntegrationUtils& integrationUtils)
+static BorderBoxSize inlineContentSizeSuggestion(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding, LayoutUnit gridAreaInlineSize, const IntegrationUtils& integrationUtils)
 {
-    ASSERT(!gridItem.preferredAspectRatio(), "Grid items with preferred aspect ratio not supported yet.");
-    return BorderBoxSize { ContentBoxSize { integrationUtils.minContentWidth(gridItem.layoutBox()) }, borderAndPadding };
+    ASSERT(!preferredAspectRatio(gridItem.layoutBox()), "Grid items with preferred aspect ratio not supported yet.");
+    return BorderBoxSize { ContentBoxSize { integrationUtils.minContentWidthForGridItem(gridItem.layoutBox(), gridAreaInlineSize) }, borderAndPadding };
 }
 
 // https://www.w3.org/TR/css-grid-2/#specified-size-suggestion
 // If the item's preferred size in the relevant axis is definite, then the specified size suggestion is that size. It is otherwise undefined.
-static std::optional<BorderBoxSize> blockSpecifiedSizeSuggestion(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding, LayoutUnit containingBlockSize)
+static std::optional<BorderBoxSize> blockSpecifiedSizeSuggestion(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding, std::optional<LayoutUnit> containingBlockSize)
 {
     auto& preferredSize = gridItem.blockAxisSizes().preferredSize;
-    if (preferredSize.isFixed() || preferredSize.isPercent() || preferredSize.isCalculated())
-        return BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(preferredSize, containingBlockSize, gridItem.usedZoom()) }, borderAndPadding };
+    if (auto fixedSize = preferredSize.tryFixed())
+        return BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(*fixedSize, gridItem.usedZoom()) }, borderAndPadding };
+    // A percentage or calc() preferred size depends on the containing block size. When it is not
+    // known (e.g. during track sizing, before the available space is resolved) the size is not
+    // definite and there is no specified size suggestion.
+    if (preferredSize.isPercent() || preferredSize.isCalculated()) {
+        if (!containingBlockSize)
+            return { };
+        return BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(preferredSize, *containingBlockSize, gridItem.usedZoom()) }, borderAndPadding };
+    }
     if (preferredSize.isAuto())
         return { };
-    ASSERT_NOT_IMPLEMENTED_YET();
+
+    // https://drafts.csswg.org/css-sizing-3/#definite
+    // The intrinsic sizing keywords (min-content, max-content, fit-content, and the non-standard
+    // intrinsic/min-intrinsic) size the box from its contents, so the preferred size is not
+    // definite and there is no specified size suggestion.
+    if (preferredSize.isIntrinsic() || preferredSize.isIntrinsicKeyword() || preferredSize.isMinIntrinsic())
+        return { };
+
+    // stretch/-webkit-fill-available resolve to the stretch-fit size, which is only definite when
+    // the grid area size is known.
+    if (preferredSize.isStretch()) {
+        if (!containingBlockSize)
+            return { };
+        ASSERT_NOT_IMPLEMENTED_YET();
+        return { };
+    }
+
+    ASSERT_NOT_REACHED();
     return { };
 }
 
@@ -117,8 +301,8 @@ static std::optional<BorderBoxSize> NODELETE blockTransferredSizeSuggestion(cons
 static BorderBoxSize blockContentSizeSuggestion(const PlacedGridItem& gridItem, LayoutUnit inlineAxisConstraint, const GridFormattingContext& formattingContext)
 {
     // FIXME: Clamp by opposite-axis min/max sizes converted through the aspect ratio.
-    ASSERT(!gridItem.preferredAspectRatio(), "Grid items with preferred aspect ratio not supported yet.");
-    return BorderBoxSize::fromIntegrationFunction(formattingContext.integrationUtils().minContentHeight(gridItem.layoutBox(), inlineAxisConstraint));
+    ASSERT(!preferredAspectRatio(gridItem.layoutBox()), "Grid items with preferred aspect ratio not supported yet.");
+    return BorderBoxSize::fromIntegrationFunction(formattingContext.integrationUtils().minContentHeightForGridItem(gridItem.layoutBox(), inlineAxisConstraint));
 }
 
 // https://drafts.csswg.org/css-overflow-3/#overflow-properties
@@ -137,8 +321,24 @@ static bool NODELETE hasScrollableBlockComputedOverflowValue(const PlacedGridIte
     return computedOverflow == Overflow::Hidden || computedOverflow == Overflow::Scroll || computedOverflow == Overflow::Auto;
 }
 
-LayoutUnit usedInlineSizeForGridItem(const PlacedGridItem& placedGridItem, LayoutUnit borderAndPadding,
-    const TrackSizingFunctionsList& trackSizingFunctions, LayoutUnit columnsSize, const IntegrationUtils& integrationUtils)
+// https://www.w3.org/TR/css-sizing-3/#stretch-fit-size
+// The size a box would take if its outer size filled the available space in the given axis:
+// the available space (the grid area size) less the box's margins, border, and padding.
+static BorderBoxSize stretchFitSize(LayoutUnit borderAndPadding, LayoutUnit availableSize, const UsedMargins& usedMargins)
+{
+    // A content box cannot be negative, so an item whose margins, border, and padding already fill
+    // the available space stretches to a zero content box and overflows its grid area.
+    return BorderBoxSize { ContentBoxSize { std::max(0_lu, availableSize - usedMargins.marginStart - usedMargins.marginEnd - borderAndPadding) }, borderAndPadding };
+}
+
+// https://www.w3.org/TR/css-sizing-3/#fit-content-size
+// fit-content size = clamp(min-content, stretch-fit, max-content).
+static LayoutUnit fitContentSize(BorderBoxSize minContentSize, BorderBoxSize maxContentSize, BorderBoxSize stretchFit)
+{
+    return std::max(minContentSize, std::min(maxContentSize, stretchFit)).value;
+}
+
+LayoutUnit inlinePreferredSize(const PlacedGridItem& placedGridItem, LayoutUnit borderAndPadding, LayoutUnit columnsSize, const IntegrationUtils& integrationUtils, const UsedMargins& usedMargins)
 {
     auto& inlineAxisSizes = placedGridItem.inlineAxisSizes();
     ASSERT(inlineAxisSizes.maximumSize.isFixed() || inlineAxisSizes.maximumSize.isNone());
@@ -147,8 +347,6 @@ LayoutUnit usedInlineSizeForGridItem(const PlacedGridItem& placedGridItem, Layou
     if (preferredSize.isAuto()) {
         // Grid item calculations for automatic sizes in a given dimensions vary by their
         // self-alignment values:
-        auto alignmentPosition = placedGridItem.inlineAxisAlignment().position();
-
         // normal:
         // If the grid item has no preferred aspect ratio, and no natural size in the relevant
         // axis (if it is a replaced element), the grid item is sized as for align-self: stretch.
@@ -157,29 +355,28 @@ LayoutUnit usedInlineSizeForGridItem(const PlacedGridItem& placedGridItem, Layou
         //
         // When the box’s computed width/height (as appropriate to the axis) is auto and neither of
         // its margins (in the appropriate axis) are auto, sets the box’s used size to the length
-        // necessary to make its outer size as close to filling the alignment container as possible
-        // while still respecting the constraints imposed by min-height/min-width/max-height/max-width.
-        auto& marginStart = inlineAxisSizes.marginStart;
-        auto& marginEnd = inlineAxisSizes.marginEnd;
-        if ((alignmentPosition == ItemPosition::Normal) && !placedGridItem.preferredAspectRatio() && !placedGridItem.isReplacedElement()
-            && !marginStart.isAuto() && !marginEnd.isAuto()) {
-            auto& usedZoom = placedGridItem.usedZoom();
+        // necessary to make its outer size as close to filling the alignment container as possible.
+        if (isStretchedForAutomaticSize(placedGridItem, inlineAxisSizes, placedGridItem.inlineAxisAlignment()))
+            return stretchFitSize(borderAndPadding, columnsSize, usedMargins).value;
 
-            auto minimumSize = GridLayoutUtils::usedInlineMinimumSize(placedGridItem, trackSizingFunctions, borderAndPadding, columnsSize, integrationUtils);
-            auto maximumSize = [&inlineAxisSizes, &usedZoom, borderAndPadding] {
-                auto& computedMaximumSize = inlineAxisSizes.maximumSize;
-                if (computedMaximumSize.isNone())
-                    return BorderBoxSize::maxSized();
-                return BorderBoxSize { ContentBoxSize { LayoutUnit { computedMaximumSize.tryFixed()->resolveZoom(usedZoom) } }, borderAndPadding };
-            };
-
-            auto usedMarginStart = LayoutUnit { marginStart.tryFixed()->resolveZoom(usedZoom) };
-            auto usedMarginEnd = LayoutUnit { marginEnd.tryFixed()->resolveZoom(usedZoom) };
-            auto stretchedContentBoxWidth = ContentBoxSize { columnsSize - usedMarginStart - usedMarginEnd - borderAndPadding };
-            auto stretchedBorderBoxWidth = BorderBoxSize { stretchedContentBoxWidth, borderAndPadding };
-            return std::max(minimumSize, std::min(maximumSize(), stretchedBorderBoxWidth).value);
+        // https://drafts.csswg.org/css-grid-1/#grid-item-sizing
+        // Otherwise (self-alignment is not stretch, and does not behave as stretch), a non-replaced
+        // grid item with an automatic size is sized to its fit-content size in the axis.
+        if (!placedGridItem.isReplacedElement() && !preferredAspectRatio(placedGridItem.layoutBox())) {
+            auto minContentBorderBoxWidth = BorderBoxSize { ContentBoxSize { integrationUtils.minContentWidthForGridItem(placedGridItem.layoutBox(), columnsSize) }, borderAndPadding };
+            auto maxContentBorderBoxWidth = BorderBoxSize { ContentBoxSize { integrationUtils.maxContentWidthForGridItem(placedGridItem.layoutBox(), columnsSize) }, borderAndPadding };
+            auto stretchFitBorderBoxWidth = stretchFitSize(borderAndPadding, columnsSize, usedMargins);
+            return fitContentSize(minContentBorderBoxWidth, maxContentBorderBoxWidth, stretchFitBorderBoxWidth);
         }
 
+        // Otherwise, a replaced grid item with an automatic size uses its natural size in the axis
+        // (i.e. it is sized consistent with the block-level replaced element sizing rules).
+        auto& layoutBox = placedGridItem.layoutBox();
+        if (placedGridItem.isReplacedElement() && layoutBox.hasNaturalWidth())
+            return BorderBoxSize { ContentBoxSize { layoutBox.naturalWidth() }, borderAndPadding }.value;
+
+        // FIXME: Handle replaced elements with no natural size in the axis and non-replaced items
+        // with a preferred aspect ratio.
         ASSERT_NOT_IMPLEMENTED_YET();
         return { };
     }
@@ -192,8 +389,8 @@ LayoutUnit usedInlineSizeForGridItem(const PlacedGridItem& placedGridItem, Layou
 }
 
 // https://drafts.csswg.org/css-grid-1/#min-size-auto
-static BorderBoxSize automaticMinimumInlineSize(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding, const TrackSizingFunctionsList& trackSizingFunctions,
-    LayoutUnit containingBlockSize, const IntegrationUtils& integrationUtils)
+BorderBoxSize automaticMinimumInlineSize(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding, const TrackSizingFunctionsList& trackSizingFunctions,
+    std::optional<LayoutUnit> gridAreaInlineSize, std::optional<LayoutUnit> gridAreaMaximumInlineSize, const IntegrationUtils& integrationUtils)
 {
     auto& inlineAxisSizes = gridItem.inlineAxisSizes();
     ASSERT(inlineAxisSizes.minimumSize.isAuto());
@@ -218,11 +415,24 @@ static BorderBoxSize automaticMinimumInlineSize(const PlacedGridItem& gridItem, 
     if (gridItemColumnSpanCount > 1 && spansFlexMaxTrackSizingFunction({ gridItemColumnStartLine, gridItemColumnEndLine }, trackSizingFunctions))
         return BorderBoxSize::zeroSized();
 
+    // However, if in a given dimension the grid item spans only grid tracks that have a fixed max
+    // track sizing function, then its specified size suggestion and content size suggestion in that
+    // dimension (and its input from this dimension to the transferred size suggestion in the
+    // opposite dimension) are further clamped to less than or equal to the stretch fit into the grid
+    // area’s maximum size in that dimension, as represented by the sum of those grid tracks’ max
+    // track sizing functions plus any intervening fixed gutters.
+    auto clampedToGridAreaMaximumSize = [&](BorderBoxSize sizeSuggestion) {
+        if (!gridAreaMaximumInlineSize)
+            return sizeSuggestion;
+        auto usedMargins = usedMarginsForAxis(gridItem, inlineAxisSizes);
+        return std::min(sizeSuggestion, stretchFitSize(borderAndPadding, *gridAreaMaximumInlineSize, usedMargins));
+    };
+
     // The content-based minimum size for a grid item in a given dimension is its
     auto contentBasedMinimumSize = [&] {
         // specified size suggestion if it exists
-        if (auto specifiedSizeSuggestion = inlineSpecifiedSizeSuggestion(gridItem, borderAndPadding, containingBlockSize))
-            return *specifiedSizeSuggestion;
+        if (auto specifiedSizeSuggestion = inlineSpecifiedSizeSuggestion(gridItem, borderAndPadding, gridAreaInlineSize))
+            return clampedToGridAreaMaximumSize(*specifiedSizeSuggestion);
 
         // otherwise its transferred size suggestion if that exists and the element is replaced
         if (gridItem.isReplacedElement()) {
@@ -230,22 +440,23 @@ static BorderBoxSize automaticMinimumInlineSize(const PlacedGridItem& gridItem, 
                 return BorderBoxSize { ContentBoxSize { *transferredSizeSuggestion }, borderAndPadding };
         }
         // else its content size suggestion
-        return inlineContentSizeSuggestion(gridItem, borderAndPadding, integrationUtils);
+        return clampedToGridAreaMaximumSize(inlineContentSizeSuggestion(gridItem, borderAndPadding, gridAreaInlineSize.value_or(0_lu), integrationUtils));
     };
+
+    auto sizeSuggestion = contentBasedMinimumSize();
 
     // In all cases, the size suggestion is additionally clamped by the maximum size in
     // the affected axis, if it’s definite
     auto& maximumSize = inlineAxisSizes.maximumSize;
-    if (auto fixedMaximumSize = maximumSize.tryFixed()) {
-        auto maximumBorderBoxSize = BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(*fixedMaximumSize, gridItem.usedZoom()) }, borderAndPadding };
-        return std::min(contentBasedMinimumSize(), maximumBorderBoxSize);
-    }
-    return contentBasedMinimumSize();
+    if (auto fixedMaximumSize = maximumSize.tryFixed())
+        sizeSuggestion = std::min(sizeSuggestion, BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(*fixedMaximumSize, gridItem.usedZoom()) }, borderAndPadding });
+
+    return sizeSuggestion;
 }
 
 // https://drafts.csswg.org/css-grid-1/#min-size-auto
-static BorderBoxSize automaticMinimumBlockSize(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding, const TrackSizingFunctionsList& trackSizingFunctions,
-    LayoutUnit containingBlockSize, const GridFormattingContext& formattingContext, LayoutUnit inlineAxisConstraint)
+BorderBoxSize automaticMinimumBlockSize(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding, const TrackSizingFunctionsList& trackSizingFunctions,
+    std::optional<LayoutUnit> gridAreaBlockSize, std::optional<LayoutUnit> gridAreaMaximumBlockSize, const GridFormattingContext& formattingContext, LayoutUnit inlineAxisConstraint)
 {
     auto& blockAxisSizes = gridItem.blockAxisSizes();
     ASSERT(blockAxisSizes.minimumSize.isAuto());
@@ -270,11 +481,24 @@ static BorderBoxSize automaticMinimumBlockSize(const PlacedGridItem& gridItem, L
     if (gridItemRowSpanCount > 1 && spansFlexMaxTrackSizingFunction({ gridItemRowStartLine, gridItemRowEndLine }, trackSizingFunctions))
         return BorderBoxSize::zeroSized();
 
+    // However, if in a given dimension the grid item spans only grid tracks that have a fixed max
+    // track sizing function, then its specified size suggestion and content size suggestion in that
+    // dimension (and its input from this dimension to the transferred size suggestion in the
+    // opposite dimension) are further clamped to less than or equal to the stretch fit into the grid
+    // area’s maximum size in that dimension, as represented by the sum of those grid tracks’ max
+    // track sizing functions plus any intervening fixed gutters.
+    auto clampedToGridAreaMaximumSize = [&](BorderBoxSize sizeSuggestion) {
+        if (!gridAreaMaximumBlockSize)
+            return sizeSuggestion;
+        auto usedMargins = usedMarginsForAxis(gridItem, blockAxisSizes);
+        return std::min(sizeSuggestion, stretchFitSize(borderAndPadding, *gridAreaMaximumBlockSize, usedMargins));
+    };
+
     // The content-based minimum size for a grid item in a given dimension is its
     auto contentBasedMinimumSize = [&] {
         // specified size suggestion if it exists
-        if (auto specifiedSizeSuggestion = blockSpecifiedSizeSuggestion(gridItem, borderAndPadding, containingBlockSize))
-            return *specifiedSizeSuggestion;
+        if (auto specifiedSizeSuggestion = blockSpecifiedSizeSuggestion(gridItem, borderAndPadding, gridAreaBlockSize))
+            return clampedToGridAreaMaximumSize(*specifiedSizeSuggestion);
 
         // otherwise its transferred size suggestion if that exists and the element is replaced
         if (gridItem.isReplacedElement()) {
@@ -282,51 +506,21 @@ static BorderBoxSize automaticMinimumBlockSize(const PlacedGridItem& gridItem, L
                 return *transferredSizeSuggestion;
         }
         // else its content size suggestion
-        return blockContentSizeSuggestion(gridItem, inlineAxisConstraint, formattingContext);
+        return clampedToGridAreaMaximumSize(blockContentSizeSuggestion(gridItem, inlineAxisConstraint, formattingContext));
     };
+
+    auto sizeSuggestion = contentBasedMinimumSize();
 
     // In all cases, the size suggestion is additionally clamped by the maximum size in
     // the affected axis, if it’s definite
     auto& maximumSize = blockAxisSizes.maximumSize;
-    if (auto fixedMaximumSize = maximumSize.tryFixed()) {
-        auto maximumBorderBoxSize = BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(*fixedMaximumSize, gridItem.usedZoom()) }, borderAndPadding };
-        return std::min(contentBasedMinimumSize(), maximumBorderBoxSize);
-    }
-    return contentBasedMinimumSize();
+    if (auto fixedMaximumSize = maximumSize.tryFixed())
+        sizeSuggestion = std::min(sizeSuggestion, BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(*fixedMaximumSize, gridItem.usedZoom()) }, borderAndPadding });
+
+    return sizeSuggestion;
 }
 
-bool hasStretchedBlockSize(const PlacedGridItem& placedGridItem)
-{
-    if (!placedGridItem.blockAxisSizes().preferredSize.isAuto())
-        return false;
-    if (placedGridItem.preferredAspectRatio() || placedGridItem.isReplacedElement())
-        return false;
-    auto& marginStart = placedGridItem.blockAxisSizes().marginStart;
-    auto& marginEnd = placedGridItem.blockAxisSizes().marginEnd;
-    return placedGridItem.blockAxisAlignment().position() == ItemPosition::Normal && !marginStart.isAuto() && !marginEnd.isAuto();
-}
-
-LayoutUnit stretchedBlockSize(const PlacedGridItem& placedGridItem, LayoutUnit borderAndPadding, LayoutUnit rowsSize)
-{
-    ASSERT(hasStretchedBlockSize(placedGridItem));
-    auto& blockAxisSizes = placedGridItem.blockAxisSizes();
-    auto& usedZoom = placedGridItem.usedZoom();
-    auto usedMarginStart = LayoutUnit { blockAxisSizes.marginStart.tryFixed()->resolveZoom(usedZoom) };
-    auto usedMarginEnd = LayoutUnit { blockAxisSizes.marginEnd.tryFixed()->resolveZoom(usedZoom) };
-    auto stretchedContentBoxHeight = ContentBoxSize { rowsSize - usedMarginStart - usedMarginEnd - borderAndPadding };
-    auto stretchedBorderBoxHeight = BorderBoxSize { stretchedContentBoxHeight, borderAndPadding };
-
-    auto maximumSize = [&] {
-        auto& computedMaximumSize = blockAxisSizes.maximumSize;
-        if (computedMaximumSize.isNone())
-            return BorderBoxSize::maxSized();
-        return BorderBoxSize { ContentBoxSize { LayoutUnit { computedMaximumSize.tryFixed()->resolveZoom(usedZoom) } }, borderAndPadding };
-    }();
-    return std::min(maximumSize, stretchedBorderBoxHeight).value;
-}
-
-LayoutUnit usedBlockSizeForGridItem(const PlacedGridItem& placedGridItem, LayoutUnit borderAndPadding,
-    const TrackSizingFunctionsList& trackSizingFunctions, LayoutUnit rowsSize, const GridFormattingContext& formattingContext, LayoutUnit inlineAxisConstraint)
+LayoutUnit blockPreferredSize(const PlacedGridItem& placedGridItem, LayoutUnit borderAndPadding, LayoutUnit rowsSize, const GridFormattingContext& formattingContext, LayoutUnit inlineAxisConstraint, const UsedMargins& usedMargins)
 {
     auto& blockAxisSizes = placedGridItem.blockAxisSizes();
     ASSERT(blockAxisSizes.maximumSize.isFixed() || blockAxisSizes.maximumSize.isNone());
@@ -344,12 +538,32 @@ LayoutUnit usedBlockSizeForGridItem(const PlacedGridItem& placedGridItem, Layout
         //
         // When the box's computed width/height (as appropriate to the axis) is auto and neither of
         // its margins (in the appropriate axis) are auto, sets the box's used size to the length
-        // necessary to make its outer size as close to filling the alignment container as possible
-        // while still respecting the constraints imposed by min-height/min-width/max-height/max-width.
-        if (hasStretchedBlockSize(placedGridItem)) {
-            auto minimumSize = GridLayoutUtils::usedBlockMinimumSize(placedGridItem, trackSizingFunctions, borderAndPadding, rowsSize, formattingContext, inlineAxisConstraint);
-            return std::max(minimumSize, stretchedBlockSize(placedGridItem, borderAndPadding, rowsSize));
+        // necessary to make its outer size as close to filling the alignment container as possible.
+        if (isStretchedForAutomaticSize(placedGridItem, blockAxisSizes, placedGridItem.blockAxisAlignment()))
+            return stretchFitSize(borderAndPadding, rowsSize, usedMargins).value;
+
+        // https://drafts.csswg.org/css-grid-1/#grid-item-sizing
+        // Otherwise (self-alignment is not stretch, and does not behave as stretch), a non-replaced
+        // grid item with an automatic size is sized to its fit-content size in the axis.
+        if (!placedGridItem.isReplacedElement() && !preferredAspectRatio(placedGridItem.layoutBox())) {
+            auto stretchFitBorderBoxHeight = stretchFitSize(borderAndPadding, rowsSize, usedMargins);
+
+            auto& integrationUtils = formattingContext.integrationUtils();
+            auto minContentBorderBoxHeight = BorderBoxSize::fromIntegrationFunction(integrationUtils.minContentHeightForGridItem(placedGridItem.layoutBox(), inlineAxisConstraint));
+            auto maxContentBorderBoxHeight = BorderBoxSize::fromIntegrationFunction(integrationUtils.maxContentHeightForGridItem(placedGridItem.layoutBox(), inlineAxisConstraint));
+            return fitContentSize(minContentBorderBoxHeight, maxContentBorderBoxHeight, stretchFitBorderBoxHeight);
         }
+
+        // Otherwise, a replaced grid item with an automatic size uses its natural size in the axis
+        // (i.e. it is sized consistent with the block-level replaced element sizing rules).
+        auto& layoutBox = placedGridItem.layoutBox();
+        if (placedGridItem.isReplacedElement() && layoutBox.hasNaturalHeight())
+            return BorderBoxSize { ContentBoxSize { layoutBox.naturalHeight() }, borderAndPadding }.value;
+
+        // FIXME: Handle replaced elements with no natural size in the axis and non-replaced items
+        // with a preferred aspect ratio.
+        ASSERT_NOT_IMPLEMENTED_YET();
+        return { };
     }
 
     if (preferredSize.isFixed() || preferredSize.isPercent() || preferredSize.isCalculated())
@@ -359,7 +573,7 @@ LayoutUnit usedBlockSizeForGridItem(const PlacedGridItem& placedGridItem, Layout
     return { };
 }
 
-LayoutUnit usedInlineMinimumSize(const PlacedGridItem& gridItem, const TrackSizingFunctionsList& trackSizingFunctions,
+LayoutUnit inlineMinimumSize(const PlacedGridItem& gridItem, const TrackSizingFunctionsList& trackSizingFunctions,
     LayoutUnit borderAndPadding, LayoutUnit columnsSize, const IntegrationUtils& integrationUtils)
 {
     auto& minimumSize = gridItem.inlineAxisSizes().minimumSize;
@@ -374,7 +588,9 @@ LayoutUnit usedInlineMinimumSize(const PlacedGridItem& gridItem, const TrackSizi
             return BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(calculated, columnsSize, gridItem.usedZoom()) }, borderAndPadding }.value;
         },
         [&](const CSS::Keyword::Auto&) -> LayoutUnit {
-            return automaticMinimumInlineSize(gridItem, borderAndPadding, trackSizingFunctions, columnsSize, integrationUtils).value;
+            // The grid area is resolved by now, so it is what the automatic minimum size is clamped
+            // to, rather than the sum of the max track sizing functions used during track sizing.
+            return automaticMinimumInlineSize(gridItem, borderAndPadding, trackSizingFunctions, columnsSize, columnsSize, integrationUtils).value;
         },
         [](const auto&) -> LayoutUnit {
             ASSERT_NOT_IMPLEMENTED_YET();
@@ -382,7 +598,7 @@ LayoutUnit usedInlineMinimumSize(const PlacedGridItem& gridItem, const TrackSizi
         });
 }
 
-LayoutUnit usedBlockMinimumSize(const PlacedGridItem& gridItem, const TrackSizingFunctionsList& trackSizingFunctions,
+LayoutUnit blockMinimumSize(const PlacedGridItem& gridItem, const TrackSizingFunctionsList& trackSizingFunctions,
     LayoutUnit borderAndPadding, LayoutUnit rowsSize, const GridFormattingContext& formattingContext, LayoutUnit inlineAxisConstraint)
 {
     auto& minimumSize = gridItem.blockAxisSizes().minimumSize;
@@ -397,12 +613,60 @@ LayoutUnit usedBlockMinimumSize(const PlacedGridItem& gridItem, const TrackSizin
             return BorderBoxSize { ContentBoxSize { Style::evaluate<LayoutUnit>(calculated, rowsSize, gridItem.usedZoom()) }, borderAndPadding }.value;
         },
         [&](const CSS::Keyword::Auto&) -> LayoutUnit {
-            return automaticMinimumBlockSize(gridItem, borderAndPadding, trackSizingFunctions, rowsSize, formattingContext, inlineAxisConstraint).value;
+            // The grid area is resolved by now, so it is what the automatic minimum size is clamped
+            // to, rather than the sum of the max track sizing functions used during track sizing.
+            return automaticMinimumBlockSize(gridItem, borderAndPadding, trackSizingFunctions, rowsSize, rowsSize, formattingContext, inlineAxisConstraint).value;
         },
         [](const auto&) -> LayoutUnit {
             ASSERT_NOT_IMPLEMENTED_YET();
             return { };
         });
+}
+
+LayoutUnit inlineMaximumSize(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding)
+{
+    auto& maximumSize = gridItem.inlineAxisSizes().maximumSize;
+    if (maximumSize.isNone())
+        return BorderBoxSize::maxSized().value;
+    if (auto fixedMaximumSize = maximumSize.tryFixed())
+        return BorderBoxSize { ContentBoxSize { LayoutUnit { fixedMaximumSize->resolveZoom(gridItem.usedZoom()) } }, borderAndPadding }.value;
+    // FIXME: Resolve percentage and calculated maximum sizes against the grid area.
+    ASSERT_NOT_IMPLEMENTED_YET();
+    return BorderBoxSize::maxSized().value;
+}
+
+LayoutUnit blockMaximumSize(const PlacedGridItem& gridItem, LayoutUnit borderAndPadding)
+{
+    auto& maximumSize = gridItem.blockAxisSizes().maximumSize;
+    if (maximumSize.isNone())
+        return BorderBoxSize::maxSized().value;
+    if (auto fixedMaximumSize = maximumSize.tryFixed())
+        return BorderBoxSize { ContentBoxSize { LayoutUnit { fixedMaximumSize->resolveZoom(gridItem.usedZoom()) } }, borderAndPadding }.value;
+    // FIXME: Resolve percentage and calculated maximum sizes against the grid area.
+    ASSERT_NOT_IMPLEMENTED_YET();
+    return BorderBoxSize::maxSized().value;
+}
+
+// https://drafts.csswg.org/css-grid-1/#grid-item-sizing
+// https://drafts.csswg.org/css-grid-1/#layout-algorithm
+// Lay out the grid items into their respective containing blocks. Each grid area's width and height are considered definite for this purpose.
+LayoutUnit inlineUsedSize(const PlacedGridItem& gridItem, const TrackSizingFunctionsList& trackSizingFunctions, LayoutUnit borderAndPadding, LayoutUnit gridAreaInlineSize, const IntegrationUtils& integrationUtils, const UsedMargins& usedMargins)
+{
+    auto preferredSize = inlinePreferredSize(gridItem, borderAndPadding, gridAreaInlineSize, integrationUtils, usedMargins);
+    auto minimumSize = inlineMinimumSize(gridItem, trackSizingFunctions, borderAndPadding, gridAreaInlineSize, integrationUtils);
+    auto maximumSize = inlineMaximumSize(gridItem, borderAndPadding);
+    return std::max(minimumSize, std::min(maximumSize, preferredSize));
+}
+
+// https://drafts.csswg.org/css-grid-1/#grid-item-sizing
+// https://drafts.csswg.org/css-grid-1/#layout-algorithm
+// Lay out the grid items into their respective containing blocks. Each grid area's width and height are considered definite for this purpose.
+LayoutUnit blockUsedSize(const PlacedGridItem& gridItem, const TrackSizingFunctionsList& trackSizingFunctions, LayoutUnit borderAndPadding, LayoutUnit gridAreaBlockSize, const GridFormattingContext& formattingContext, LayoutUnit gridAreaInlineSize, const UsedMargins& usedMargins)
+{
+    auto preferredSize = blockPreferredSize(gridItem, borderAndPadding, gridAreaBlockSize, formattingContext, gridAreaInlineSize, usedMargins);
+    auto minimumSize = blockMinimumSize(gridItem, trackSizingFunctions, borderAndPadding, gridAreaBlockSize, formattingContext, gridAreaInlineSize);
+    auto maximumSize = blockMaximumSize(gridItem, borderAndPadding);
+    return std::max(minimumSize, std::min(maximumSize, preferredSize));
 }
 
 LayoutUnit computeGridLinePosition(size_t gridLineIndex, const TrackSizes& trackSizes, LayoutUnit gap)
@@ -434,62 +698,32 @@ LayoutUnit gridAreaDimensionSize(size_t startLine, size_t endLine, const TrackSi
     return sumOfTrackSizes + (numberOfInteriorGaps * gap);
 }
 
-LayoutUnit inlineAxisMinContentContribution(const PlacedGridItem& gridItem, LayoutUnit blockAxisConstraint, const IntegrationUtils& integrationUtils)
+MarginBoxSize inlineAxisMinContentContribution(const PlacedGridItem& gridItem, const IntegrationUtils& integrationUtils)
 {
-    UNUSED_PARAM(blockAxisConstraint);
-    return BorderBoxSize::fromIntegrationFunction(integrationUtils.minContentLogicalWidthContribution(gridItem.layoutBox())).value;
+    auto borderBoxSize = BorderBoxSize::fromIntegrationFunction(integrationUtils.minContentLogicalWidthContribution(gridItem.layoutBox()));
+    auto usedMargins = usedMarginsForAxis(gridItem, gridItem.inlineAxisSizes());
+    return MarginBoxSize { borderBoxSize, usedMargins.marginStart + usedMargins.marginEnd };
 }
 
-LayoutUnit inlineAxisMaxContentContribution(const PlacedGridItem& gridItem, LayoutUnit blockAxisConstraint, const IntegrationUtils& integrationUtils)
+MarginBoxSize inlineAxisMaxContentContribution(const PlacedGridItem& gridItem, const IntegrationUtils& integrationUtils)
 {
-    UNUSED_PARAM(blockAxisConstraint);
-    return BorderBoxSize::fromIntegrationFunction(integrationUtils.maxContentLogicalWidthContribution(gridItem.layoutBox())).value;
+    auto borderBoxSize = BorderBoxSize::fromIntegrationFunction(integrationUtils.maxContentLogicalWidthContribution(gridItem.layoutBox()));
+    auto usedMargins = usedMarginsForAxis(gridItem, gridItem.inlineAxisSizes());
+    return MarginBoxSize { borderBoxSize, usedMargins.marginStart + usedMargins.marginEnd };
 }
 
-GridItemSizingFunctions inlineAxisGridItemSizingFunctions(const IntegrationUtils& integrationUtils)
+MarginBoxSize blockAxisMinContentContribution(const PlacedGridItem& gridItem, LayoutUnit inlineAxisConstraint, const GridFormattingContext& formattingContext)
 {
-    return {
-        [&integrationUtils](const PlacedGridItem& gridItem, LayoutUnit blockAxisConstraint) {
-            return inlineAxisMinContentContribution(gridItem, blockAxisConstraint, integrationUtils);
-        },
-        [&integrationUtils](const PlacedGridItem& gridItem, LayoutUnit blockAxisConstraint) {
-            return inlineAxisMaxContentContribution(gridItem, blockAxisConstraint, integrationUtils);
-        },
-        [&integrationUtils](const PlacedGridItem& gridItem, const TrackSizingFunctionsList& trackSizingFunctions, LayoutUnit borderAndPadding, LayoutUnit availableSpace, LayoutUnit oppositeAxisConstraint) {
-            UNUSED_PARAM(oppositeAxisConstraint);
-            return usedInlineMinimumSize(gridItem, trackSizingFunctions, borderAndPadding, availableSpace, integrationUtils);
-        }
-    };
-
+    auto borderBoxSize = BorderBoxSize::fromIntegrationFunction(formattingContext.integrationUtils().minContentContributionHeightForGridItem(gridItem.layoutBox(), inlineAxisConstraint));
+    auto usedMargins = usedMarginsForAxis(gridItem, gridItem.blockAxisSizes());
+    return MarginBoxSize { borderBoxSize, usedMargins.marginStart + usedMargins.marginEnd };
 }
 
-// FIXME: this should be marginBoxHeight().
-LayoutUnit blockAxisMinContentContribution(const PlacedGridItem& gridItem, LayoutUnit inlineAxisConstraint, const GridFormattingContext& formattingContext)
+MarginBoxSize blockAxisMaxContentContribution(const PlacedGridItem& gridItem, LayoutUnit inlineAxisConstraint, const GridFormattingContext& formattingContext)
 {
-    formattingContext.integrationUtils().layoutWithFormattingContextForBox(gridItem.layoutBox(), inlineAxisConstraint);
-    return BorderBoxSize::fromIntegrationFunction(formattingContext.geometryForGridItem(gridItem.layoutBox()).borderBoxHeight()).value;
-}
-
-// FIXME: this should be marginBoxHeight().
-LayoutUnit blockAxisMaxContentContribution(const PlacedGridItem& gridItem, LayoutUnit inlineAxisConstraint, const GridFormattingContext& formattingContext)
-{
-    formattingContext.integrationUtils().layoutWithFormattingContextForBox(gridItem.layoutBox(), inlineAxisConstraint);
-    return BorderBoxSize::fromIntegrationFunction(formattingContext.geometryForGridItem(gridItem.layoutBox()).borderBoxHeight()).value;
-}
-
-GridItemSizingFunctions blockAxisGridItemSizingFunctions(const GridFormattingContext& formattingContext)
-{
-    return {
-        [&formattingContext](const PlacedGridItem& gridItem, LayoutUnit inlineAxisConstraint) {
-            return blockAxisMinContentContribution(gridItem, inlineAxisConstraint, formattingContext);
-        },
-        [&formattingContext](const PlacedGridItem& gridItem, LayoutUnit inlineAxisConstraint) {
-            return blockAxisMaxContentContribution(gridItem, inlineAxisConstraint, formattingContext);
-        },
-        [&formattingContext](const PlacedGridItem& gridItem, const TrackSizingFunctionsList& trackSizingFunctions, LayoutUnit borderAndPadding, LayoutUnit availableSpace, LayoutUnit oppositeAxisConstraint) {
-            return usedBlockMinimumSize(gridItem, trackSizingFunctions, borderAndPadding, availableSpace, formattingContext, oppositeAxisConstraint);
-        }
-    };
+    auto borderBoxSize = BorderBoxSize::fromIntegrationFunction(formattingContext.integrationUtils().maxContentContributionHeightForGridItem(gridItem.layoutBox(), inlineAxisConstraint));
+    auto usedMargins = usedMarginsForAxis(gridItem, gridItem.blockAxisSizes());
+    return MarginBoxSize { borderBoxSize, usedMargins.marginStart + usedMargins.marginEnd };
 }
 
 // https://www.w3.org/TR/css-sizing-3/#behave-as-auto
@@ -502,11 +736,6 @@ bool preferredSizeBehavesAsAuto(const Style::PreferredSize& preferredSize)
     // FIXME: Handle cases where preferred size is not auto but behaves as auto,
     // such as percentage height resolving against indefinite size.
     return preferredSize.isAuto();
-}
-
-bool preferredSizeDependsOnContainingBlockSize(const Style::PreferredSize& preferredSize)
-{
-    return preferredSize.isStretch() || preferredSize.isFitContent() || preferredSize.isPercentOrCalculated();
 }
 
 }

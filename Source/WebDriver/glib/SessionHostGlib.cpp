@@ -26,6 +26,7 @@
 #include "config.h"
 #include "SessionHost.h"
 
+#include "Logging.h"
 #include "WebDriverService.h"
 #include <gio/gio.h>
 #include <wtf/NeverDestroyed.h>
@@ -50,7 +51,7 @@ const SocketConnection::MessageHandlers& SessionHost::messageHandlers()
     { "DidClose", std::pair<CString, SocketConnection::MessageCallback> { { },
         [](SocketConnection&, GVariant*, gpointer userData) {
             auto& sessionHost = *static_cast<SessionHost*>(userData);
-            sessionHost.connectionDidClose();
+            sessionHost.disconnect(DisconnectReason::BrowserDidCloseConnection);
         }}
     },
     { "DidStartAutomationSession", std::pair<CString, SocketConnection::MessageCallback> { "(ss)",
@@ -118,6 +119,7 @@ struct ConnectToBrowserAsyncData {
     GUniquePtr<char> inspectorAddress;
     GRefPtr<GCancellable> cancellable;
     Function<void (std::optional<String> error)> completionHandler;
+    unsigned connectionAttemptCount { 0 };
 };
 
 static guint16 freePort()
@@ -147,10 +149,11 @@ void SessionHost::launchBrowser(Function<void (std::optional<String> error)>&& c
 
     m_cancellable = adoptGRef(g_cancellable_new());
     GUniquePtr<char> inspectorAddress(
-        g_strdup_printf("%s:%u", targetIp.isEmpty() ? "127.0.0.1" : targetIp.latin1().data(), targetPort > 0 ? targetPort : freePort())
+        g_strdup_printf("%s:%u", targetIp.isEmpty() ? "127.0.0.1" : targetIp.utf8().legacyCStringPointer(), targetPort > 0 ? targetPort : freePort())
     );
     if (!targetIp.isEmpty()) {
         m_isRemoteBrowser = true;
+        RELEASE_LOG_INFO(SessionHost, "Attaching to already running RemoteInspector at %s", inspectorAddress.get());
         connectToBrowser(makeUnique<ConnectToBrowserAsyncData>(this, WTF::move(inspectorAddress), m_cancellable.get(), WTF::move(completionHandler)));
         return;
     }
@@ -163,13 +166,16 @@ void SessionHost::launchBrowser(Function<void (std::optional<String> error)>&& c
 
     size_t browserArgumentsSize = m_capabilities.browserArguments ? m_capabilities.browserArguments->size() : 0;
     GUniquePtr<char*> args(g_new0(char*, browserArgumentsSize + 2));
-    args.get()[0] = g_strdup(m_capabilities.browserBinary.value().utf8().data());
+    args.get()[0] = g_strdup(m_capabilities.browserBinary.value().utf8().legacyCStringPointer());
     for (unsigned i = 0; i < browserArgumentsSize; ++i)
-        args.get()[i + 1] = g_strdup(m_capabilities.browserArguments.value()[i].utf8().data());
+        args.get()[i + 1] = g_strdup(m_capabilities.browserArguments.value()[i].utf8().legacyCStringPointer());
+
+    RELEASE_LOG_INFO(SessionHost, "Spawning local browser: %s with %zu argument(s)", args.get()[0], browserArgumentsSize);
 
     GUniqueOutPtr<GError> error;
     m_browser = adoptGRef(g_subprocess_launcher_spawnv(launcher.get(), args.get(), &error.outPtr()));
     if (error) {
+        RELEASE_LOG_ERROR(SessionHost, "Failed to spawn browser %s: %s", args.get()[0], error->message);
         completionHandler(String::fromUTF8(error->message));
         return;
     }
@@ -197,6 +203,9 @@ void SessionHost::connectToBrowser(std::unique_ptr<ConnectToBrowserAsyncData>&& 
     if (!m_browser && !m_isRemoteBrowser)
         return;
 
+    if (!data->connectionAttemptCount)
+        RELEASE_LOG_INFO(SessionHost, "Connecting to RemoteInspector at %s", data->inspectorAddress.get());
+
     RunLoop::mainSingleton().dispatchAfter(100_ms, [connectToBrowserData = WTF::move(data)]() mutable {
         auto* data = connectToBrowserData.release();
         if (g_cancellable_is_cancelled(data->cancellable.get()))
@@ -213,23 +222,45 @@ void SessionHost::connectToBrowser(std::unique_ptr<ConnectToBrowserAsyncData>&& 
                         return;
 
                     if (g_error_matches(error.get(), G_IO_ERROR, G_IO_ERROR_CONNECTION_REFUSED)) {
+                        data->connectionAttemptCount++;
+                        if (!(data->connectionAttemptCount % 10))
+                            RELEASE_LOG_INFO(SessionHost, "Still attempting connection to %s (attempt %u)", data->inspectorAddress.get(), data->connectionAttemptCount);
                         data->sessionHost->connectToBrowser(WTF::move(data));
                         return;
                     }
+                    RELEASE_LOG_ERROR(SessionHost, "Failed to connect to %s: %s", data->inspectorAddress.get(), error->message);
                     data->completionHandler(String::fromUTF8(error->message));
                     return;
                 }
 
+                RELEASE_LOG_INFO(SessionHost, "Connected to RemoteInspector at %s after %u attempt(s)", data->inspectorAddress.get(), data->connectionAttemptCount + 1);
                 data->sessionHost->setupConnection(SocketConnection::create(WTF::move(connection), messageHandlers(), data->sessionHost));
                 data->completionHandler(std::nullopt);
         }, data);
     });
 }
 
-void SessionHost::connectionDidClose()
+void SessionHost::disconnect(DisconnectReason reason)
 {
     Ref<SessionHost> protectedThis(*this);
-    m_browser = nullptr;
+
+    if (!m_targetIp.isEmpty())
+        RELEASE_LOG_INFO(SessionHost, "RemoteInspector at %s:%u disconnected", m_targetIp.utf8(), m_targetPort);
+    else
+        RELEASE_LOG_INFO(SessionHost, "Inspector disconnected (local browser)");
+
+    switch (reason) {
+    case DisconnectReason::BrowserDidCloseConnection:
+        RELEASE_LOG_INFO(SessionHost, "Disconnection reason: BrowserDidCloseConnection");
+        m_browser = nullptr;
+        break;
+    case DisconnectReason::AutomationTargetLost:
+        RELEASE_LOG_INFO(SessionHost, "Disconnection reason: AutomationTargetLost");
+        if (m_browser && !m_isRemoteBrowser)
+            g_subprocess_force_exit(std::exchange(m_browser, nullptr).get());
+        break;
+    }
+
     m_isRemoteBrowser = false;
 
     inspectorDisconnected();
@@ -284,7 +315,7 @@ bool SessionHost::buildSessionCapabilities(GVariantBuilder* builder) const
         g_variant_builder_init(&arrayBuilder, G_VARIANT_TYPE("a(ss)"));
         for (auto& certificate : *m_capabilities.certificates) {
             g_variant_builder_add_value(&arrayBuilder, g_variant_new("(ss)",
-                certificate.first.utf8().data(), certificate.second.utf8().data()));
+                certificate.first.utf8().legacyCStringPointer(), certificate.second.utf8().legacyCStringPointer()));
         }
         g_variant_builder_add(builder, "{sv}", "certificates", g_variant_builder_end(&arrayBuilder));
     }
@@ -292,15 +323,15 @@ bool SessionHost::buildSessionCapabilities(GVariantBuilder* builder) const
     if (m_capabilities.proxy) {
         GVariantBuilder dictBuilder;
         g_variant_builder_init(&dictBuilder, G_VARIANT_TYPE("a{sv}"));
-        g_variant_builder_add(&dictBuilder, "{sv}", "type", g_variant_new_string(m_capabilities.proxy->type.utf8().data()));
+        g_variant_builder_add(&dictBuilder, "{sv}", "type", g_variant_new_string(m_capabilities.proxy->type.utf8().legacyCStringPointer()));
         if (m_capabilities.proxy->autoconfigURL)
-            g_variant_builder_add(&dictBuilder, "{sv}", "autoconfigURL", g_variant_new_string(m_capabilities.proxy->autoconfigURL->string().utf8().data()));
+            g_variant_builder_add(&dictBuilder, "{sv}", "autoconfigURL", g_variant_new_string(m_capabilities.proxy->autoconfigURL->string().utf8().legacyCStringPointer()));
         if (m_capabilities.proxy->ftpURL)
-            g_variant_builder_add(&dictBuilder, "{sv}", "ftpURL", g_variant_new_string(m_capabilities.proxy->ftpURL->string().utf8().data()));
+            g_variant_builder_add(&dictBuilder, "{sv}", "ftpURL", g_variant_new_string(m_capabilities.proxy->ftpURL->string().utf8().legacyCStringPointer()));
         if (m_capabilities.proxy->httpURL)
-            g_variant_builder_add(&dictBuilder, "{sv}", "httpURL", g_variant_new_string(m_capabilities.proxy->httpURL->string().utf8().data()));
+            g_variant_builder_add(&dictBuilder, "{sv}", "httpURL", g_variant_new_string(m_capabilities.proxy->httpURL->string().utf8().legacyCStringPointer()));
         if (m_capabilities.proxy->httpsURL)
-            g_variant_builder_add(&dictBuilder, "{sv}", "httpsURL", g_variant_new_string(m_capabilities.proxy->httpsURL->string().utf8().data()));
+            g_variant_builder_add(&dictBuilder, "{sv}", "httpsURL", g_variant_new_string(m_capabilities.proxy->httpsURL->string().utf8().legacyCStringPointer()));
         if (m_capabilities.proxy->socksURL) {
             URL socksURL = m_capabilities.proxy->socksURL.value();
             ASSERT(m_capabilities.proxy->socksVersion);
@@ -317,13 +348,13 @@ bool SessionHost::buildSessionCapabilities(GVariantBuilder* builder) const
             default:
                 break;
             }
-            g_variant_builder_add(&dictBuilder, "{sv}", "socksURL", g_variant_new_string(socksURL.string().utf8().data()));
+            g_variant_builder_add(&dictBuilder, "{sv}", "socksURL", g_variant_new_string(socksURL.string().utf8().legacyCStringPointer()));
         }
         if (!m_capabilities.proxy->ignoreAddressList.isEmpty()) {
             GUniquePtr<char*> ignoreAddressList(static_cast<char**>(g_new0(char*, m_capabilities.proxy->ignoreAddressList.size() + 1)));
             unsigned i = 0;
             for (const auto& ignoreAddress : m_capabilities.proxy->ignoreAddressList)
-                ignoreAddressList.get()[i++] = g_strdup(ignoreAddress.utf8().data());
+                ignoreAddressList.get()[i++] = g_strdup(ignoreAddress.utf8().legacyCStringPointer());
             g_variant_builder_add(&dictBuilder, "{sv}", "ignoreAddressList", g_variant_new_strv(ignoreAddressList.get(), -1));
         }
         g_variant_builder_add(builder, "{sv}", "proxy", g_variant_builder_end(&dictBuilder));
@@ -339,7 +370,7 @@ void SessionHost::startAutomationSession(Function<void (bool, std::optional<Stri
     m_startSessionCompletionHandler = WTF::move(completionHandler);
     m_sessionID = createVersion4UUIDString();
     GVariantBuilder builder;
-    m_socketConnection->sendMessage("StartAutomationSession", g_variant_new("(sa{sv})", m_sessionID.utf8().data(), buildSessionCapabilities(&builder) ? &builder : nullptr));
+    m_socketConnection->sendMessage("StartAutomationSession", g_variant_new("(sa{sv})", m_sessionID.utf8().legacyCStringPointer(), buildSessionCapabilities(&builder) ? &builder : nullptr));
 }
 
 void SessionHost::didStartAutomationSession(GVariant* parameters)
@@ -362,9 +393,10 @@ void SessionHost::setTargetList(uint64_t connectionID, Vector<Target>&& targetLi
         // such as WebPage (this can be ignored), or if the server has removed the Automation target
         // because the session has ended (in this case, we must reset our state).
         if (m_connectionID) {
+            RELEASE_LOG_INFO(SessionHost, "Remote browser removed all automation targets; disconnecting");
             if (m_socketConnection)
                 m_socketConnection->close();
-            connectionDidClose();
+            disconnect(DisconnectReason::AutomationTargetLost);
         }
         return;
     }
@@ -395,7 +427,7 @@ void SessionHost::sendMessageToBackend(const String& message)
     ASSERT(m_socketConnection);
     ASSERT(m_connectionID);
     ASSERT(m_target.id);
-    m_socketConnection->sendMessage("SendMessageToBackend", g_variant_new("(tts)", m_connectionID, m_target.id, message.utf8().data()));
+    m_socketConnection->sendMessage("SendMessageToBackend", g_variant_new("(tts)", m_connectionID, m_target.id, message.utf8().legacyCStringPointer()));
 }
 
 } // namespace WebDriver

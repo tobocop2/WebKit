@@ -4,10 +4,9 @@
 // found in the LICENSE file.
 //
 
-#ifdef UNSAFE_BUFFERS_BUILD
-#    pragma allow_unsafe_buffers
-#endif
+#include <array>
 
+#include "common/unsafe_buffers.h"
 #include "test_utils/ANGLETest.h"
 #include "test_utils/gl_raii.h"
 
@@ -66,7 +65,7 @@ class InstancingTest : public ANGLETest<>
         }
         glGenBuffers(1, &mInstanceBuffer);
         glBindBuffer(GL_ARRAY_BUFFER, mInstanceBuffer);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(mInstanceData), mInstanceData, GL_STATIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(mInstanceData), mInstanceData.data(), GL_STATIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
 
         const std::string inst = "attribute float a_instance;";
@@ -114,10 +113,6 @@ class InstancingTest : public ANGLETest<>
             ANGLE_SKIP_TEST_IF(!IsGLExtensionEnabled("GL_EXT_instanced_arrays"));
         }
 
-        // TODO: Fix these.  http://anglebug.com/42261805
-        ANGLE_SKIP_TEST_IF(IsD3D9() && draw == Indexed && geometry == Point);
-        ANGLE_SKIP_TEST_IF(IsD3D9() && IsAMD());
-
         // The window is divided into kMaxDrawn slices of size kDrawSize.
         // The slice drawn into is determined by the instance datum.
         // The instance data array selects all the slices in order.
@@ -134,7 +129,7 @@ class InstancingTest : public ANGLETest<>
 
         glBindBuffer(GL_ARRAY_BUFFER, storage == Buffer ? mInstanceBuffer : 0);
         glVertexAttribPointer(instanceAttrib, 1, GL_FLOAT, GL_FALSE, 0,
-                              storage == Buffer ? nullptr : mInstanceData);
+                              storage == Buffer ? nullptr : mInstanceData.data());
         glEnableVertexAttribArray(instanceAttrib);
         if (vendor == Angle)
             glVertexAttribDivisorANGLE(instanceAttrib, divisor);
@@ -239,19 +234,20 @@ class InstancingTest : public ANGLETest<>
             int iy = static_cast<int>((y + 1.0f) / 2.0f * getWindowHeight());
             for (unsigned j = 0; j < 8; j += 2)
             {
-                int ix = static_cast<int>((kPointVertices[j] + 1.0f) / 2.0f * getWindowWidth());
+                int ix = static_cast<int>((ANGLE_UNSAFE_TODO(kPointVertices[j]) + 1.0f) / 2.0f *
+                                          getWindowWidth());
                 EXPECT_PIXEL_COLOR_EQ(ix, iy, i <= lastDrawn ? GLColor::red : GLColor::blue)
                     << std::endl;
             }
         }
     }
 
-    GLuint mProgram[2];
+    std::array<GLuint, 2> mProgram;
     GLuint mInstanceBuffer;
 
     static constexpr unsigned kMaxDrawn = 16;
     static constexpr float kDrawSize    = 2.0 / kMaxDrawn;
-    GLfloat mInstanceData[kMaxDrawn];
+    std::array<GLfloat, kMaxDrawn> mInstanceData;
 
     // clang-format off
 
@@ -549,8 +545,8 @@ void main()
 
     for (size_t i = 0; i < instances; ++i)
     {
-        glVertexAttrib3fv(1, transform + 3 * i);
-        glVertexAttrib3fv(2, colors + 3 * i);
+        glVertexAttrib3fv(1, ANGLE_UNSAFE_TODO(transform + 3 * i));
+        glVertexAttrib3fv(2, ANGLE_UNSAFE_TODO(colors + 3 * i));
 
         glDrawElements(GL_LINE_STRIP, ArraySize(lineloopAsStripIndices), GL_UNSIGNED_SHORT,
                        lineloopAsStripIndices);

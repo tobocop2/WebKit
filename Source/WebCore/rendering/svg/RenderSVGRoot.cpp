@@ -50,6 +50,7 @@
 #include "SVGLayerTransformUpdater.h"
 #include "SVGSVGElement.h"
 #include "SVGViewSpec.h"
+#include "ScrollbarUpdateScope.h"
 #include "TransformState.h"
 #include "VisibleRectContext.h"
 #include <wtf/SetForScope.h>
@@ -92,7 +93,8 @@ RenderSVGViewportContainer* RenderSVGRoot::viewportContainer() const
 
 bool RenderSVGRoot::hasIntrinsicAspectRatio() const
 {
-    return preferredAspectRatioAsSize().aspectRatioDouble();
+    // Dividing the two components would give NaN for an absent ratio, and NaN converts to true.
+    return !preferredAspectRatioAsSize().isEmpty();
 }
 
 FloatSize RenderSVGRoot::computeIntrinsicSize() const
@@ -243,6 +245,8 @@ void RenderSVGRoot::layout()
     StackStats::LayoutCheckPoint layoutCheckPoint;
     ASSERT(needsLayout());
 
+    svgSVGElement().invalidateCachedViewportSizes();
+
     // Arbitrary affine transforms are incompatible with RenderLayoutState.
     LayoutStateDisabler layoutStateDisabler(view().frameView().layoutContext());
 
@@ -268,6 +272,12 @@ void RenderSVGRoot::layout()
     addVisualEffectOverflow();
 
     invalidateBackgroundObscurationStatus();
+    svgSVGElement().invalidateCachedViewportSizes();
+
+    if (!isDocumentElementRenderer()) {
+        if (CheckedPtr layer = this->layer(); layer && layer->scrollableArea())
+            layer->updateScrollInfoAfterLayout();
+    }
 
     repainter.repaintAfterLayout();
     clearNeedsLayout();
@@ -472,7 +482,7 @@ bool RenderSVGRoot::paintingAffectedByExternalOffset() const
     return false;
 }
 
-std::optional<FloatRect> RenderSVGRoot::computeFloatVisibleRectInContainer(const FloatRect&, const RenderLayerModelObject*, VisibleRectContext) const
+std::optional<FloatRect> RenderSVGRoot::computeFloatVisibleRectInContainer(const FloatRect&, const RenderLayerModelObject*, const VisibleRectContext&, VisibleRectState) const
 {
     return { };
 }
@@ -649,11 +659,6 @@ LayoutRect RenderSVGRoot::overflowClipRect(const LayoutPoint& location, OverlayS
     clipRect.setLocation(location + clipRect.location() + toLayoutSize(contentBoxLocation()));
     clipRect.setSize(clipRect.size() - LayoutSize(horizontalBorderAndPaddingExtent(), verticalBorderAndPaddingExtent()));
     return clipRect;
-}
-
-void RenderSVGRoot::boundingRects(Vector<LayoutRect>& rects, const LayoutPoint& accumulatedOffset) const
-{
-    rects.append({ accumulatedOffset, borderBoxSize() });
 }
 
 void RenderSVGRoot::absoluteQuads(Vector<FloatQuad>& quads, bool* wasFixed) const

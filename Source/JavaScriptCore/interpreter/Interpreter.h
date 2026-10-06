@@ -29,9 +29,11 @@
 
 #pragma once
 
-#include "BytecodeIndex.h"
-#include "JSCJSValue.h"
-#include "MacroAssemblerCodeRef.h"
+#include <JavaScriptCore/BytecodeIndex.h>
+#include <JavaScriptCore/JSCJSValue.h>
+#include <JavaScriptCore/MacroAssemblerCodeRef.h>
+#include <JavaScriptCore/VMEntryRecord.h>
+#include <span>
 #include <wtf/HashMap.h>
 #include <wtf/Platform.h>
 #include <wtf/TZoneMalloc.h>
@@ -84,6 +86,9 @@ using JSOrWasmInstruction = Variant<const JSInstruction*, uintptr_t /* IPIntOffs
     class SourceCode;
     class StackFrame;
     class StackVisitor;
+#if USE(BUN_JSC_ADDITIONS)
+    class UnlinkedProgramCodeBlock;
+#endif
     enum class HandlerType : uint8_t;
     struct HandlerInfo;
     struct ProtoCallFrame;
@@ -149,7 +154,12 @@ using JSOrWasmInstruction = Variant<const JSInstruction*, uintptr_t /* IPIntOffs
         static bool isOpcode(Opcode);
 #endif
 
+#if USE(BUN_JSC_ADDITIONS)
+        // precompiled: see ProgramExecutable::initializeGlobalProperties().
+        JSValue executeProgram(const SourceCode&, JSGlobalObject*, JSObject* thisObj, UnlinkedProgramCodeBlock* precompiled = nullptr);
+#else
         JSValue executeProgram(const SourceCode&, JSGlobalObject*, JSObject* thisObj);
+#endif
         JSValue executeModuleProgram(JSModuleRecord*, ModuleProgramExecutable*, JSGlobalObject*, JSModuleEnvironment*, JSValue sentValue, JSValue resumeMode);
         JSValue executeCall(JSObject* function, const CallData&, JSValue thisValue, JSCell* context, const ArgList&);
         JSObject* executeConstruct(JSObject* function, const CallData&, const ArgList&, JSValue newTarget);
@@ -206,14 +216,16 @@ using JSOrWasmInstruction = Variant<const JSInstruction*, uintptr_t /* IPIntOffs
 
     class UnwindFunctorBase {
     protected:
-        UnwindFunctorBase(VM& vm)
-            : m_vm(vm)
-        { }
+        inline UnwindFunctorBase(VM&);
 
         void copyCalleeSavesToEntryFrameCalleeSavesBuffer(StackVisitor&) const;
         void notifyDebuggerOfUnwinding(JSGlobalObject*, CallFrame*) const;
 
         VM& m_vm;
+#if ENABLE(ASSEMBLER)
+        std::span<const int8_t> m_vmCalleeSaveBufferSlotsByRegIndex;
+        VMEntryRecord* m_vmEntryRecord;
+#endif
     };
 } // namespace JSC
 

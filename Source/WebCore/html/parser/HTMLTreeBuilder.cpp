@@ -251,8 +251,9 @@ private:
 
 inline bool HTMLTreeBuilder::isParsingTemplateContents() const
 {
-    return m_tree.openElements().containsTemplateElement()
-        && m_tree.openElements().hasTemplateInHTMLScope();
+    if (m_tree.openElements().containsTemplateElement() && m_tree.openElements().hasTemplateInHTMLScope())
+        return true;
+    return m_fragmentContext.contextElementIsTemplate();
 }
 
 inline bool HTMLTreeBuilder::isParsingFragmentOrTemplateContents() const
@@ -292,6 +293,10 @@ HTMLTreeBuilder::HTMLTreeBuilder(HTMLDocumentParser& parser, DocumentFragment& f
     auto* formElement = dynamicDowncast<HTMLFormElement>(contextElement);
     m_tree.setForm(protect(formElement ? formElement : HTMLFormElement::findClosestFormAncestor(contextElement)));
 
+    // Characters are tokenized before any token reaches the tree builder, so the tokenizer flags
+    // implied by the context element have to be set up front rather than after the first token.
+    updateTokenizerForAdjustedCurrentNode();
+
 #if ASSERT_ENABLED
     m_destructionProhibited = false;
 #endif
@@ -315,6 +320,11 @@ inline HTMLStackItem& HTMLTreeBuilder::FragmentParsingContext::contextElementSta
 {
     ASSERT(m_fragment);
     return m_contextElementStackItem;
+}
+
+inline bool HTMLTreeBuilder::FragmentParsingContext::contextElementIsTemplate() const
+{
+    return m_fragment && m_contextElementStackItem.elementName() == HTML::template_;
 }
 
 RefPtr<ScriptElement> HTMLTreeBuilder::takeScriptToProcess(TextPosition& scriptStartPosition)
@@ -345,19 +355,7 @@ void HTMLTreeBuilder::constructTree(AtomHTMLToken&& token)
     else
         processToken(WTF::move(token));
 
-    // Use the adjusted current node for all checks, matching shouldProcessTokenInForeignContent().
-    // When fragment-parsing with only one element on the stack, the adjusted current node is the
-    // context element, not the DocumentFragment.
-    bool inForeignContent = false;
-    if (!m_tree.isEmpty()) {
-        auto& adjustedCurrentNode = adjustedCurrentStackItem();
-        inForeignContent = !isInHTMLNamespace(adjustedCurrentNode)
-            && !HTMLElementStack::isHTMLIntegrationPoint(adjustedCurrentNode)
-            && !HTMLElementStack::isMathMLTextIntegrationPoint(adjustedCurrentNode);
-    }
-
-    m_parser->tokenizer().setForceNullCharacterReplacement(m_insertionMode == InsertionMode::Text || inForeignContent);
-    m_parser->tokenizer().setShouldAllowCDATA(inForeignContent);
+    updateTokenizerForAdjustedCurrentNode();
 
 #if ASSERT_ENABLED
     m_destructionProhibited = false;
@@ -365,6 +363,31 @@ void HTMLTreeBuilder::constructTree(AtomHTMLToken&& token)
 
     m_tree.executeQueuedTasks();
     // The tree builder might have been destroyed as an indirect result of executing the queued tasks.
+}
+
+void HTMLTreeBuilder::updateTokenizerForAdjustedCurrentNode()
+{
+    // Both flags are computed from the adjusted current node, matching the tree construction
+    // dispatcher. When fragment-parsing with only one element on the stack, the adjusted current
+    // node is the context element, not the DocumentFragment.
+    //
+    // These two flags use different conditions:
+    // - shouldAllowCDATA follows the tokenizer's markup declaration open state, which switches to
+    //   the CDATA section state whenever there is an adjusted current node and it is not an element
+    //   in the HTML namespace. Integration points are NOT a consideration there, so CDATA sections
+    //   are allowed even when the adjusted current node is an integration point.
+    //   https://html.spec.whatwg.org/multipage/parsing.html#markup-declaration-open-state
+    // - forceNullCharacterReplacement follows the dispatcher's notion of foreign content (used to
+    //   replace U+0000 NULL with U+FFFD), which treats integration points as HTML content and thus
+    //   excludes them.
+    //   https://html.spec.whatwg.org/multipage/parsing.html#tree-construction
+    bool adjustedCurrentNodeIsForeign = !m_tree.isEmpty() && !isInHTMLNamespace(adjustedCurrentStackItem());
+    bool inForeignContent = adjustedCurrentNodeIsForeign
+        && !HTMLElementStack::isHTMLIntegrationPoint(adjustedCurrentStackItem())
+        && !HTMLElementStack::isMathMLTextIntegrationPoint(adjustedCurrentStackItem());
+
+    m_parser->tokenizer().setForceNullCharacterReplacement(inForeignContent);
+    m_parser->tokenizer().setShouldAllowCDATA(adjustedCurrentNodeIsForeign);
 }
 
 void HTMLTreeBuilder::processToken(AtomHTMLToken&& token)
@@ -739,7 +762,7 @@ void HTMLTreeBuilder::processStartTagForInBody(AtomHTMLToken&& token)
             return;
         }
         processFakePEndTagIfPInButtonScope();
-        m_tree.insertHTMLFormElement(WTF::move(token));
+        m_tree.insertHTMLFormElement(WTF::move(token), isParsingTemplateContents());
         return;
     case TagName::li:
         processCloseWhenNestedTag<isLi>(WTF::move(token));
@@ -1148,7 +1171,7 @@ void HTMLTreeBuilder::processStartTagForInTable(AtomHTMLToken&& token)
         parseError(token);
         if (m_tree.form() && !isParsingTemplateContents())
             return;
-        m_tree.insertHTMLFormElement(WTF::move(token));
+        m_tree.insertHTMLFormElement(WTF::move(token), isParsingTemplateContents());
         m_tree.openElements().pop();
         return;
     case TagName::template_:

@@ -29,7 +29,6 @@
 #include <WebCore/FrameIdentifier.h>
 #include <WebCore/ProcessIdentifier.h>
 #include <WebCore/ResourceLoaderIdentifier.h>
-#include <WebCore/ScriptExecutionContextIdentifier.h>
 #include <wtf/Forward.h>
 #include <wtf/RefCountedAndCanMakeWeakPtr.h>
 #include <wtf/RobinHoodHashMap.h>
@@ -60,7 +59,12 @@ public:
     virtual WebCore::Frame* frameForId(const Protocol::Network::FrameId&) = 0;
     WEBCORE_EXPORT virtual Protocol::Network::FrameId frameId(const WebCore::Frame*) = 0;
     virtual Protocol::Network::LoaderId loaderId(WebCore::DocumentLoader*) = 0;
-    virtual WebCore::LocalFrame* assertFrame(Protocol::ErrorString&, const Protocol::Network::FrameId&) = 0;
+    virtual RefPtr<WebCore::LocalFrame> assertFrame(Protocol::ErrorString&, const Protocol::Network::FrameId&) = 0;
+
+    // Assigning an ID is what makes frameForId() / assertFrame() able to resolve a frame, so a
+    // caller that reports the frame to the frontend over a channel that computes the ID elsewhere
+    // must still register it here for commands served in this process to work.
+    void registerFrame(const WebCore::Frame& frame) { frameId(&frame); }
 
     // Called when a frame is detached; returns the protocol ID that was assigned.
     // Callers must ensure takeFrame is called via InspectorInstrumentation::frameDetached
@@ -98,7 +102,7 @@ public:
     // across processes, so both forms agree in the common case.
     static inline String protocolFrameId(WebCore::FrameIdentifier frameID)
     {
-        return protocolFrameId(frameID, ObjectIdentifier<WebCore::ProcessIdentifierType>(frameID.toRawValue() >> 32));
+        return protocolFrameId(frameID, ObjectIdentifier<WebCore::ProcessIdentifierType>(frameID.toUInt64() >> 32));
     }
 
     static inline String protocolRequestId(WebCore::ProcessIdentifier pid, WebCore::ResourceLoaderIdentifier resourceID)
@@ -136,9 +140,39 @@ public:
         };
     }
 
-    static inline String protocolLoaderId(WebCore::ScriptExecutionContextIdentifier contextID)
+    // Reverse-parse a protocol frameId string back into its components (hosting process, frame).
+    // Returns nullopt if the string doesn't match the expected "frame-processID.frameID" format,
+    // if either segment isn't a valid uint64, or -- crucially -- if the frame segment isn't a
+    // valid FrameIdentifier raw value. The FrameIdentifier(uint64_t) constructor RELEASE_ASSERTs
+    // on an invalid raw value (see ObjectIdentifier.h), so a malformed or hostile id arriving from
+    // the frontend would crash the UIProcess; validating with isValidIdentifier() first keeps this
+    // a clean parse failure. The 2-arg protocolFrameId(frameID, processID) is the inverse.
+    static inline std::optional<std::pair<WebCore::ProcessIdentifier, WebCore::FrameIdentifier>> parseProtocolFrameId(const String& frameId)
     {
-        return makeString("loader-"_s, contextID.processIdentifier().toUInt64(), '.', contextID.object().toString());
+        // Format: "frame-processID.frameID"
+        if (!frameId.startsWith("frame-"_s))
+            return std::nullopt;
+
+        auto rest = StringView(frameId).substring(6); // skip "frame-"
+        auto dotIndex = rest.find('.');
+        if (dotIndex == notFound)
+            return std::nullopt;
+
+        auto pidPart = rest.left(dotIndex);
+        auto framePart = rest.substring(dotIndex + 1);
+
+        auto pidValue = parseInteger<uint64_t>(pidPart);
+        if (!pidValue || !WebCore::ProcessIdentifier::isValidIdentifier(*pidValue))
+            return std::nullopt;
+
+        auto frameValue = parseInteger<uint64_t>(framePart);
+        if (!frameValue || !WebCore::FrameIdentifier::isValidIdentifier(*frameValue))
+            return std::nullopt;
+
+        return std::pair {
+            ObjectIdentifier<WebCore::ProcessIdentifierType>(*pidValue),
+            WebCore::FrameIdentifier(*frameValue)
+        };
     }
 };
 
@@ -155,7 +189,7 @@ public:
     WebCore::Frame* frameForId(const Protocol::Network::FrameId&) final;
     WEBCORE_EXPORT Protocol::Network::FrameId frameId(const WebCore::Frame*) final;
     Protocol::Network::LoaderId loaderId(WebCore::DocumentLoader*) final;
-    WebCore::LocalFrame* assertFrame(Protocol::ErrorString&, const Protocol::Network::FrameId&) final;
+    RefPtr<WebCore::LocalFrame> assertFrame(Protocol::ErrorString&, const Protocol::Network::FrameId&) final;
     Protocol::Network::FrameId takeFrame(const WebCore::Frame&) final;
     Protocol::Network::LoaderId takeLoader(WebCore::DocumentLoader&) final;
 
@@ -182,7 +216,7 @@ public:
     WebCore::Frame* frameForId(const Protocol::Network::FrameId&) final;
     WEBCORE_EXPORT Protocol::Network::FrameId frameId(const WebCore::Frame*) final;
     Protocol::Network::LoaderId loaderId(WebCore::DocumentLoader*) final;
-    WebCore::LocalFrame* assertFrame(Protocol::ErrorString&, const Protocol::Network::FrameId&) final;
+    RefPtr<WebCore::LocalFrame> assertFrame(Protocol::ErrorString&, const Protocol::Network::FrameId&) final;
     Protocol::Network::FrameId takeFrame(const WebCore::Frame&) final;
     Protocol::Network::LoaderId takeLoader(WebCore::DocumentLoader&) final;
 

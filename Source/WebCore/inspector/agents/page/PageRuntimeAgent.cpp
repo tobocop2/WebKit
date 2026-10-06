@@ -49,6 +49,7 @@
 #include <JavaScriptCore/InjectedScript.h>
 #include <JavaScriptCore/InjectedScriptManager.h>
 #include <JavaScriptCore/InspectorProtocolObjects.h>
+#include <wtf/SetForScope.h>
 #include <wtf/TZoneMallocInlines.h>
 
 namespace WebCore {
@@ -96,16 +97,21 @@ Inspector::Protocol::ErrorStringOr<void> PageRuntimeAgent::disable()
 
 void PageRuntimeAgent::frameNavigated(LocalFrame& frame)
 {
+    SetForScope ignoreDidClearWindowObject(m_ignoreDidClearWindowObject, true);
     // Ensure execution context is created for the frame even if it doesn't have scripts.
     mainWorldGlobalObject(frame);
 }
 
 void PageRuntimeAgent::didClearWindowObjectInWorld(LocalFrame& frame, DOMWrapperWorld& world)
 {
-    auto frameId = m_inspectedPage->inspectorController().identifierRegistry().frameId(&frame);
+    if (m_ignoreDidClearWindowObject)
+        return;
+
+    auto frameId = protect(m_inspectedPage->inspectorController().identifierRegistry())->frameId(&frame);
     if (frameId.isEmpty())
         return;
 
+    SetForScope ignoreDidClearWindowObject(m_ignoreDidClearWindowObject, true);
     notifyContextCreated(frameId, frame.script().globalObject(world), world);
 }
 
@@ -152,7 +158,7 @@ void PageRuntimeAgent::reportExecutionContextCreation()
         auto& mainGlobalObject = mainWorldGlobalObject(frame);
         notifyContextCreated(frameId, &mainGlobalObject, mainThreadNormalWorldSingleton());
 
-        for (auto& jsWindowProxy : frame.windowProxy().jsWindowProxiesAsVector()) {
+        for (auto& jsWindowProxy : protect(frame.windowProxy())->jsWindowProxiesAsVector()) {
             auto* globalObject = jsWindowProxy->window();
             if (globalObject == &mainGlobalObject)
                 continue;

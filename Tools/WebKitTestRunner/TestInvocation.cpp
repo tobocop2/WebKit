@@ -33,6 +33,7 @@
 #include "TestController.h"
 #include "UIScriptController.h"
 #include "WebCoreTestSupport.h"
+#include <WebKit/WKCast.h>
 #include <WebKit/WKContextPrivate.h>
 #include <WebKit/WKData.h>
 #include <WebKit/WKDictionary.h>
@@ -284,6 +285,36 @@ void TestInvocation::forceRepaintDoneCallback(WKErrorRef error, void* context)
     TestController::singleton().notifyDone();
 }
 
+#if PLATFORM(GTK) || PLATFORM(WPE)
+void TestInvocation::presentationUpdateDoneCallback(WKErrorRef error, void* context)
+{
+    if (error)
+        return;
+
+    auto* testInvocation = static_cast<TestInvocation*>(context);
+    RELEASE_ASSERT(TestController::singleton().isCurrentInvocation(testInvocation));
+
+    testInvocation->m_gotPresentationUpdate = true;
+    TestController::singleton().notifyDone();
+}
+
+void TestInvocation::waitForPresentationUpdate()
+{
+    // Tests that use testRunner.dontForceRepaint(), still need the frame reflecting the last
+    // rendering update to reach the view before capturing. Since the coordinated graphics ports
+    // composite/hand-over buffers asynchronously, we need an explicit wait here to capture
+    // the correct frame.
+    m_gotPresentationUpdate = false;
+    WKPageCallAfterNextPresentationUpdate(TestController::singleton().mainWebView()->page(), this, TestInvocation::presentationUpdateDoneCallback);
+    TestController::singleton().runUntil(m_gotPresentationUpdate, m_timeout);
+}
+#else
+void TestInvocation::waitForPresentationUpdate()
+{
+    // Cocoa ports synchronize with the window server in PlatformWebView::windowSnapshotImage().
+}
+#endif
+
 void TestInvocation::dumpResourceLoadStatisticsIfNecessary()
 {
     if (m_shouldDumpResourceLoadStatistics)
@@ -313,7 +344,7 @@ void TestInvocation::dumpResults()
     if (m_textOutput.hasOverflowed())
         dump("text output overflowed");
     else if (m_textOutput.length() || !m_audioResult)
-        dump(m_textOutput.toString().utf8().data());
+        dump(m_textOutput.toString().utf8().legacyCStringPointer());
     else
         dumpAudio(m_audioResult.get());
 
@@ -325,7 +356,8 @@ void TestInvocation::dumpResults()
                 m_gotRepaint = false;
                 WKPageForceRepaint(TestController::singleton().mainWebView()->page(), this, TestInvocation::forceRepaintDoneCallback);
                 TestController::singleton().runUntil(m_gotRepaint, TestController::noTimeout);
-            }
+            } else
+                waitForPresentationUpdate();
             dumpPixelsAndCompareWithExpected(SnapshotResultType::WebView, m_repaintRects.get());
         }
     }
@@ -578,7 +610,7 @@ void TestInvocation::didReceiveMessageFromInjectedBundle(WKStringRef messageName
     ASSERT_NOT_REACHED();
 }
 
-WKRetainPtr<WKTypeRef> TestInvocation::didReceiveSynchronousMessageFromInjectedBundle(WKStringRef messageName, WKTypeRef messageBody)
+WKRetainPtr<WKTypeRef> TestInvocation::didReceiveSynchronousMessageFromInjectedBundle(WKStringRef messageName, WKTypeRef messageBody, bool fromMainFrameProcess)
 {
     if (WKStringIsEqualToUTF8CString(messageName, "Initialization")) {
         auto settings = createTestSettingsDictionary();
@@ -631,13 +663,18 @@ WKRetainPtr<WKTypeRef> TestInvocation::didReceiveSynchronousMessageFromInjectedB
     }
 
     if (WKStringIsEqualToUTF8CString(messageName, "ResolveNotifyDone"))
-        return adoptWK(WKBooleanCreate(resolveNotifyDone()));
+        return adoptWK(WKBooleanCreate(resolveNotifyDone(fromMainFrameProcess)));
 
     if (WKStringIsEqualToUTF8CString(messageName, "ResolveForceImmediateCompletion"))
-        return adoptWK(WKBooleanCreate(resolveForceImmediateCompletion()));
+        return adoptWK(WKBooleanCreate(resolveForceImmediateCompletion(fromMainFrameProcess)));
 
     if (WKStringIsEqualToUTF8CString(messageName, "SetWindowIsKey")) {
         TestController::singleton().mainWebView()->setWindowIsKey(booleanValue(messageBody));
+        return nullptr;
+    }
+
+    if (WKStringIsEqualToUTF8CString(messageName, "DisconnectFrameInspectorTarget")) {
+        WKPageDisconnectInspectorFrameTargetForTesting(TestController::singleton().mainWebView()->page(), dynamic_wk_cast<WKFrameHandleRef>(messageBody));
         return nullptr;
     }
 
@@ -700,6 +737,15 @@ WKRetainPtr<WKTypeRef> TestInvocation::didReceiveSynchronousMessageFromInjectedB
 
     if (WKStringIsEqualToUTF8CString(messageName, "SetBackgroundFetchPermission")) {
         TestController::singleton().setBackgroundFetchPermission(booleanValue(messageBody));
+        return nullptr;
+    }
+
+    if (WKStringIsEqualToUTF8CString(messageName, "SetVirtualWalletBehavior")) {
+        auto dictionary = dictionaryValue(messageBody);
+        TestController::singleton().setVirtualWalletBehavior(
+            stringValue(dictionary, "Action"),
+            stringValue(dictionary, "Protocol"),
+            stringValue(dictionary, "ResponseJSON"));
         return nullptr;
     }
 
@@ -1271,8 +1317,8 @@ WKRetainPtr<WKTypeRef> TestInvocation::didReceiveSynchronousMessageFromInjectedB
 
     if (WKStringIsEqualToUTF8CString(messageName, "SetPrivateClickMeasurementAttributionReportURLsForTesting")) {
         auto testDictionary = dictionaryValue(messageBody);
-        auto sourceURL = adoptWK(WKURLCreateWithUTF8CString(toWTFString(stringValue(testDictionary, "SourceURLString")).utf8().data()));
-        auto destinationURL = adoptWK(WKURLCreateWithUTF8CString(toWTFString(stringValue(testDictionary, "AttributeOnURLString")).utf8().data()));
+        auto sourceURL = adoptWK(WKURLCreateWithUTF8CString(toWTFString(stringValue(testDictionary, "SourceURLString")).utf8().legacyCStringPointer()));
+        auto destinationURL = adoptWK(WKURLCreateWithUTF8CString(toWTFString(stringValue(testDictionary, "AttributeOnURLString")).utf8().legacyCStringPointer()));
         TestController::singleton().setPrivateClickMeasurementAttributionReportURLsForTesting(sourceURL.get(), destinationURL.get());
         return nullptr;
     }
@@ -1349,12 +1395,12 @@ WKRetainPtr<WKTypeRef> TestInvocation::didReceiveSynchronousMessageFromInjectedB
     }
 
     if (WKStringIsEqualToUTF8CString(messageName, "GetGlobalPrivacyControl")) {
-        bool value = WKPreferencesGetBoolValueForKeyForTesting(TestController::singleton().platformPreferences(), toWK("GlobalPrivacyControlStatus").get());
+        bool value = TestController::singleton().globalPrivacyControl();
         return adoptWK(WKBooleanCreate(value)).leakRef();
     }
 
     if (WKStringIsEqualToUTF8CString(messageName, "SetGlobalPrivacyControl")) {
-        WKPreferencesSetBoolValueForKeyForTesting(TestController::singleton().platformPreferences(), booleanValue(messageBody), toWK("GlobalPrivacyControlStatus").get());
+        TestController::singleton().setGlobalPrivacyControl(booleanValue(messageBody));
         return nullptr;
     }
 
@@ -1466,15 +1512,19 @@ void TestInvocation::setWaitUntilDone(bool waitUntilDone)
         initializeWaitToDumpWatchdogTimerIfNeeded();
 }
 
-bool TestInvocation::resolveNotifyDone()
+bool TestInvocation::resolveNotifyDone(bool canCompleteSynchronously)
 {
     if (!m_waitUntilDone)
         return false;
     m_waitUntilDone = false;
     if (m_options.siteIsolationEnabled()) {
-        m_notifyDoneMessageSent = true;
         // If notifyDone() arrived mid-work-queue, defer it until the queue drains.
-        if (TestController::singleton().useWorkQueue() && !TestController::singleton().workQueueManager().isWorkQueueEmpty())
+        bool deferForWorkQueue = TestController::singleton().useWorkQueue() && !TestController::singleton().workQueueManager().isWorkQueueEmpty();
+        // Complete locally only from the main-frame process with no pending work queue; the bundle handles deferral.
+        if (canCompleteSynchronously && !deferForWorkQueue)
+            return true;
+        m_notifyDoneMessageSent = true;
+        if (deferForWorkQueue)
             m_notifyDoneDeferredForWorkQueue = true;
         else
             postPageMessage("NotifyDone");
@@ -1483,12 +1533,15 @@ bool TestInvocation::resolveNotifyDone()
     return true;
 }
 
-bool TestInvocation::resolveForceImmediateCompletion()
+bool TestInvocation::resolveForceImmediateCompletion(bool canCompleteSynchronously)
 {
     if (!m_waitUntilDone)
         return false;
     m_waitUntilDone = false;
     if (m_options.siteIsolationEnabled()) {
+        // Dump synchronously if the caller hosts the local main frame; otherwise route to the process that does.
+        if (canCompleteSynchronously)
+            return true;
         m_notifyDoneMessageSent = true;
         postPageMessage("ForceImmediateCompletion");
         return false;

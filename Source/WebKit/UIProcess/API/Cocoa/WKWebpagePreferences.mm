@@ -555,14 +555,14 @@ ALLOW_DEPRECATED_IMPLEMENTATIONS_END
     return _websitePolicies->allowPrivacyProxy();
 }
 
-- (void)setGlobalPrivacyControlStatus:(BOOL)enabled
+- (void)setGlobalPrivacyControlEnabled:(BOOL)enabled
 {
-    _websitePolicies->setGlobalPrivacyControlStatus(enabled);
+    _websitePolicies->setGlobalPrivacyControlEnabled(enabled);
 }
 
-- (BOOL)globalPrivacyControlStatus
+- (BOOL)globalPrivacyControlEnabled
 {
-    return protect(*_websitePolicies)->globalPrivacyControlStatus().value_or(false);
+    return protect(*_websitePolicies)->globalPrivacyControlEnabled().value_or(false);
 }
 
 - (_WKWebsiteColorSchemePreference)_colorSchemePreference
@@ -817,14 +817,14 @@ ALLOW_DEPRECATED_IMPLEMENTATIONS_END
     return selectors.autorelease();
 }
 
-- (BOOL)_allowSharedProcess
+- (BOOL)_prefersIsolatedProcess
 {
-    return _websitePolicies->allowSharedProcess();
+    return _websitePolicies->prefersIsolatedProcess();
 }
 
-- (void)_setAllowSharedProcess:(BOOL)allowSharedProcess
+- (void)_setPrefersIsolatedProcess:(BOOL)prefersIsolatedProcess
 {
-    _websitePolicies->setAllowSharedProcess(allowSharedProcess);
+    _websitePolicies->setPrefersIsolatedProcess(prefersIsolatedProcess);
 }
 
 - (BOOL)_pushAndNotificationAPIEnabled

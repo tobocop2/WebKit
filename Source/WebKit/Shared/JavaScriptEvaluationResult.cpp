@@ -38,12 +38,13 @@
 #include "WebFrame.h"
 #include <JavaScriptCore/JSCJSValuePropertyInlines.h>
 #include <JavaScriptCore/JSCellInlines.h>
+#include <JavaScriptCore/JSStringRefCPP.h>
 #include <JavaScriptCore/OpaqueJSString.h>
 #include <WebCore/DOMWrapperWorld.h>
 #include <WebCore/Document.h>
 #include <WebCore/ExceptionDetails.h>
 #include <WebCore/JSWebKitJSHandle.h>
-#include <WebCore/JSWebKitSerializedNode.h>
+#include <WebCore/JSWebKitNodeSnapshot.h>
 #include <WebCore/ScriptWrappableInlines.h>
 #include <WebCore/SerializedScriptValue.h>
 
@@ -303,7 +304,7 @@ bool JavaScriptEvaluationResult::JSExtractor::processContainersWithoutRecursion(
             break;
         case PendingContainer::ContainerType::Array: {
             JSValueRef exception { nullptr };
-            SUPPRESS_UNCOUNTED_ARG JSValueRef lengthPropertyName = JSValueMakeString(context, adopt(JSStringCreateWithUTF8CString("length")).get());
+            SUPPRESS_UNCOUNTED_ARG JSValueRef lengthPropertyName = JSValueMakeString(context, createJSString("length"_s).get());
             JSValueRef lengthValue = JSObjectGetPropertyForKey(context, object, lengthPropertyName, &exception);
             if (exception)
                 return false;
@@ -393,7 +394,7 @@ auto JavaScriptEvaluationResult::JSExtractor::jsValueToExtractedValue(JSGlobalCo
         return makeUniqueRef<JSHandleInfo>(ref->identifier(), world->identifier(), frame->info(), ref->windowFrameIdentifier());
     }
 
-    if (auto* node = dynamicDowncast<JSWebKitSerializedNode>(jsObject)) {
+    if (auto* node = dynamicDowncast<JSWebKitNodeSnapshot>(jsObject)) {
         Ref serializedNode { node->wrapped() };
         return makeUniqueRef<SerializedNode>(serializedNode->serializedNode());
     }

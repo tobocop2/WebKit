@@ -45,6 +45,8 @@
 namespace JSC {
 
 class CodeBlock;
+class CachedSymbolTable;
+class Decoder;
 class SymbolTable;
 struct DebuggerLocation;
 
@@ -64,19 +66,19 @@ static ALWAYS_INLINE int missingSymbolMarker() { return std::numeric_limits<int>
 // idiom: either it is thin, in which case it contains an in-place encoded
 // word that consists of attributes, the index, and a bit saying that it is
 // thin; or it is fat, in which case it contains a pointer to a malloc'd
-// data structure and a bit saying that it is fat. The malloc'd data
-// structure will be malloced a second time upon copy, to preserve the
-// property that in-place edits to SymbolTableEntry do not manifest in any
-// copies. However, the malloc'd FatEntry data structure contains a ref-
-// counted pointer to a shared WatchpointSet. Thus, in-place edits of the
-// WatchpointSet will manifest in all copies. Here's a picture:
+// FatEntry and a bit saying that it is fat. The FatEntry holds the encoded
+// word plus an InlineWatchpointSet, so that a watchable variable costs one
+// extra word until somebody actually adds a Watchpoint to it. CodeBlock
+// metadata and DFG nodes point directly at that InlineWatchpointSet, which is
+// why it lives out-of-line: the FatEntry's address is stable across rehashing
+// of the owning SymbolTable::Map.
 //
-// SymbolTableEntry --> FatEntry --> WatchpointSet
+// SymbolTableEntry --> FatEntry { bits, InlineWatchpointSet }
 //
-// If you make a copy of a SymbolTableEntry, you will have:
-//
-// original: SymbolTableEntry --> FatEntry --> WatchpointSet
-// copy:     SymbolTableEntry --> FatEntry -----^
+// A SymbolTableEntry is move-only, so the FatEntry is never shared. Read the
+// VarOffset and attributes of an entry through SymbolTableEntry::Fast, which
+// is what SymbolTable::get() returns, and use SymbolTable::find() when you
+// need the watchpoint set of an entry.
 
 struct SymbolTableEntry {
     friend class CachedSymbolTableEntry;
@@ -86,7 +88,7 @@ private:
     {
         VarKind kind;
         intptr_t kindBits = bits & KindBitsMask;
-        if (kindBits <= UnwatchableScopeKindBits)
+        if (kindBits == ScopeKindBits)
             kind = VarKind::Scope;
         else if (kindBits == StackKindBits)
             kind = VarKind::Stack;
@@ -97,7 +99,7 @@ private:
     
     static ScopeOffset scopeOffsetFromBits(intptr_t bits)
     {
-        ASSERT((bits & KindBitsMask) <= UnwatchableScopeKindBits);
+        ASSERT((bits & KindBitsMask) == ScopeKindBits);
         return ScopeOffset(static_cast<int>(bits >> FlagBits));
     }
 
@@ -176,14 +178,14 @@ public:
         : m_bits(SlimFlag)
     {
         ASSERT(isValidVarOffset(offset));
-        pack(offset, true, false, false);
+        pack(offset, false, false);
     }
 
     SymbolTableEntry(VarOffset offset, unsigned attributes)
         : m_bits(SlimFlag)
     {
         ASSERT(isValidVarOffset(offset));
-        pack(offset, true, attributes & PropertyAttribute::ReadOnly, attributes & PropertyAttribute::DontEnum);
+        pack(offset, attributes & PropertyAttribute::ReadOnly, attributes & PropertyAttribute::DontEnum);
     }
     
     ~SymbolTableEntry()
@@ -191,10 +193,8 @@ public:
         freeFatEntry();
     }
     
-    SymbolTableEntry(const SymbolTableEntry& other);
-
-    SymbolTableEntry& operator=(const SymbolTableEntry& other);
-
+    SymbolTableEntry(const SymbolTableEntry&) = delete;
+    SymbolTableEntry& operator=(const SymbolTableEntry&) = delete;
 
     SymbolTableEntry(SymbolTableEntry&& other)
         : m_bits(SlimFlag)
@@ -204,6 +204,7 @@ public:
 
     SymbolTableEntry& operator=(SymbolTableEntry&& other)
     {
+        RELEASE_ASSERT(!isFat());
         swap(other);
         return *this;
     }
@@ -225,7 +226,7 @@ public:
     
     bool isWatchable() const
     {
-        return (m_bits & KindBitsMask) == ScopeKindBits && Options::useJIT();
+        return (bits() & KindBitsMask) == ScopeKindBits && Options::useJIT();
     }
     
     // Asserts if the offset is anything but a scope offset. This structures the assertions
@@ -277,15 +278,11 @@ public:
         return bits() & DontEnumFlag;
     }
     
-    void disableWatching(VM& vm)
+    void prepareToWatch()
     {
-        if (WatchpointSet* set = watchpointSet())
-            set->invalidate(vm, "Disabling watching in symbol table");
-        if (varOffset().isScope())
-            pack(varOffset(), false, isReadOnly(), isDontEnum());
+        if (!isFat() && isWatchable())
+            inflate();
     }
-    
-    void prepareToWatch();
     
     // This watchpoint set is initialized clear, and goes through the following state transitions:
     // 
@@ -308,13 +305,13 @@ public:
     // point any write to any of the instances of that variable would fire the watchpoint.
     //
     // Note that watchpointSet() returns nullptr if JIT is disabled.
-    WatchpointSet* watchpointSet()
+    InlineWatchpointSet* watchpointSet()
     {
         if (!isFat())
             return nullptr;
-        return fatEntry()->m_watchpoints.get();
+        return &fatEntry()->m_watchpoints;
     }
-    
+
 private:
     static const intptr_t SlimFlag = 0x1;
     static const intptr_t ReadOnlyFlag = 0x2;
@@ -322,7 +319,6 @@ private:
     static const intptr_t NotNullFlag = 0x8;
     static const intptr_t KindBitsMask = 0x30;
     static const intptr_t ScopeKindBits = 0x00;
-    static const intptr_t UnwatchableScopeKindBits = 0x10;
     static const intptr_t StackKindBits = 0x20;
     static const intptr_t DirectArgumentKindBits = 0x30;
     static const intptr_t FlagBits = 6;
@@ -336,12 +332,10 @@ private:
         }
         
         intptr_t m_bits; // always has FatFlag set and exactly matches what the bits would have been if this wasn't fat.
-        
-        RefPtr<WatchpointSet> m_watchpoints;
+
+        InlineWatchpointSet m_watchpoints { ClearWatchpoint };
     };
-    
-    SymbolTableEntry& copySlow(const SymbolTableEntry&);
-    
+
     bool isFat() const
     {
         return !(m_bits & SlimFlag);
@@ -359,9 +353,7 @@ private:
         return std::bit_cast<FatEntry*>(m_bits);
     }
     
-    FatEntry* inflate();
-    
-    FatEntry* NODELETE inflateSlow();
+    JS_EXPORT_PRIVATE void NODELETE inflate();
     
     ALWAYS_INLINE intptr_t bits() const
     {
@@ -386,7 +378,7 @@ private:
 
     JS_EXPORT_PRIVATE void freeFatEntrySlow();
 
-    void pack(VarOffset offset, bool isWatchable, bool readOnly, bool dontEnum)
+    void pack(VarOffset offset, bool readOnly, bool dontEnum)
     {
         ASSERT(!isFat());
         intptr_t& bitsRef = bits();
@@ -398,10 +390,7 @@ private:
             bitsRef |= DontEnumFlag;
         switch (offset.kind()) {
         case VarKind::Scope:
-            if (isWatchable)
-                bitsRef |= ScopeKindBits;
-            else
-                bitsRef |= UnwatchableScopeKindBits;
+            bitsRef |= ScopeKindBits;
             break;
         case VarKind::Stack:
             bitsRef |= StackKindBits;
@@ -425,6 +414,9 @@ private:
 
 struct SymbolTableIndexHashTraits : HashTraits<SymbolTableEntry> {
     static constexpr DestructionMode needsDestruction = NeedsDestruction;
+
+    using PeekType = SymbolTableEntry::Fast;
+    static PeekType peek(const SymbolTableEntry& entry) { return entry; }
 };
 
 class SymbolTable final : public JSCell {
@@ -459,42 +451,69 @@ public:
 
     inline static Structure* createStructure(VM&, JSGlobalObject*, JSValue);
 
+    // A table decoded from an owned or persistent bytecode cache payload
+    // (Decoder::canDeferIntoPayload), or cloned from one, keeps its entries in the payload until they are first read;
+    // until then m_map is empty. They are decoded only on the mutator, outside GC phases, with m_lock held. A compiler
+    // thread (or heap analysis during marking) holding m_lock therefore sees either the complete map or no entries; the
+    // accessors such a thread may use on a pending table are begin/end/localToEntry (entryFor), and their callers —
+    // Graph::tryGetConstantClosureVar ("no entry" = not a constant; a pending entry cannot be watched),
+    // JSLexicalEnvironment::analyzeHeap, FTL validation — treat "no entries" conservatively. Every other accessor asserts
+    // the entries are in. (DesiredGlobalProperties reads the global lexical environment's table, which never comes from
+    // the cache.)
+    bool hasCachedEntriesPending() const { return !!m_cachedEntries; }
+    void materializeCachedEntriesIfPossible(const ConcurrentJSLockerBase&) const
+    {
+        if (m_cachedEntries) [[unlikely]]
+            const_cast<SymbolTable*>(this)->materializeCachedEntries();
+    }
+    void materializeCachedEntriesIfNeeded(const ConcurrentJSLockerBase& locker) const
+    {
+        materializeCachedEntriesIfPossible(locker);
+        ASSERT(!m_cachedEntries);
+    }
+
     // You must hold the lock until after you're done with the iterator.
-    Map::iterator find(const ConcurrentJSLocker&, UniquedStringImpl* key)
+    Map::iterator find(const ConcurrentJSLocker& locker, UniquedStringImpl* key)
     {
+        materializeCachedEntriesIfNeeded(locker);
         return m_map.find(key);
     }
     
-    Map::iterator find(const GCSafeConcurrentJSLocker&, UniquedStringImpl* key)
+    Map::iterator find(const GCSafeConcurrentJSLocker& locker, UniquedStringImpl* key)
     {
+        materializeCachedEntriesIfNeeded(locker);
         return m_map.find(key);
     }
     
-    SymbolTableEntry get(const ConcurrentJSLocker&, UniquedStringImpl* key);
+    SymbolTableEntry::Fast get(const ConcurrentJSLocker&, UniquedStringImpl* key);
 
-    SymbolTableEntry get(UniquedStringImpl* key);
+    SymbolTableEntry::Fast get(UniquedStringImpl* key);
 
-    SymbolTableEntry inlineGet(const ConcurrentJSLocker&, UniquedStringImpl* key);
+    SymbolTableEntry::Fast inlineGet(const ConcurrentJSLocker&, UniquedStringImpl* key);
 
-    SymbolTableEntry inlineGet(UniquedStringImpl* key);
+    SymbolTableEntry::Fast inlineGet(UniquedStringImpl* key);
     
-    Map::iterator begin(const ConcurrentJSLocker&)
+    Map::iterator begin(const ConcurrentJSLocker& locker)
     {
+        materializeCachedEntriesIfPossible(locker);
         return m_map.begin();
     }
     
-    Map::iterator end(const ConcurrentJSLocker&)
+    Map::iterator end(const ConcurrentJSLocker& locker)
     {
+        materializeCachedEntriesIfPossible(locker);
         return m_map.end();
     }
     
-    Map::iterator end(const GCSafeConcurrentJSLocker&)
+    Map::iterator end(const GCSafeConcurrentJSLocker& locker)
     {
+        materializeCachedEntriesIfPossible(locker);
         return m_map.end();
     }
     
-    size_t size(const ConcurrentJSLocker&) const
+    size_t size(const ConcurrentJSLocker& locker) const
     {
+        materializeCachedEntriesIfNeeded(locker);
         return m_map.size();
     }
     
@@ -553,8 +572,9 @@ public:
     }
     
     template<typename Entry>
-    void add(const ConcurrentJSLocker&, UniquedStringImpl* key, Entry&& entry)
+    void add(const ConcurrentJSLocker& locker, UniquedStringImpl* key, Entry&& entry)
     {
+        materializeCachedEntriesIfNeeded(locker);
         RELEASE_ASSERT(!m_localToEntry);
         didUseVarOffset(entry.varOffset());
         Map::AddResult result = m_map.add(key, std::forward<Entry>(entry));
@@ -566,6 +586,15 @@ public:
     {
         ConcurrentJSLocker locker(m_lock);
         add(locker, key, std::forward<Entry>(entry));
+    }
+
+    template<typename Entry>
+    void set(const ConcurrentJSLocker& locker, UniquedStringImpl* key, Entry&& entry)
+    {
+        materializeCachedEntriesIfNeeded(locker);
+        RELEASE_ASSERT(!m_localToEntry);
+        didUseVarOffset(entry.varOffset());
+        m_map.set(key, std::forward<Entry>(entry));
     }
 
     bool hasPrivateNames() const
@@ -598,23 +627,9 @@ public:
         return false;
     }
 
-    template<typename Entry>
-    void set(const ConcurrentJSLocker&, UniquedStringImpl* key, Entry&& entry)
+    bool contains(const ConcurrentJSLocker& locker, UniquedStringImpl* key)
     {
-        RELEASE_ASSERT(!m_localToEntry);
-        didUseVarOffset(entry.varOffset());
-        m_map.set(key, std::forward<Entry>(entry));
-    }
-    
-    template<typename Entry>
-    void set(UniquedStringImpl* key, Entry&& entry)
-    {
-        ConcurrentJSLocker locker(m_lock);
-        set(locker, key, std::forward<Entry>(entry));
-    }
-    
-    bool contains(const ConcurrentJSLocker&, UniquedStringImpl* key)
-    {
+        materializeCachedEntriesIfNeeded(locker);
         return m_map.contains(key);
     }
     
@@ -686,6 +701,16 @@ public:
     enum class PropagateCloneInvalidationToOriginal : bool { No, Yes };
     SymbolTable* cloneScopePart(VM&, PropagateCloneInvalidationToOriginal);
 
+    // For a clone, when the code it was made for has been generated or decoded again (CodeBlock::setConstantRegisters):
+    // true if cloneScopePart() of `original` would describe the same scope, so environments made by the new code can go
+    // on using this clone and keep notifying the watchpoints that code compiled against the old environments holds.
+    bool isCloneOfScopePartOf(SymbolTable& original);
+    // It is `original`'s clone from then on.
+    void adoptOriginal(VM&, SymbolTable& original);
+    SymbolTable* clonedFrom() const { return m_clonedFrom.get(); }
+    // Otherwise nothing will notify this clone again: whatever was inferred through it is given up.
+    void invalidateInferencesOfAbandonedClone(VM&);
+
     void prepareForTypeProfiling(const ConcurrentJSLocker&);
 
     String NODELETE inferredName();
@@ -701,10 +726,10 @@ public:
     DECLARE_EXPORT_INFO;
 
 #if ASSERT_ENABLED
-    bool hasScopedWatchpointSet(WatchpointSet*);
+    bool hasScopedWatchpointSet(InlineWatchpointSet*);
 #endif
 
-    void finalizeUnconditionally(VM&, CollectionScope);
+    void reconcileWeakReferencesAtGCEnd(VM&, CollectionScope);
     void dump(PrintStream&) const;
 
     struct SymbolTableRareData {
@@ -731,6 +756,11 @@ private:
     DECLARE_DEFAULT_FINISH_CREATION;
     JS_EXPORT_PRIVATE SymbolTableRareData& ensureRareDataSlow();
 
+    // `record` is inside decoder's payload; scopePartOnly makes the eventual decode keep only VarKind::Scope entries
+    // (what cloneScopePart copies).
+    void setCachedEntries(Decoder&, const CachedSymbolTable* record, bool scopePartOnly);
+    JS_EXPORT_PRIVATE void materializeCachedEntries(); // Caller holds m_lock.
+
     Map m_map;
     ScopeOffset m_maxScopeOffset;
 public:
@@ -741,8 +771,11 @@ private:
     unsigned m_nestedLexicalScope : 1; // Non-function LexicalScope.
     unsigned m_scopeType : 3; // ScopeType
     PropagateCloneInvalidationToOriginal m_propagateCloneInvalidationToOriginal : 1 { PropagateCloneInvalidationToOriginal::No };
+    unsigned m_cachedEntriesScopePartOnly : 1 { 0 };
 
     std::unique_ptr<SymbolTableRareData> m_rareData;
+    RefPtr<Decoder> m_cachedEntriesDecoder;
+    const CachedSymbolTable* m_cachedEntries { nullptr }; // See hasCachedEntriesPending().
 
     WriteBarrier<ScopedArgumentsTable> m_arguments;
     WriteBarrier<SymbolTable> m_clonedFrom;

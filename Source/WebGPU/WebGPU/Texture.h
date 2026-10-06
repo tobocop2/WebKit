@@ -31,8 +31,10 @@
 #import <wtf/FastMalloc.h>
 #import <wtf/HashMap.h>
 #import <wtf/HashSet.h>
+#import <wtf/Lock.h>
 #import <wtf/Ref.h>
 #import <wtf/RefCountedAndCanMakeWeakPtr.h>
+#import <wtf/Seconds.h>
 #import <wtf/SwiftBridging.h>
 #import <wtf/TZoneMalloc.h>
 #import <wtf/Vector.h>
@@ -84,7 +86,7 @@ public:
     static bool NODELETE isValidDepthStencilCopySource(WGPUTextureFormat, WGPUTextureAspect);
     static bool NODELETE isValidDepthStencilCopyDestination(WGPUTextureFormat, WGPUTextureAspect);
     static NSString* errorValidatingLinearTextureData(const WGPUTextureDataLayout&, uint64_t, WGPUTextureFormat, WGPUExtent3D);
-    static MTLTextureUsage NODELETE usage(WGPUTextureUsageFlags, WGPUTextureFormat);
+    static MTLTextureUsage NODELETE usage(WGPUTextureUsage, WGPUTextureFormat);
     static MTLPixelFormat NODELETE pixelFormat(WGPUTextureFormat);
     static WGPUTextureFormat NODELETE textureFormat(MTLPixelFormat);
     static std::optional<MTLPixelFormat> NODELETE depthOnlyAspectMetalFormat(WGPUTextureFormat);
@@ -116,7 +118,7 @@ public:
     uint32_t sampleCount() const { return m_sampleCount; }
     WGPUTextureDimension dimension() const { return m_dimension; }
     WGPUTextureFormat format() const { return m_format; }
-    WGPUTextureUsageFlags usage() const { return m_usage; }
+    WGPUTextureUsage usage() const { return m_usage; }
 
     Device& device() const { return m_device; }
 
@@ -130,13 +132,16 @@ public:
     static bool supportsMultisampling(WGPUTextureFormat, const Device&);
     static bool supportsResolve(WGPUTextureFormat, const Device&);
     static bool supportsBlending(WGPUTextureFormat, const Device&);
-    void NODELETE recreateIfNeeded();
+    void recreateIfNeeded();
     void NODELETE makeCanvasBacking();
     void setCommandEncoder(CommandEncoder&) const;
     static ASCIILiteral formatToString(WGPUTextureFormat);
     bool isCanvasBacking() const { return m_canvasBacking; }
 
     bool waitForCommandBufferCompletion();
+    void recordGPUExecutionWindow(double startTime, double endTime) const;
+    Seconds gpuFrameCost() const;
+    void resetGPUFrameCost() const;
     void NODELETE updateCompletionEvent(const std::pair<id<MTLSharedEvent>, uint64_t>&);
     id<MTLSharedEvent> NODELETE sharedEvent() const;
     uint64_t NODELETE sharedEventSignalValue() const;
@@ -169,7 +174,7 @@ private:
     const uint32_t m_sampleCount { 0 };
     const WGPUTextureDimension m_dimension { WGPUTextureDimension_2D };
     const WGPUTextureFormat m_format { WGPUTextureFormat_Undefined };
-    const WGPUTextureUsageFlags m_usage { WGPUTextureUsage_None };
+    const WGPUTextureUsage m_usage { WGPUTextureUsage_None };
 
     const Vector<WGPUTextureFormat> m_viewFormats;
 
@@ -180,11 +185,13 @@ private:
     Vector<WeakPtr<TextureView>> m_textureViews;
     bool m_destroyed { false };
     bool m_canvasBacking { false };
+    mutable Lock m_gpuFrameCostLock;
+    mutable double m_gpuFrameCostSeconds WTF_GUARDED_BY_LOCK(m_gpuFrameCostLock) { 0 };
     id<MTLSharedEvent> m_sharedEvent { nil };
     std::pair<id<MTLRasterizationRateMap>, id<MTLRasterizationRateMap>> m_leftRightRasterizationMaps;
 
     uint64_t m_sharedEventSignalValue { 0 };
-} SWIFT_SHARED_REFERENCE(refTexture, derefTexture);
+} SWIFT_SHARED_REFERENCE(refTexture, derefTexture) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
 
 } // namespace WebGPU
 

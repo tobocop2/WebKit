@@ -29,13 +29,15 @@
 
 #import "ClassMethodSwizzler.h"
 #import "Helpers/cocoa/DragAndDropSimulator.h"
+#import "Helpers/cocoa/HTTPServer.h"
 #import "Helpers/cocoa/ModelLoadingMessageHandler.h"
 #import "Helpers/cocoa/NSItemProviderAdditions.h"
 #import "Helpers/PlatformUtilities.h"
-#import "TestURLSchemeHandler.h"
+#import "Helpers/cocoa/TestNavigationDelegate.h"
 #import "Helpers/cocoa/TestWKWebView.h"
-#import "UIKitSPIForTesting.h"
 #import "Helpers/cocoa/WKWebViewConfigurationExtras.h"
+#import "TestURLSchemeHandler.h"
+#import "UIKitSPIForTesting.h"
 #import <Contacts/Contacts.h>
 #import <MapKit/MapKit.h>
 #import <MobileCoreServices/MobileCoreServices.h>
@@ -50,6 +52,7 @@
 #import <WebKit/_WKProcessPoolConfiguration.h>
 #import <wtf/Seconds.h>
 #import <wtf/SoftLinking.h>
+#import <wtf/text/MakeString.h>
 
 #if USE(BROWSERENGINEKIT)
 #import <BrowserEngineKit/BrowserEngineKit.h>
@@ -303,7 +306,7 @@ TEST(DragAndDropTests, ImageInLinkToInput)
     [simulator runFrom:CGPointMake(100, 50) to:CGPointMake(100, 300)];
 
     EXPECT_WK_STREQ("https://www.apple.com/", [webView editorValue].UTF8String);
-    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(2069, 170, 2, 240), [simulator finalSelectionStartRect]);
+    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(2069, 170, 2, 239), [simulator finalSelectionStartRect]);
     checkSuggestedNameAndEstimatedSize(simulator.get(), @"icon.png", { 215, 174 });
     checkTypeIdentifierIsRegisteredAtIndex(simulator.get(), UTTypePNG.identifier, 0);
     EXPECT_TRUE([simulator lastKnownDropProposal].precise);
@@ -372,7 +375,7 @@ TEST(DragAndDropTests, ContentEditableToContentEditable)
     EXPECT_TRUE([observedEventNames containsObject:@"dragenter"]);
     EXPECT_TRUE([observedEventNames containsObject:@"dragover"]);
     EXPECT_TRUE([observedEventNames containsObject:@"drop"]);
-    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(960, 205, 2, 223), [simulator finalSelectionStartRect]);
+    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(960, 204, 2, 221), [simulator finalSelectionStartRect]);
     checkRichTextTypePrecedesPlainTextType(simulator.get());
     EXPECT_TRUE([simulator lastKnownDropProposal].precise);
     EXPECT_TRUE([[[simulator sourceItemProviders].firstObject registeredTypeIdentifiers] containsObject:UTTypeWebArchive.identifier]);
@@ -393,7 +396,7 @@ TEST(DragAndDropTests, ContentEditableToTextarea)
     EXPECT_TRUE([observedEventNames containsObject:@"dragenter"]);
     EXPECT_TRUE([observedEventNames containsObject:@"dragover"]);
     EXPECT_TRUE([observedEventNames containsObject:@"drop"]);
-    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(1033, 203, 2, 240), [simulator finalSelectionStartRect]);
+    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(1033, 203, 2, 238), [simulator finalSelectionStartRect]);
     checkRichTextTypePrecedesPlainTextType(simulator.get());
     EXPECT_TRUE([simulator lastKnownDropProposal].precise);
 }
@@ -449,7 +452,7 @@ TEST(DragAndDropTests, ContentEditableMoveParagraphs)
     EXPECT_FALSE(firstParagraphOffset == NSNotFound);
     EXPECT_FALSE(secondParagraphOffset == NSNotFound);
     EXPECT_GT(firstParagraphOffset, secondParagraphOffset);
-    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(251, 220, 2, 20), [simulator finalSelectionStartRect]);
+    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(251, 209, 2, 19), [simulator finalSelectionStartRect]);
     EXPECT_TRUE([simulator lastKnownDropProposal].precise);
 }
 
@@ -474,7 +477,7 @@ TEST(DragAndDropTests, TextAreaToInput)
 
     EXPECT_EQ([webView stringByEvaluatingJavaScript:@"source.value"].length, 0UL);
     EXPECT_WK_STREQ("Hello world", [webView editorValue].UTF8String);
-    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(1033, 170, 2, 240), [simulator finalSelectionStartRect]);
+    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(1033, 170, 2, 239), [simulator finalSelectionStartRect]);
 }
 
 TEST(DragAndDropTests, SinglePlainTextWordTypeIdentifiers)
@@ -543,7 +546,7 @@ TEST(DragAndDropTests, LinkToInput)
     EXPECT_TRUE([observedEventNames containsObject:@"drop"]);
     auto selectionRectWithRoundedWidth = [simulator finalSelectionStartRect];
     selectionRectWithRoundedWidth.size.width = std::round(selectionRectWithRoundedWidth.size.width);
-    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(2069, 202, 2, 240), selectionRectWithRoundedWidth);
+    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(2069, 199, 2, 239), selectionRectWithRoundedWidth);
     checkTypeIdentifierIsRegisteredAtIndex(simulator.get(), UTTypeURL.identifier, 0);
 }
 
@@ -561,7 +564,7 @@ TEST(DragAndDropTests, BackgroundImageLinkToInput)
     EXPECT_TRUE([observedEventNames containsObject:@"dragenter"]);
     EXPECT_TRUE([observedEventNames containsObject:@"dragover"]);
     EXPECT_TRUE([observedEventNames containsObject:@"drop"]);
-    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(2069, 170, 2, 240), [simulator finalSelectionStartRect]);
+    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(2069, 170, 2, 239), [simulator finalSelectionStartRect]);
     checkTypeIdentifierIsRegisteredAtIndex(simulator.get(), UTTypeURL.identifier, 0);
 }
 
@@ -1000,7 +1003,7 @@ TEST(DragAndDropTests, ExternalSourceUTF8PlainTextOnly)
     [simulator setExternalItemProviders:@[ simulatedItemProvider.get() ]];
     [simulator runFrom:CGPointMake(300, 400) to:CGPointMake(100, 300)];
     EXPECT_WK_STREQ(textPayload.UTF8String, [webView stringByEvaluatingJavaScript:@"editor.textContent"].UTF8String);
-    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(1935, 205, 2, 223), [simulator finalSelectionStartRect]);
+    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(1935, 204, 2, 221), [simulator finalSelectionStartRect]);
 }
 
 TEST(DragAndDropTests, ExternalSourceJPEGOnly)
@@ -1020,7 +1023,7 @@ TEST(DragAndDropTests, ExternalSourceJPEGOnly)
     [simulator setExternalItemProviders:@[ simulatedItemProvider.get() ]];
     [simulator runFrom:CGPointMake(300, 400) to:CGPointMake(100, 300)];
     EXPECT_TRUE([webView editorContainsImageElement]);
-    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(214, 201, 2, 223), [simulator finalSelectionStartRect]);
+    checkCGRectIsEqualToCGRectWithLogging(CGRectMake(214, 201, 2, 222), [simulator finalSelectionStartRect]);
 }
 
 TEST(DragAndDropTests, ExternalSourceTitledNSURL)
@@ -2420,6 +2423,148 @@ TEST(DragAndDropTests, DragEnterAndLeaveRelatedTarget)
     EXPECT_WK_STREQ("null", [webView stringByEvaluatingJavaScript:@"enterARelatedTarget"]);
     EXPECT_WK_STREQ("zoneB", [webView stringByEvaluatingJavaScript:@"leaveARelatedTarget"]);
     EXPECT_WK_STREQ("zoneA", [webView stringByEvaluatingJavaScript:@"enterBRelatedTarget"]);
+}
+
+struct NestedFrameDragResult {
+    NSUInteger itemProviderCount { 0 };
+    RetainPtr<NSString> draggedURL;
+};
+
+static void enableSiteIsolation(WKWebViewConfiguration *configuration)
+{
+    for (_WKFeature *feature in [WKPreferences _features]) {
+        if ([feature.key isEqualToString:@"SiteIsolationEnabled"])
+            [[configuration preferences] _setEnabled:YES forFeature:feature];
+    }
+}
+
+static NestedFrameDragResult dragLinkInIframeNestedInOffsetSubframe(ASCIILiteral innerFrameSource)
+{
+    HTTPServer server({
+        { "/main"_s, { "<meta name='viewport' content='width=device-width, initial-scale=1'><body style='margin: 0'><iframe style='position: absolute; left: 100px; top: 150px; width: 400px; height: 400px; border: none;' src='https://example.com/samesite-subframe'></iframe></body>"_s } },
+        { "/samesite-subframe"_s, { makeString("<body style='margin: 0'><iframe style='position: absolute; left: 0; top: 0; width: 400px; height: 400px; border: none;' src='"_s, innerFrameSource, "'></iframe></body>"_s) } },
+        { "/inner"_s, { "<body style='margin: 0'>"
+            "<a href='https://first.example/' style='display: block; position: absolute; left: 0; top: 0; width: 300px; height: 50px; background: silver;'>First</a>"
+            "<a href='https://second.example/' style='display: block; position: absolute; left: 0; top: 150px; width: 300px; height: 50px; background: gray;'>Second</a>"
+            "<script>window.webkit.messageHandlers.testHandler.postMessage('inner frame loaded')</script>"
+            "</body>"_s } }
+    }, HTTPServer::Protocol::HttpsProxy);
+
+    RetainPtr configuration = server.httpsProxyConfiguration();
+    enableSiteIsolation(configuration.get());
+
+    RetainPtr navigationDelegate = adoptNS([TestNavigationDelegate new]);
+    [navigationDelegate allowAnyTLSCertificate];
+    RetainPtr webView = adoptNS([[TestWKWebView alloc] initWithFrame:CGRectMake(0, 0, 800, 600) configuration:configuration.get()]);
+    webView.get().navigationDelegate = navigationDelegate.get();
+
+    // The handler has to be registered before the load, otherwise the inner frame runs its script
+    // before window.webkit.messageHandlers.testHandler exists.
+    __block bool innerFrameLoaded = false;
+    [webView performAfterReceivingMessage:@"inner frame loaded" action:^{
+        innerFrameLoaded = true;
+    }];
+    [webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"https://example.com/main"]]];
+    TestWebKitAPI::Util::run(&innerFrameLoaded);
+
+    RetainPtr simulator = adoptNS([[DragAndDropSimulator alloc] initWithWebView:webView.get()]);
+    // (150, 175) in the window is (50, 25) in the innermost frame, inside "first". Applying the
+    // subframe's (100, 150) offset a second time lands on (150, 175) there, inside "second".
+    [simulator runFrom:CGPointMake(150, 175) to:CGPointMake(150, 500)];
+
+    NestedFrameDragResult result;
+    result.itemProviderCount = [simulator sourceItemProviders].count;
+    if (!result.itemProviderCount)
+        return result;
+
+    __block bool doneLoadingURL = false;
+    __block RetainPtr<NSURL> draggedURL;
+    [[simulator sourceItemProviders].firstObject loadObjectOfClass:[NSURL class] completionHandler:^(id object, NSError *error) {
+        draggedURL = (NSURL *)object;
+        doneLoadingURL = true;
+    }];
+    TestWebKitAPI::Util::run(&doneLoadingURL);
+    result.draggedURL = [draggedURL absoluteString];
+    return result;
+}
+
+TEST(DragAndDropTests, DragLinkInSameSiteIframeInsideOffsetSameSiteSubframe)
+{
+    // Same geometry without a remote frame: if this fails too, the harness is at fault rather than
+    // the cross-process point conversion.
+    auto result = dragLinkInIframeNestedInOffsetSubframe("https://example.com/inner"_s);
+    EXPECT_EQ(1UL, result.itemProviderCount);
+    EXPECT_WK_STREQ("https://first.example/", [result.draggedURL UTF8String] ?: "");
+}
+
+TEST(DragAndDropTests, DragLinkInCrossOriginIframeInsideOffsetSameSiteSubframe)
+{
+    auto result = dragLinkInIframeNestedInOffsetSubframe("https://webkit.org/inner"_s);
+    EXPECT_EQ(1UL, result.itemProviderCount);
+    EXPECT_WK_STREQ("https://first.example/", [result.draggedURL UTF8String] ?: "");
+}
+
+// Drags out of an iframe offset by (100, 150) and reports the dragstart event's
+// "screenX,screenY screenX-clientX,screenY-clientY". On iOS screenX/screenY are a point in the
+// top-level page's root view, so the difference against clientX/clientY must be the iframe's offset
+// no matter which process the frame runs in. Comparing two values from the same event keeps this
+// independent of the position adjustment nodeRespondingToClickEvents() applies.
+static RetainPtr<NSString> dragStartScreenCoordinatesInOffsetIframe(ASCIILiteral innerFrameSource)
+{
+    HTTPServer server({
+        { "/main"_s, { makeString("<meta name='viewport' content='width=device-width, initial-scale=1'><body style='margin: 0'><iframe style='position: absolute; left: 100px; top: 150px; width: 400px; height: 400px; border: none;' src='"_s, innerFrameSource, "'></iframe></body>"_s) } },
+        { "/inner"_s, { "<body style='margin: 0'>"
+            "<a href='https://first.example/' style='display: block; position: absolute; left: 0; top: 0; width: 300px; height: 200px; background: silver;'>First</a>"
+            "<script>"
+            "addEventListener('dragstart', (event) => {"
+            "    window.webkit.messageHandlers.testHandler.postMessage("
+            "        `${event.screenX},${event.screenY} ${event.screenX - event.clientX},${event.screenY - event.clientY}`);"
+            "});"
+            "window.webkit.messageHandlers.testHandler.postMessage('inner frame loaded');"
+            "</script>"
+            "</body>"_s } }
+    }, HTTPServer::Protocol::HttpsProxy);
+
+    RetainPtr configuration = server.httpsProxyConfiguration();
+    enableSiteIsolation(configuration.get());
+
+    RetainPtr navigationDelegate = adoptNS([TestNavigationDelegate new]);
+    [navigationDelegate allowAnyTLSCertificate];
+    RetainPtr webView = adoptNS([[TestWKWebView alloc] initWithFrame:CGRectMake(0, 0, 800, 600) configuration:configuration.get()]);
+    webView.get().navigationDelegate = navigationDelegate.get();
+
+    __block bool innerFrameLoaded = false;
+    [webView performAfterReceivingMessage:@"inner frame loaded" action:^{
+        innerFrameLoaded = true;
+    }];
+    [webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"https://example.com/main"]]];
+    TestWebKitAPI::Util::run(&innerFrameLoaded);
+
+    // Registered only now so that it cannot catch the load notification above.
+    __block bool receivedCoordinates = false;
+    __block RetainPtr<NSString> coordinates;
+    [webView performAfterReceivingAnyMessage:^(NSString *message) {
+        coordinates = message;
+        receivedCoordinates = true;
+    }];
+
+    RetainPtr simulator = adoptNS([[DragAndDropSimulator alloc] initWithWebView:webView.get()]);
+    // (150, 200) in the window is (50, 50) in the iframe, inside the link.
+    [simulator runFrom:CGPointMake(150, 200) to:CGPointMake(150, 500)];
+    TestWebKitAPI::Util::run(&receivedCoordinates);
+    return coordinates;
+}
+
+TEST(DragAndDropTests, DragStartScreenCoordinatesInSameSiteOffsetIframe)
+{
+    // Same geometry without a remote frame: screenX/screenY were this frame's contents coordinates
+    // here too, so the difference collapsed to 0,0 rather than the iframe's offset.
+    EXPECT_WK_STREQ("150,200 100,150", [dragStartScreenCoordinatesInOffsetIframe("https://example.com/inner"_s) UTF8String] ?: "");
+}
+
+TEST(DragAndDropTests, DragStartScreenCoordinatesInCrossOriginOffsetIframe)
+{
+    EXPECT_WK_STREQ("150,200 100,150", [dragStartScreenCoordinatesInOffsetIframe("https://webkit.org/inner"_s) UTF8String] ?: "");
 }
 
 } // namespace TestWebKitAPI

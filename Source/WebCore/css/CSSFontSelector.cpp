@@ -188,6 +188,9 @@ void CSSFontSelector::addFontFaceRule(StyleRuleFontFace& fontFaceRule, bool isIn
     RefPtr rangeList = downcast<CSSValueList>(unicodeRange.get());
     RefPtr featureSettings = style->getPropertyCSSValue(CSSPropertyFontFeatureSettings);
     RefPtr display = style->getPropertyCSSValue(CSSPropertyFontDisplay);
+    RefPtr ascentOverride = style->getPropertyCSSValue(CSSPropertyAscentOverride);
+    RefPtr descentOverride = style->getPropertyCSSValue(CSSPropertyDescentOverride);
+    RefPtr lineGapOverride = style->getPropertyCSSValue(CSSPropertyLineGapOverride);
     RefPtr sizeAdjust = style->getPropertyCSSValue(CSSPropertySizeAdjust);
     if (!fontFamily || !srcList || (unicodeRange && !rangeList))
         return;
@@ -211,6 +214,12 @@ void CSSFontSelector::addFontFaceRule(StyleRuleFontFace& fontFaceRule, bool isIn
         fontFace->setFeatureSettings(*featureSettings);
     if (display)
         fontFace->setDisplay(*display);
+    if (ascentOverride)
+        fontFace->setAscentOverride(*ascentOverride);
+    if (descentOverride)
+        fontFace->setDescentOverride(*descentOverride);
+    if (lineGapOverride)
+        fontFace->setLineGapOverride(*lineGapOverride);
     if (sizeAdjust)
         fontFace->setSizeAdjust(*sizeAdjust);
 
@@ -333,7 +342,7 @@ void CSSFontSelector::fontCacheInvalidated()
 
 std::optional<AtomString> CSSFontSelector::resolveGenericFamily(const FontDescription& fontDescription, const AtomString& familyName)
 {
-    auto platformResult = FontDescription::platformResolveGenericFamily(fontDescription.script(), fontDescription.computedLocale(), familyName);
+    auto platformResult = FontDescription::platformResolveGenericFamily(fontDescription.script(), fontDescription.usedLocale(), familyName);
     if (!platformResult.isNull())
         return platformResult;
 
@@ -355,12 +364,12 @@ std::optional<AtomString> CSSFontSelector::resolveGenericFamily(const FontDescri
 const FontPaletteValues& CSSFontSelector::lookupFontPaletteValues(const AtomString& familyName, const FontDescription& fontDescription) const
 {
     static NeverDestroyed<FontPaletteValues> emptyFontPaletteValues;
-    if (fontDescription.fontPalette().type != FontPalette::Type::Custom)
+
+    auto paletteName = fontDescription.fontPalette().ident();
+    if (!paletteName)
         return emptyFontPaletteValues.get();
 
-    const AtomString paletteName = fontDescription.fontPalette().identifier;
-
-    auto iterator = m_paletteMap.find(std::make_pair(familyName, paletteName));
+    auto iterator = m_paletteMap.find(std::make_pair(familyName, *paletteName));
     if (iterator == m_paletteMap.end())
         return emptyFontPaletteValues.get();
 

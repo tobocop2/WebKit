@@ -91,10 +91,11 @@ struct _WPESettingsPrivate {
         static const std::vector<Setting> defaultSettings = {
             { WPE_SETTING_FONT_NAME, G_VARIANT_TYPE_STRING, g_variant_ref_sink(g_variant_new_string("Sans 10")) },
             { WPE_SETTING_DARK_MODE, G_VARIANT_TYPE_BOOLEAN, g_variant_ref_sink(g_variant_new_boolean(false)) },
-            { WPE_SETTING_DISABLE_ANIMATIONS, G_VARIANT_TYPE_BOOLEAN, g_variant_ref_sink(g_variant_new_boolean(false)) },
+            { WPE_SETTING_REDUCED_MOTION, G_VARIANT_TYPE_BOOLEAN, g_variant_ref_sink(g_variant_new_boolean(false)) },
+            { WPE_SETTING_INTERFACE_CONTRAST, G_VARIANT_TYPE_BYTE, g_variant_ref_sink(g_variant_new_byte(WPE_SETTINGS_INTERFACE_CONTRAST_NO_PREFERENCE)) },
             { WPE_SETTING_FONT_ANTIALIAS, G_VARIANT_TYPE_BOOLEAN, g_variant_ref_sink(g_variant_new_boolean(true)) },
             { WPE_SETTING_FONT_HINTING_STYLE, G_VARIANT_TYPE_BYTE, g_variant_ref_sink(g_variant_new_byte(WPE_SETTINGS_HINTING_STYLE_SLIGHT)) },
-            { WPE_SETTING_FONT_SUBPIXEL_LAYOUT, G_VARIANT_TYPE_BYTE, g_variant_ref_sink(g_variant_new_byte(WPE_SETTINGS_SUBPIXEL_LAYOUT_RGB)) },
+            { WPE_SETTING_FONT_SUBPIXEL_LAYOUT, G_VARIANT_TYPE_BYTE, g_variant_ref_sink(g_variant_new_byte(WPE_SETTINGS_SUBPIXEL_LAYOUT_NONE)) },
             { WPE_SETTING_FONT_DPI, G_VARIANT_TYPE_DOUBLE, g_variant_ref_sink(g_variant_new_double(96.0)) },
             { WPE_SETTING_KEY_REPEAT_DELAY, G_VARIANT_TYPE_UINT32, g_variant_ref_sink(g_variant_new_uint32(400)) },
             { WPE_SETTING_KEY_REPEAT_INTERVAL, G_VARIANT_TYPE_UINT32, g_variant_ref_sink(g_variant_new_uint32(80)) },
@@ -130,7 +131,7 @@ static void wpe_settings_class_init(WPESettingsClass* settingsClass)
      * @key: the key that changed
      * @value: the new value
      *
-     * Emitted when a settings is changed.
+     * Emitted when a setting is changed.
      * It will contain a detail of the specific key that changed.
      */
     signals[CHANGED] = g_signal_new(
@@ -144,13 +145,13 @@ static void wpe_settings_class_init(WPESettingsClass* settingsClass)
         G_TYPE_VARIANT);
 }
 
-static CString makeKeyPath(const char* group, const char* key)
+static UTF8CString makeKeyPath(const char* group, const char* key)
 {
-    std::span<char> buffer;
+    std::span<char8_t> buffer;
     size_t length = strlen(group) + strlen(key) + 3;
 
-    CString path = CString::newUninitialized(length - 1, buffer);
-    g_snprintf(buffer.data(), length, "/%s/%s", group, key);
+    auto path = UTF8CString::newUninitialized(length - 1, buffer);
+    g_snprintf(byteCast<char>(buffer).data(), length, "/%s/%s", group, key);
 
     return path;
 }
@@ -232,14 +233,14 @@ gboolean wpe_settings_load_from_keyfile(WPESettings* settingsObject, GKeyFile* k
             auto path = makeKeyPath(group, key);
             auto iter = settingsObject->priv->settings.find(path);
             if (iter == settingsObject->priv->settings.end()) {
-                g_set_error(error, WPE_SETTINGS_ERROR, WPE_SETTINGS_ERROR_NOT_REGISTERED, "Key %s not registered", path.data());
+                g_set_error(error, WPE_SETTINGS_ERROR, WPE_SETTINGS_ERROR_NOT_REGISTERED, "Key %s not registered", path.legacyCStringPointer());
                 return FALSE;
             }
 
             GUniqueOutPtr<GError> innerError;
             GRefPtr<GVariant> parsedValue = adoptGRef(g_variant_parse(iter->value.type.get(), value.get(), nullptr, nullptr, &innerError.outPtr()));
             if (!parsedValue) {
-                g_set_error(error, WPE_SETTINGS_ERROR, WPE_SETTINGS_ERROR_INVALID_VALUE, "Failed to parse value for key %s: %s", path.data(), innerError->message);
+                g_set_error(error, WPE_SETTINGS_ERROR, WPE_SETTINGS_ERROR_INVALID_VALUE, "Failed to parse value for key %s: %s", path.legacyCStringPointer(), innerError->message);
                 return FALSE;
             }
 
@@ -247,7 +248,7 @@ gboolean wpe_settings_load_from_keyfile(WPESettings* settingsObject, GKeyFile* k
                 continue;
 
             iter->value.setValue = WTF::move(parsedValue);
-            g_signal_emit(settingsObject, signals[CHANGED], g_quark_from_string(path.data()), path.data(), iter->value.setValue.get());
+            g_signal_emit(settingsObject, signals[CHANGED], g_quark_from_string(path.legacyCStringPointer()), path.legacyCStringPointer(), iter->value.setValue.get());
         }
     }
 

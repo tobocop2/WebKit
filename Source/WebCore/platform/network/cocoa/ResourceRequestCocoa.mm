@@ -42,10 +42,6 @@
 #import <wtf/cocoa/VectorCocoa.h>
 #import <wtf/text/CString.h>
 
-#if USE(APPLE_INTERNAL_SDK) && __has_include(<WebKitAdditions/ResourceRequestCocoaAdditions.mm>)
-#import <WebKitAdditions/ResourceRequestCocoaAdditions.mm>
-#endif
-
 namespace WebCore {
 
 ResourceRequest::ResourceRequest(NSURLRequest *nsRequest)
@@ -300,8 +296,7 @@ void ResourceRequest::doUpdatePlatformRequest()
     [nsRequest setHTTPShouldHandleCookies:allowCookies()];
 
     [nsRequest _setProperty:RetainPtr { siteForCookies(m_requestData.m_sameSiteDisposition, retainPtr([nsRequest URL]).get()) }.get() forKey:@"_kCFHTTPCookiePolicyPropertySiteForCookies"];
-    // FIXME: This is a safer cpp false positive (rdar://160851489).
-    SUPPRESS_UNRETAINED_ARG [nsRequest _setProperty:m_requestData.m_isTopSite ? @YES : @NO forKey:@"_kCFHTTPCookiePolicyPropertyIsTopLevelNavigation"];
+    [nsRequest _setProperty:m_requestData.m_isTopSite ? @YES : @NO forKey:@"_kCFHTTPCookiePolicyPropertyIsTopLevelNavigation"];
 
     // Cannot just use setAllHTTPHeaderFields here, because it does not remove headers.
     for (NSString *oldHeaderName in [nsRequest allHTTPHeaderFields])

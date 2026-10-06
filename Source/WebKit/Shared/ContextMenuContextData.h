@@ -126,6 +126,7 @@ public:
     bool isServicesMenu() const { return m_type == ContextMenuContextData::Type::ServicesMenu; }
     bool NODELETE controlledDataIsEditable() const;
     WebCore::IntRect controlledImageBounds() const { return m_controlledImageBounds; };
+    void setControlledImageBounds(WebCore::IntRect bounds) { m_controlledImageBounds = bounds; }
     String controlledImageAttachmentID() const { return m_controlledImageAttachmentID; };
     std::optional<WebCore::ElementContext> controlledImageElementContext() const { return m_controlledImageElementContext; }
     String controlledImageMIMEType() const { return m_controlledImageMIMEType; }
@@ -174,8 +175,8 @@ private:
 #endif
 
 #if ENABLE(CONTEXT_MENU_QR_CODE_DETECTION)
-    void setPotentialQRCodeNodeSnapshotImage(WebCore::Image&);
-    void setPotentialQRCodeViewportSnapshotImage(WebCore::Image&);
+    void setPotentialQRCodeNodeSnapshotImage(WebCore::BitmapImage&);
+    void setPotentialQRCodeViewportSnapshotImage(WebCore::BitmapImage&);
 
     RefPtr<WebCore::ShareableBitmap> m_potentialQRCodeNodeSnapshotImage;
     RefPtr<WebCore::ShareableBitmap> m_potentialQRCodeViewportSnapshotImage;

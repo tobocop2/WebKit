@@ -63,8 +63,8 @@ enum class WasPrivateRelayed : bool { No, Yes };
 static constexpr unsigned bitWidthOfWasPrivateRelayed = 1;
 static_assert(static_cast<unsigned>(WasPrivateRelayed::Yes) <= ((1U << bitWidthOfWasPrivateRelayed) - 1));
 
-static constexpr unsigned bitWidthOfIPAddressSpace = 1;
-static_assert(static_cast<unsigned>(IPAddressSpace::Local) <= ((1U << bitWidthOfIPAddressSpace) - 1));
+static constexpr unsigned bitWidthOfIPAddressSpace = 2;
+static_assert(((1U << bitWidthOfIPAddressSpace) - 1) >= static_cast<unsigned>(IPAddressSpace::Unknown));
 
 enum class ResourceResponseBaseType : uint8_t { Basic, Cors, Default, Error, Opaque, Opaqueredirect };
 enum class ResourceResponseBaseTainting : uint8_t { Basic, Cors, Opaque, Opaqueredirect };
@@ -129,6 +129,8 @@ public:
     WEBCORE_EXPORT void addHTTPHeaderField(const String& name, const String& value);
     WEBCORE_EXPORT void addUncommonHTTPHeaderField(const String& name, const String& value);
 
+    WEBCORE_EXPORT void removeHTTPHeaderField(HTTPHeaderName);
+
     // Instead of passing a string literal to any of these functions, just use a HTTPHeaderName instead.
     template<size_t length> String httpHeaderField(ASCIILiteral) const = delete;
     template<size_t length> void setHTTPHeaderField(ASCIILiteral, const String&) = delete;
@@ -153,7 +155,7 @@ public:
     void setProxyName(String&& proxyName) { m_proxyName = WTF::move(proxyName); }
     const String& proxyName() const LIFETIME_BOUND { return m_proxyName; }
 
-    IPAddressSpace ipAddressSpace() { return m_ipAddressSpace; }
+    IPAddressSpace ipAddressSpace() const { return m_ipAddressSpace; }
     void setIPAddressSpace(IPAddressSpace ipAddressSpace) { m_ipAddressSpace = ipAddressSpace; }
 
     // These functions return parsed values of the corresponding response headers.
@@ -180,9 +182,9 @@ public:
         m_source = source;
     }
 
-    // FIXME: This should be eliminated from ResourceResponse.
-    // Network loading metrics should be delivered via didFinishLoad
-    // and should not be part of the ResourceResponse.
+    // FIXME <webkit.org/b/324751>: This should be eliminated from
+    // ResourceResponse. Network loading metrics should be delivered via
+    // didFinishLoading and should not be part of the ResourceResponse.
     const NetworkLoadMetrics* deprecatedNetworkLoadMetricsOrNull() const LIFETIME_BOUND
     {
         if (m_networkLoadMetrics)
@@ -297,7 +299,7 @@ private:
     Tainting m_tainting : bitWidthOfTainting { Tainting::Basic };
     Source m_source : bitWidthOfSource { Source::Unknown };
     Type m_type : bitWidthOfType { Type::Default };
-    IPAddressSpace m_ipAddressSpace : bitWidthOfIPAddressSpace { IPAddressSpace::Public };
+    IPAddressSpace m_ipAddressSpace : bitWidthOfIPAddressSpace { IPAddressSpace::Unknown };
 
 };
 
@@ -307,7 +309,7 @@ struct ResourceResponseData {
     ResourceResponseData() = default;
     ResourceResponseData(ResourceResponseData&&) = default;
     ResourceResponseData& operator=(ResourceResponseData&&) = default;
-    ResourceResponseData(URL&& url, String&& mimeType, long long expectedContentLength, String&& textEncodingName, int httpStatusCode, String&& httpStatusText, String&& httpVersion, HTTPHeaderMap&& httpHeaderFields, std::optional<NetworkLoadMetrics>&& networkLoadMetrics, ResourceResponseSource source, ResourceResponseBaseType type, ResourceResponseBaseTainting tainting, bool isRedirected, UsedLegacyTLS usedLegacyTLS, WasPrivateRelayed wasPrivateRelayed, String&& proxyName, bool isRangeRequested, std::optional<CertificateInfo> certificateInfo, IPAddressSpace ipAddressSpace)
+    ResourceResponseData(URL&& url, String&& mimeType, long long expectedContentLength, String&& textEncodingName, int httpStatusCode, String&& httpStatusText, String&& httpVersion, HTTPHeaderMap&& httpHeaderFields, std::optional<NetworkLoadMetrics>&& networkLoadMetrics, ResourceResponseSource source, ResourceResponseBaseType type, ResourceResponseBaseTainting tainting, bool isRedirected, UsedLegacyTLS usedLegacyTLS, WasPrivateRelayed wasPrivateRelayed, String&& proxyName, bool isRangeRequested, std::optional<CertificateInfo>&& certificateInfo, IPAddressSpace ipAddressSpace)
         : url(WTF::move(url))
         , mimeType(WTF::move(mimeType))
         , expectedContentLength(expectedContentLength)
@@ -325,7 +327,7 @@ struct ResourceResponseData {
         , wasPrivateRelayed(wasPrivateRelayed)
         , proxyName(WTF::move(proxyName))
         , isRangeRequested(isRangeRequested)
-        , certificateInfo(certificateInfo)
+        , certificateInfo(WTF::move(certificateInfo))
         , ipAddressSpace(ipAddressSpace)
     {
     }
@@ -392,6 +394,16 @@ template<> struct EnumTraitsForPersistence<WebCore::ResourceResponseBase::Source
         WebCore::ResourceResponseBase::Source::LegacyApplicationCachePlaceholder,
         WebCore::ResourceResponseBase::Source::DOMCache,
         WebCore::ResourceResponseBase::Source::InspectorOverride
+    >;
+};
+
+template<> struct EnumTraitsForPersistence<WebCore::IPAddressSpace> {
+    using values = EnumValues<
+        WebCore::IPAddressSpace,
+        WebCore::IPAddressSpace::Public,
+        WebCore::IPAddressSpace::Local,
+        WebCore::IPAddressSpace::Loopback,
+        WebCore::IPAddressSpace::Unknown
     >;
 };
 

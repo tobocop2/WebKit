@@ -124,7 +124,7 @@ void GPUProcess::createGPUConnectionToWebProcess(WebCore::ProcessIdentifier iden
 #if ENABLE(MEDIA_STREAM)
     // FIXME: We should refactor code to go from WebProcess -> GPUProcess -> UIProcess when getUserMedia is called instead of going from WebProcess -> UIProcess directly.
     auto access = m_mediaCaptureAccessMap.take(identifier);
-    newConnection->updateCaptureAccess(access.allowAudioCapture, access.allowVideoCapture, access.allowDisplayCapture);
+    newConnection->updateCaptureAccess(access.allowAudioCapture, access.allowVideoCapture, access.allowDisplayCapture, access.willUseEchoCancellation);
     newConnection->setOrientationForMediaCapture(m_orientation);
 #endif
 
@@ -144,11 +144,21 @@ void GPUProcess::sharedPreferencesForWebProcessDidChange(WebCore::ProcessIdentif
     completionHandler();
 }
 
+void GPUProcess::securityFlagsDidChange(SecurityFlags&& securityFlags)
+{
+    m_securityFlags.replaceWith(securityFlags);
+}
+
 void GPUProcess::removeGPUConnectionToWebProcess(GPUConnectionToWebProcess& connection)
 {
     RELEASE_LOG(Process, "%p - GPUProcess::removeGPUConnectionToWebProcess: processIdentifier=%" PRIu64, this, connection.webProcessIdentifier().toUInt64());
     ASSERT(m_webProcessConnections.contains(connection.webProcessIdentifier()));
     m_webProcessConnections.remove(connection.webProcessIdentifier());
+
+    removeTransferredImageBuffersForProcess(connection.webProcessIdentifier());
+
+    recomputeNowPlayingOwner();
+
     tryExitIfUnusedAndUnderMemoryPressure();
 }
 
@@ -222,16 +232,17 @@ void GPUProcess::initializeGPUProcess(GPUProcessCreationParameters&& parameters,
     CompletionHandlerCallingScope callCompletionHandler(WTF::move(completionHandler));
 
     applyProcessCreationParameters(WTF::move(parameters.auxiliaryProcessParameters));
+    m_securityFlags.replaceWith(parameters.securityFlags);
     RELEASE_LOG(Process, "%p - GPUProcess::initializeGPUProcess:", this);
     WTF::Thread::setCurrentThreadIsUserInitiated();
     WebCore::initializeCommonAtomStrings();
 
-    Ref memoryPressureHandler = MemoryPressureHandler::singleton();
-    memoryPressureHandler->setLowMemoryHandler([weakThis = WeakPtr { *this }] (Critical critical, Synchronous synchronous) {
+    auto& memoryPressureHandler = MemoryPressureHandler::singleton();
+    memoryPressureHandler.setLowMemoryHandler([weakThis = WeakPtr { *this }] (Critical critical, Synchronous synchronous) {
         if (RefPtr process = weakThis.get())
             process->lowMemoryHandler(critical, synchronous);
     });
-    memoryPressureHandler->install();
+    memoryPressureHandler.install();
 
 #if PLATFORM(IOS_FAMILY) || ENABLE(ROUTING_ARBITRATION)
     DeprecatedGlobalSettings::setShouldManageAudioSessionCategory(true);
@@ -277,6 +288,10 @@ CoreAudioCaptureUnit::defaultSingleton().setStatusBarWasTappedCallback([weakProc
 
     if (!parameters.overrideLanguages.isEmpty())
         overrideUserPreferredLanguages(parameters.overrideLanguages);
+
+#if ENABLE(VIDEO) || ENABLE(WEB_AUDIO)
+    m_nowPlayingFallbackSession = parameters.nowPlayingFallbackSession;
+#endif
 
 #if USE(OS_STATE)
     registerWithStateDumper("GPUProcess state"_s);
@@ -352,11 +367,296 @@ GPUConnectionToWebProcess* GPUProcess::webProcessConnection(WebCore::ProcessIden
     return m_webProcessConnections.get(identifier);
 }
 
+static bool isPreferredNowPlayingCandidate(const WebCore::NowPlayingCandidateState& candidate, const WebCore::NowPlayingCandidateState& incumbent)
+{
+    // Mirrors the logic in PlatformMediaSessionManager::bestEligibleSessionForRemoteControls +
+    // HTMLMediaElement::selectBestMediaSession:
+    bool candidateIsAudioVideo = candidate.presentationType != WebCore::PlatformMediaSessionMediaType::WebAudio;
+    bool incumbentIsAudioVideo = incumbent.presentationType != WebCore::PlatformMediaSessionMediaType::WebAudio;
+    if (candidateIsAudioVideo != incumbentIsAudioVideo)
+        return candidateIsAudioVideo;
+
+    if (candidateIsAudioVideo) {
+        if (candidate.isLargeEnoughForMainContent != incumbent.isLargeEnoughForMainContent)
+            return candidate.isLargeEnoughForMainContent;
+        return candidate.mostRecentUserInteractionTime.value_or(WallTime { }) > incumbent.mostRecentUserInteractionTime.value_or(WallTime { });
+    }
+
+    if (candidate.isPlaying != incumbent.isPlaying)
+        return candidate.isPlaying;
+    return false;
+}
+
+namespace {
+
+enum class NowPlayingSeatRole : bool { EligibleOwner, CommandOnly };
+
+struct NowPlayingSeat {
+    WebCore::ProcessIdentifier process;
+    NowPlayingSeatRole role;
+
+    friend bool operator==(const NowPlayingSeat&, const NowPlayingSeat&) = default;
+};
+
+}
+
+void GPUProcess::recomputeNowPlayingOwner()
+{
+    RefPtr<GPUConnectionToWebProcess> winningConnection;
+    std::optional<NowPlayingCandidateState> winnerState;
+    std::optional<PageIdentifier> winnerPage;
+
+    // Seed with the current owner so that equal candidates keep the incumbent, since the candidates are stored in
+    // a HashMap whose iteration order is not stable.
+    if (m_activeNowPlayingOwner) {
+        if (RefPtr connection = webProcessConnection(m_activeNowPlayingOwner->process)) {
+            auto it = connection->nowPlayingCandidates().find(m_activeNowPlayingOwner->page);
+            if (it != connection->nowPlayingCandidates().end() && it->value->state) {
+                winningConnection = connection;
+                winnerState = *it->value->state;
+                winnerPage = m_activeNowPlayingOwner->page;
+            }
+        }
+    }
+
+    for (Ref connection : m_webProcessConnections.values()) {
+        for (auto& entry : connection->nowPlayingCandidates()) {
+            if (!entry.value->state)
+                continue;
+            if (!winnerState || isPreferredNowPlayingCandidate(*entry.value->state, *winnerState)) {
+                winningConnection = connection.ptr();
+                winnerState = *entry.value->state;
+                winnerPage = entry.key;
+            }
+        }
+    }
+
+    RefPtr<GPUConnectionToWebProcess> seatedConnection;
+    std::optional<NowPlayingOwner> eligibleOwner;
+    std::optional<QualifiedMediaSessionIdentifier> commandTarget;
+
+    if (winnerState) {
+        seatedConnection = winningConnection;
+        eligibleOwner = NowPlayingOwner { winningConnection->webProcessIdentifier(), *winnerPage, winnerState->sessionIdentifier };
+        commandTarget = QualifiedMediaSessionIdentifier { winnerState->sessionIdentifier, winningConnection->webProcessIdentifier() };
+    } else if (m_nowPlayingFallbackSession) {
+        if (RefPtr connection = webProcessConnection(m_nowPlayingFallbackSession->processIdentifier())) {
+            seatedConnection = connection;
+            commandTarget = m_nowPlayingFallbackSession;
+        }
+    }
+
+    // A single connection is the NowPlayingManager client at a time: the elected owner (which also drives the
+    // NowPlaying panel and audio session) or, when no session is eligible, a command-only fallback that receives
+    // remote commands but shows no panel. Track the seated process and role so an unrelated recompute does not
+    // churn a fallback client's remote-command listener.
+    std::optional<NowPlayingSeat> previousSeat;
+    if (m_remoteCommandTarget) {
+        auto previousRole = m_activeNowPlayingOwner ? NowPlayingSeatRole::EligibleOwner : NowPlayingSeatRole::CommandOnly;
+        previousSeat = NowPlayingSeat { m_remoteCommandTarget->processIdentifier(), previousRole };
+    }
+    std::optional<NowPlayingSeat> newSeat;
+    if (seatedConnection) {
+        auto newRole = eligibleOwner ? NowPlayingSeatRole::EligibleOwner : NowPlayingSeatRole::CommandOnly;
+        newSeat = NowPlayingSeat { seatedConnection->webProcessIdentifier(), newRole };
+    }
+
+    if (eligibleOwner) {
+        // Add the new owner as the client before resigning the previous one so the panel never blanks between
+        // owners (NowPlayingManager::removeClient no-ops once m_client has been replaced). This also refreshes the
+        // owner's NowPlayingInfo, so it runs even when the seat is unchanged.
+        seatedConnection->becomeNowPlayingOwner(eligibleOwner->page);
+        if (previousSeat && previousSeat->process != seatedConnection->webProcessIdentifier()) {
+            if (RefPtr previous = webProcessConnection(previousSeat->process))
+                previous->resignNowPlayingManagerClient();
+        }
+    } else if (newSeat != previousSeat) {
+        // No eligible session. Resign the previous client first so an owner->fallback transition drops the stale
+        // panel, then seat the UI process's current session (if any) as a command-only client. Skipped entirely
+        // when it is already the command-only client, so its remote-command listener is not destroyed and recreated.
+        if (previousSeat) {
+            if (RefPtr previous = webProcessConnection(previousSeat->process))
+                previous->resignNowPlayingManagerClient();
+        }
+        if (seatedConnection)
+            seatedConnection->becomeRemoteCommandFallbackTarget();
+    }
+
+    auto ownerPage = [&]() -> std::optional<QualifiedPageIdentifier> {
+        if (!eligibleOwner)
+            return std::nullopt;
+        return QualifiedPageIdentifier { eligibleOwner->page, eligibleOwner->process };
+    }();
+    auto previousOwnerPage = [&]() -> std::optional<QualifiedPageIdentifier> {
+        if (!m_activeNowPlayingOwner)
+            return std::nullopt;
+        return QualifiedPageIdentifier { m_activeNowPlayingOwner->page, m_activeNowPlayingOwner->process };
+    }();
+
+    m_activeNowPlayingOwner = eligibleOwner;
+    m_remoteCommandTarget = commandTarget;
+
+    // The UI process owns the per-page "is the NowPlaying session" state, so it hears the election result
+    // directly rather than through the content processes, none of which can see the whole picture.
+    if (ownerPage != previousOwnerPage)
+        protect(parentProcessConnection())->send(Messages::GPUProcessProxy::NowPlayingOwnerDidChange(ownerPage), 0);
+}
+
+void GPUProcess::setNowPlayingFallbackSession(std::optional<WebCore::QualifiedMediaSessionIdentifier> session)
+{
+    m_nowPlayingFallbackSession = session;
+
+    // The fallback is only consulted when the election has no eligible owner, and every change to the candidates
+    // recomputes on its own, so an owner means this cannot change the outcome.
+    if (m_activeNowPlayingOwner)
+        return;
+
+    recomputeNowPlayingOwner();
+}
+
+void GPUProcess::withdrawNowPlayingCandidate(WebCore::QualifiedPageIdentifier page)
+{
+    // Sent by the UI process when a page commits a new main-frame load. The page re-enters the election on
+    // its next candidate push if it still has an eligible session.
+    if (RefPtr connection = webProcessConnection(page.processIdentifier()))
+        connection->clearNowPlayingInfoForPage(page.object());
+}
+
+void GPUProcess::nowPlayingClientDidClose(WebCore::ProcessIdentifier process)
+{
+    if (m_nowPlayingFallbackSession && m_nowPlayingFallbackSession->processIdentifier() == process)
+        m_nowPlayingFallbackSession = std::nullopt;
+    if (m_remoteCommandTarget && m_remoteCommandTarget->processIdentifier() == process)
+        m_remoteCommandTarget = std::nullopt;
+
+    recomputeNowPlayingOwner();
+}
+
+std::optional<MediaSessionIdentifier> GPUProcess::remoteCommandTargetSessionInProcess(ProcessIdentifier process) const
+{
+    if (!m_remoteCommandTarget)
+        return std::nullopt;
+
+    // The caller is the NowPlayingManager client, which is always the target's own process; the bare
+    // MediaSessionIdentifier is only meaningful there.
+    ASSERT(m_remoteCommandTarget->processIdentifier() == process);
+    if (m_remoteCommandTarget->processIdentifier() != process) {
+        RELEASE_LOG_ERROR(Media, "GPUProcess::remoteCommandTargetSessionInProcess: command target belongs to another process; delivering nothing rather than a cross-process identifier");
+        return std::nullopt;
+    }
+
+    return m_remoteCommandTarget->object();
+}
+
 void GPUProcess::updateSandboxAccess(const Vector<SandboxExtension::Handle>& extensions)
 {
     RELEASE_LOG(WebRTC, "GPUProcess::updateSandboxAccess: Adding %zu extensions", extensions.size());
     for (auto& extension : extensions)
         SandboxExtension::consumePermanently(extension);
+}
+
+void GPUProcess::authorizeImageBufferTransfers(Vector<WebCore::ImageBufferTransferIdentifier>&& identifiers, WebCore::ProcessIdentifier destinationProcess, CompletionHandler<void()>&& completionHandler)
+{
+    {
+        Locker locker(m_globalResourceLocker);
+        HashSet<WebCore::ImageBufferTransferIdentifier> awaitingDeposit;
+        for (auto identifier : identifiers) {
+            // The entry need not exist yet: the deposit runs on the depositing process's rendering
+            // backend work queue and can still be in flight. Recording the new owner up front means
+            // the deposit lands in an already-handed-over entry instead of being missed.
+            auto& transferred = m_transferredImageBuffers.add(identifier, TransferredImageBuffer { }).iterator->value;
+            transferred.owner = destinationProcess;
+            if (!transferred.imageBuffer)
+                awaitingDeposit.add(identifier);
+        }
+        if (!awaitingDeposit.isEmpty()) {
+            m_pendingImageBufferTransferAuthorizations.append(PendingImageBufferTransferAuthorization {
+                WTF::move(awaitingDeposit), WTF::move(completionHandler)
+            });
+            return;
+        }
+    }
+    // Replied to so the broker can hold the message back until the handover has happened. The
+    // recipient's claims arrive on its own connection and could otherwise overtake it.
+    completionHandler();
+}
+
+Vector<CompletionHandler<void()>> GPUProcess::takeSettledImageBufferTransferAuthorizations(NOESCAPE const Function<void(HashSet<WebCore::ImageBufferTransferIdentifier>&)>& prune)
+{
+    Vector<CompletionHandler<void()>> settled;
+    m_pendingImageBufferTransferAuthorizations.removeAllMatching([&](auto& authorization) {
+        prune(authorization.awaitingDeposit);
+        if (!authorization.awaitingDeposit.isEmpty())
+            return false;
+        settled.append(WTF::move(authorization.completionHandler));
+        return true;
+    });
+    return settled;
+}
+
+bool GPUProcess::depositTransferredImageBuffer(WebCore::ImageBufferTransferIdentifier identifier, WebCore::ProcessIdentifier owner, Ref<WebCore::ImageBuffer>&& imageBuffer)
+{
+    Vector<CompletionHandler<void()>> settledAuthorizations;
+    {
+        Locker locker(m_globalResourceLocker);
+        auto& transferred = m_transferredImageBuffers.add(identifier, TransferredImageBuffer { }).iterator->value;
+        if (transferred.imageBuffer)
+            return false;
+        // An authorization that arrived first has already handed the buffer on; the depositing
+        // process only owns it until then.
+        if (!transferred.owner)
+            transferred.owner = owner;
+        transferred.imageBuffer = WTF::move(imageBuffer);
+        settledAuthorizations = takeSettledImageBufferTransferAuthorizations([&](auto& awaitingDeposit) {
+            awaitingDeposit.remove(identifier);
+        });
+    }
+    // Deposits arrive on a rendering backend work queue, but the reply belongs to a message this
+    // process received on the main run loop.
+    for (auto& completionHandler : settledAuthorizations)
+        ensureOnMainRunLoop([completionHandler = WTF::move(completionHandler)] mutable { completionHandler(); });
+    return true;
+}
+
+RefPtr<WebCore::ImageBuffer> GPUProcess::takeTransferredImageBuffer(WebCore::ImageBufferTransferIdentifier identifier, WebCore::ProcessIdentifier claimingProcess)
+{
+    Locker locker(m_globalResourceLocker);
+    auto iterator = m_transferredImageBuffers.find(identifier);
+    if (iterator == m_transferredImageBuffers.end())
+        return nullptr;
+    if (iterator->value.owner != claimingProcess)
+        return nullptr;
+    RefPtr imageBuffer = WTF::move(iterator->value.imageBuffer);
+    m_transferredImageBuffers.remove(iterator);
+    return imageBuffer;
+}
+
+void GPUProcess::removeTransferredImageBuffersForProcess(WebCore::ProcessIdentifier processIdentifier)
+{
+    Vector<CompletionHandler<void()>> abandonedAuthorizations;
+    {
+        Locker locker(m_globalResourceLocker);
+        m_transferredImageBuffers.removeIf([&](auto& entry) {
+            // Keyed on the owner: once ownership has moved on, the depositing process going away
+            // must not take the buffer from the process it was handed to.
+            if (entry.value.owner == processIdentifier)
+                return true;
+            // A deposit this process still owed will never arrive now, so the placeholder an
+            // authorization left behind would otherwise be kept forever.
+            return !entry.value.imageBuffer && entry.key.processIdentifier() == processIdentifier;
+        });
+
+        // Stop holding authorizations back on deposits that can no longer arrive, so the broker
+        // delivers the message rather than never replying to it. The recipient's claim then fails
+        // and it sees a null ImageBitmap.
+        abandonedAuthorizations = takeSettledImageBufferTransferAuthorizations([&](auto& awaitingDeposit) {
+            awaitingDeposit.removeIf([&](auto identifier) {
+                return identifier.processIdentifier() == processIdentifier;
+            });
+        });
+    }
+    for (auto& completionHandler : abandonedAuthorizations)
+        completionHandler();
 }
 
 Ref<RemoteSnapshot> GPUProcess::getOrCreateSnapshot(RemoteSnapshotIdentifier snapshotIdentifier)
@@ -385,11 +685,13 @@ void GPUProcess::sinkCompletedSnapshotToPDF(RemoteSnapshotIdentifier identifier,
     if (!snapshot->isComplete()) {
         // Currently the callbacks ensure the completeness.
         ASSERT_NOT_REACHED();
+        completionHandler({ });
         return;
     }
     auto result = snapshot->drawToPDF(size, rootFrameIdentifier);
     if (!result) {
         ASSERT_NOT_REACHED();
+        completionHandler({ });
         return;
     }
     completionHandler(WTF::move(*result));
@@ -412,6 +714,7 @@ void GPUProcess::sinkCompletedSnapshotToBitmap(RemoteSnapshotIdentifier identifi
     if (!snapshot->isComplete()) {
         // Currently the callbacks ensure the completeness.
         ASSERT_NOT_REACHED();
+        completionHandler({ });
         return;
     }
     completionHandler(snapshot->drawToBitmap(size, rootFrameIdentifier));
@@ -453,23 +756,24 @@ void GPUProcess::rotationAngleForCaptureDeviceChanged(const String& persistentId
         connection->rotationAngleForCaptureDeviceChanged(persistentId, rotation);
 }
 
-void GPUProcess::updateCaptureAccess(bool allowAudioCapture, bool allowVideoCapture, bool allowDisplayCapture, WebCore::ProcessIdentifier processID, CompletionHandler<void()>&& completionHandler)
+void GPUProcess::updateCaptureAccess(bool allowAudioCapture, bool allowVideoCapture, bool allowDisplayCapture, bool willUseEchoCancellation, WebCore::ProcessIdentifier processID, CompletionHandler<void()>&& completionHandler)
 {
-    RELEASE_LOG(WebRTC, "GPUProcess::updateCaptureAccess: Entering (audio=%d, video=%d, display=%d)", allowAudioCapture, allowVideoCapture, allowDisplayCapture);
+    RELEASE_LOG(WebRTC, "GPUProcess::updateCaptureAccess: Entering (audio=%d, video=%d, display=%d, echoCancellation=%d)", allowAudioCapture, allowVideoCapture, allowDisplayCapture, willUseEchoCancellation);
 
 #if ENABLE(MEDIA_STREAM) && PLATFORM(COCOA)
     ensureAVCaptureServerConnection();
 #endif
 
     if (RefPtr connection = webProcessConnection(processID)) {
-        connection->updateCaptureAccess(allowAudioCapture, allowVideoCapture, allowDisplayCapture);
+        connection->updateCaptureAccess(allowAudioCapture, allowVideoCapture, allowDisplayCapture, willUseEchoCancellation);
         return completionHandler();
     }
 
-    auto& access = m_mediaCaptureAccessMap.add(processID, MediaCaptureAccess { allowAudioCapture, allowVideoCapture, allowDisplayCapture }).iterator->value;
+    auto& access = m_mediaCaptureAccessMap.add(processID, MediaCaptureAccess { allowAudioCapture, allowVideoCapture, allowDisplayCapture, willUseEchoCancellation }).iterator->value;
     access.allowAudioCapture |= allowAudioCapture;
     access.allowVideoCapture |= allowVideoCapture;
     access.allowDisplayCapture |= allowDisplayCapture;
+    access.willUseEchoCancellation = willUseEchoCancellation;
 
     completionHandler();
 }
@@ -630,9 +934,9 @@ void GPUProcess::webProcessConnectionCountForTesting(CompletionHandler<void(uint
     completionHandler(GPUConnectionToWebProcess::objectCountForTesting());
 }
 
-void GPUProcess::terminateWebProcess(WebCore::ProcessIdentifier identifier)
+void GPUProcess::terminateWebProcess(WebCore::ProcessIdentifier identifier, IPC::MessageName invalidMessageName)
 {
-    protect(parentProcessConnection())->send(Messages::GPUProcessProxy::TerminateWebProcess(identifier), 0);
+    protect(parentProcessConnection())->send(Messages::GPUProcessProxy::TerminateWebProcess(identifier, invalidMessageName), 0);
 }
 
 #if PLATFORM(COCOA) && ENABLE(MEDIA_STREAM)

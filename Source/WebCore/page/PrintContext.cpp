@@ -38,6 +38,7 @@
 #include "Settings.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "StyleDocumentScope.h"
+#include "StylePrimitiveNumericTypes+Evaluation.h"
 #include "StyleResolver.h"
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/MakeString.h>
@@ -398,23 +399,20 @@ String PrintContext::pageProperty(LocalFrame* frame, const String& propertyName,
         return autoAtom();
     }
     if (propertyName == "line-height"_s) {
-        return WTF::switchOn(style->lineHeight(),
+        return WTF::switchOn(style->textAutosizingAdjustedLineHeight(),
             [&](const CSS::Keyword::Normal&) -> String {
                 return "0"_s;
             },
-            [&](const Style::LineHeight::Fixed& fixed) -> String {
-                return makeString(fixed.resolveZoom(style->usedZoomForLength()));
+            [&](const Style::LineHeight::Length& length) -> String {
+                return makeString(length.resolveZoom(style->usedZoomForLength()));
             },
-            [&](const Style::LineHeight::Percentage& percentage) -> String {
-                return makeString(percentage.value);
-            },
-            [&](const Style::LineHeight::Calc&) -> String {
-                return "0"_s;
+            [&](const Style::LineHeight::Number& number) -> String {
+                return makeString(number.value);
             }
         );
     }
     if (propertyName == "font-size"_s)
-        return makeString(style->fontDescription().computedSize());
+        return makeString(style->fontDescription().usedSize());
     if (propertyName == "font-family"_s)
         return style->fontDescription().firstFamily().name;
     if (propertyName == "size"_s) {
@@ -429,7 +427,11 @@ String PrintContext::pageProperty(LocalFrame* frame, const String& propertyName,
                 return "portrait"_s;
             },
             [&](const Style::PageSize::Lengths& lengths) {
-                return makeString(lengths.width().resolveZoom(Style::ZoomNeeded { }), ' ', lengths.height().resolveZoom(Style::ZoomNeeded { }));
+                return makeString(
+                    Style::evaluate<float>(lengths.width(), Style::ZoomFactor::none()),
+                    ' ',
+                    Style::evaluate<float>(lengths.height(), Style::ZoomFactor::none())
+                );
             }
         );
     }

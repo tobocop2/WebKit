@@ -22,6 +22,7 @@
 
 #pragma once
 
+#include <WebCore/FloatPoint3D.h>
 #include <WebCore/PaintPhase.h>
 #include <WebCore/RenderElement.h>
 #include <wtf/OptionSet.h>
@@ -39,11 +40,26 @@ class RenderSVGResourceMarker;
 class RenderSVGResourceMasker;
 class RenderSVGResourcePaintServer;
 class SVGGraphicsElement;
+class SVGPaintServerCache;
+enum class SVGPaintType : bool;
 
 namespace Style {
 struct SVGMarkerResource;
+struct SVGPaint;
 enum class TransformResolverOption : uint8_t;
 }
+
+enum class ContentChangeType : uint8_t {
+    Image,
+    HDRImage,
+    MaskImage,
+    BackgroundImage,
+    Canvas,
+    CanvasPixels,
+    Video,
+    FullScreen,
+    Model
+};
 
 class RenderLayerModelObject : public RenderElement {
     WTF_MAKE_TZONE_ALLOCATED(RenderLayerModelObject);
@@ -62,13 +78,9 @@ public:
     virtual bool requiresLayer() const = 0;
     bool requiresLayerForSVGIntrinsicReasons() const;
 
-    // Returns true if the background is painted opaque in the given rect.
-    // The query rect is given in local coordinate system.
-    virtual bool backgroundIsKnownToBeOpaqueInRect(const LayoutRect&) const { return false; }
-
     // Returns false if the rect has no intersection with the applied clip rect. When the context specifies edge-inclusive
     // intersection, this return value allows distinguishing between no intersection and zero-area intersection.
-    virtual bool applyCachedClipAndScrollPosition(RepaintRects&, const RenderLayerModelObject*, VisibleRectContext) const;
+    virtual bool applyCachedClipAndScrollPosition(RepaintRects&, const RenderLayerModelObject*, const VisibleRectContext&) const;
 
     virtual bool isScrollableOrRubberbandableBox() const { return false; }
 
@@ -81,23 +93,24 @@ public:
     void animationFinished(const BlendingKeyframes&) override;
     void transformRelatedPropertyDidChange() override;
 
-    void suspendAnimations(MonotonicTime = MonotonicTime()) override;
-
     // Single source of truth deciding if a SVG renderer should be painted. All SVG renderers
     // use this method to test if they should continue processing in the paint() function or stop.
     bool shouldPaintSVGRenderer(const PaintInfo&, const OptionSet<PaintPhase> relevantPaintPhases = OptionSet<PaintPhase>()) const;
 
     // Provides the SVG implementation for computeVisibleRectsInContainer().
     // This lives in RenderLayerModelObject, which is the common base-class for all SVG renderers.
-    std::optional<RepaintRects> computeVisibleRectsInSVGContainer(const RepaintRects&, const RenderLayerModelObject* container, VisibleRectContext) const;
+    std::optional<RepaintRects> computeVisibleRectsInSVGContainer(const RepaintRects&, const RenderLayerModelObject* container, const VisibleRectContext&, VisibleRectState) const;
 
     // Provides the SVG implementation for mapLocalToContainer().
     // This lives in RenderLayerModelObject, which is the common base-class for all SVG renderers.
     void mapLocalToSVGContainer(const RenderLayerModelObject* ancestorContainer, TransformState&, OptionSet<MapCoordinatesMode>, bool* wasFixed) const;
 
     void applySVGTransform(TransformationMatrix&, const SVGGraphicsElement&, const Style::ComputedStyle&, const FloatRect& boundingBox, const std::optional<AffineTransform>& preApplySVGTransformMatrix, const std::optional<AffineTransform>& postApplySVGTransformMatrix, OptionSet<Style::TransformResolverOption>) const;
+    void applySVGTransform(TransformationMatrix&, const AffineTransform& svgTransform, const AffineTransform* supplementalTransform, const Style::ComputedStyle&, const FloatRect& boundingBox, const std::optional<AffineTransform>& preApplySVGTransformMatrix, const std::optional<AffineTransform>& postApplySVGTransformMatrix, OptionSet<Style::TransformResolverOption>) const;
     void updateHasSVGTransformFlags();
     virtual bool needsHasSVGTransformFlags() const { ASSERT_NOT_REACHED(); return false; }
+
+    virtual std::optional<FloatPoint3D> cachedTransformOriginForReferenceBox(const Style::ComputedStyle&, const FloatRect&) const { return std::nullopt; }
 
     enum class SVGAttributeChangeRepaintMode : bool {
         // Issue a full repaint at the new position from inside the function.
@@ -116,6 +129,8 @@ public:
 
     RenderSVGResourcePaintServer* svgFillPaintServerResourceFromStyle(const Style::ComputedStyle&) const;
     RenderSVGResourcePaintServer* svgStrokePaintServerResourceFromStyle(const Style::ComputedStyle&) const;
+
+    void invalidateSVGPaintServerCache() const;
 
     RenderSVGResourceClipper* svgClipperResourceFromStyle() const;
     RenderSVGResourceFilter* svgFilterResourceFromStyle() const;
@@ -154,6 +169,10 @@ public:
 
     AffineTransform computeRendererTransform() const;
 
+    void contentChanged(ContentChangeType, const std::optional<FloatRect>& = std::nullopt);
+
+    bool hasAcceleratedCompositing() const;
+
 protected:
     RenderLayerModelObject(Type, Element&, Style::ComputedStyle&&, OptionSet<TypeFlag>, TypeSpecificFlags);
     RenderLayerModelObject(Type, Document&, Style::ComputedStyle&&, OptionSet<TypeFlag>, TypeSpecificFlags);
@@ -168,6 +187,10 @@ private:
     void removeOnlyThisLayerWithRepaint();
 
     RenderSVGResourceMarker* svgMarkerResourceFromStyle(const Style::SVGMarkerResource&) const;
+
+    RenderSVGResourcePaintServer* svgPaintServerResourceFromStyle(const Style::SVGPaint&, const Style::ComputedStyle&, SVGPaintType) const;
+
+    virtual SVGPaintServerCache* svgPaintServerCache() const { return nullptr; }
 
     UniquelyOwnedPtr<RenderLayer> m_layer;
 

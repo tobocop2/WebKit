@@ -3,6 +3,7 @@
  * Copyright (C) 2007 Justin Haygood <jhaygood@reaktix.com>
  * Copyright (C) 2011 Research In Motion Limited. All rights reserved.
  * Copyright (C) 2017 Yusuke Suzuki <utatane.tea@gmail.com>
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -35,9 +36,12 @@
 #if USE(PTHREADS)
 
 #include <errno.h>
+#include <time.h>
+#include <wtf/Logging.h>
 #include <wtf/MonotonicTime.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/SafeStrerror.h>
+#include <wtf/Scope.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/ThreadingPrimitives.h>
 #include <wtf/WTFConfig.h>
@@ -49,8 +53,22 @@
 #if OS(LINUX)
 #include <sched.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
-#include <wtf/linux/RealTimeThreads.h>
+#include <wtf/linux/HighPriorityThreads.h>
+
+// See the NOTES section of
+// https://man7.org/linux/man-pages/man2/sched_setattr.2.html
+#if defined(SYS_sched_setattr)
+#define HAVE_SCHED_SETATTR 1
+#endif
+
+#ifndef SCHED_FLAG_RESET_ON_FORK
+#define SCHED_FLAG_RESET_ON_FORK 0x01
+#endif
+#ifndef SCHED_FLAG_UTIL_CLAMP_MIN
+#define SCHED_FLAG_UTIL_CLAMP_MIN 0x20
+#endif
 #ifndef SCHED_RESET_ON_FORK
 #define SCHED_RESET_ON_FORK 0x40000000
 #endif
@@ -115,20 +133,67 @@ static LazyNeverDestroyed<Semaphore> globalSemaphoreForSuspendResume;
 
 static std::atomic<Thread*> targetThread { nullptr };
 
+// Thread::suspend() and Thread::resume() publish what they ask of which thread before they send
+// sigThreadSuspendResume, and the signal handler acts only on a request that names its own thread.
+// The signal can also come from kill(2), raise() or another process, and siginfo cannot tell those
+// from our pthread_kill(): the kernel drops it once RLIMIT_SIGPENDING is exhausted, and a sender in
+// a parent PID namespace looks the same. ThreadSuspendLocker serializes the publishers, so one slot
+// is enough. The generation makes the two-word read in the handler consistent.
+enum class SuspendResumeRequest : uint8_t { None, Suspend, Resume };
+static constexpr uintptr_t suspendResumeRequestMask = 3;
+static std::atomic<pthread_t> requestedThreadHandle { };
+static std::atomic<uintptr_t> pendingSuspendResumeRequest { 0 }; // generation << 2 | SuspendResumeRequest
+// The signal handler reads and writes both, and only a lock-free atomic is safe there.
+static_assert(decltype(requestedThreadHandle)::is_always_lock_free);
+static_assert(decltype(pendingSuspendResumeRequest)::is_always_lock_free);
+
+static void publishSuspendResumeRequest(pthread_t handle, SuspendResumeRequest request)
+{
+    requestedThreadHandle.store(handle);
+    uintptr_t generation = (pendingSuspendResumeRequest.load() >> 2) + 1;
+    pendingSuspendResumeRequest.store(generation << 2 | static_cast<uintptr_t>(request));
+}
+
+static void clearSuspendResumeRequest()
+{
+    pendingSuspendResumeRequest.store(pendingSuspendResumeRequest.load() & ~suspendResumeRequestMask);
+}
+
+// Only uses pthread_self() to identify the thread: the TLS slot of WTF::Thread is empty while a
+// thread runs its TLS destructors, and it can still be suspended then.
+static SuspendResumeRequest pendingSuspendResumeRequestForCurrentThread()
+{
+    while (true) {
+        uintptr_t snapshot = pendingSuspendResumeRequest.load();
+        auto request = static_cast<SuspendResumeRequest>(snapshot & suspendResumeRequestMask);
+        if (request == SuspendResumeRequest::None)
+            return request;
+        pthread_t handle = requestedThreadHandle.load();
+        if (pendingSuspendResumeRequest.load() != snapshot)
+            continue;
+        return pthread_equal(pthread_self(), handle) ? request : SuspendResumeRequest::None;
+    }
+}
+
 void Thread::signalHandlerSuspendResume(int, siginfo_t*, void* ucontext)
 {
-    // Touching a global variable atomic types from signal handlers is allowed.
-    Thread* thread = targetThread.load();
+    // sigsuspend() below always sets errno to EINTR, and the interrupted code may be about to read its own.
+    auto restoreErrno = makeScopeExit([savedErrno = errno] {
+        errno = savedErrno;
+    });
 
-    if (thread->m_suspendCount) {
-        // This is signal handler invocation that is intended to be used to resume sigsuspend.
-        // So this handler invocation itself should not process.
-        //
-        // When signal comes, first, the system calls signal handler. And later, sigsuspend will be resumed. Signal handler invocation always precedes.
-        // So, the problem never happens that suspended.store(true, ...) will be executed before the handler is called.
-        // http://pubs.opengroup.org/onlinepubs/009695399/functions/sigsuspend.html
+    // Touching a global variable atomic types from signal handlers is allowed.
+    //
+    // Anything but a suspend request for this thread is not for this invocation: either nobody
+    // asked (the signal came from outside of suspend() and resume()), or it is the resume request,
+    // which the sigsuspend() loop of the suspended invocation below consumes.
+    if (pendingSuspendResumeRequestForCurrentThread() != SuspendResumeRequest::Suspend)
         return;
-    }
+
+    // The request names this thread, so targetThread is this thread's own, live Thread. suspend()
+    // waits for the post() below before it publishes anything else.
+    Thread* thread = targetThread.load();
+    clearSuspendResumeRequest();
 
     void* approximateStackPointer = currentStackPointer();
     if (!thread->m_stack.contains(approximateStackPointer)) {
@@ -165,7 +230,11 @@ void Thread::signalHandlerSuspendResume(int, siginfo_t*, void* ucontext)
     sigset_t blockedSignalSet;
     sigfillset(&blockedSignalSet);
     sigdelset(&blockedSignalSet, g_wtfConfig.sigThreadSuspendResume);
-    sigsuspend(&blockedSignalSet);
+    // sigsuspend() returns after any handler ran, so only the resume request ends the suspension.
+    // sigThreadSuspendResume stays blocked between the check and sigsuspend(), so the request cannot be missed.
+    while (pendingSuspendResumeRequestForCurrentThread() != SuspendResumeRequest::Resume)
+        sigsuspend(&blockedSignalSet);
+    clearSuspendResumeRequest();
 
     thread->m_platformRegisters = nullptr;
 
@@ -273,7 +342,7 @@ dispatch_qos_class_t Thread::dispatchQOSClass(QOS qos)
 }
 #endif
 
-#if HAVE(SCHEDULING_POLICIES) || OS(LINUX)
+#if HAVE(SCHEDULING_POLICIES)
 static int NODELETE schedPolicy(Thread::SchedulingPolicy schedulingPolicy)
 {
     switch (schedulingPolicy) {
@@ -289,26 +358,56 @@ static int NODELETE schedPolicy(Thread::SchedulingPolicy schedulingPolicy)
 }
 #endif
 
-#if OS(LINUX)
-static int schedPolicy(Thread::QOS qos, Thread::SchedulingPolicy schedulingPolicy)
-{
-    // A specific scheduling policy can override the implied policy from QOS
-    auto policy = schedPolicy(schedulingPolicy);
-    if (policy != SCHED_OTHER)
-        return policy;
+#if OS(LINUX) && !USE(BUN_JSC_ADDITIONS)
+#if HAVE(SCHED_SETATTR)
+// SCHED_ATTR_SIZE_VER1
+struct SchedAttr {
+    uint32_t size;
+    uint32_t policy;
+    uint64_t flags;
+    int32_t nice;
+    uint32_t priority;
+    uint64_t runtime;
+    uint64_t deadline;
+    uint64_t period;
+    uint32_t utilMin;
+    uint32_t utilMax;
+};
+static_assert(sizeof(SchedAttr) == 56);
+#endif
 
+struct SchedulingAttributes {
+    int policy;
+    int niceLevel;
+    // DVFS floor, see s_utilizationScale
+    uint32_t minUtil;
+};
+
+// The kernel's utilization scale, on which 1024 means a fully utilized CPU.
+static constexpr uint32_t s_utilizationScale = 1024;
+
+static SchedulingAttributes schedulingAttributesForQOS(Thread::QOS qos)
+{
     switch (qos) {
     case Thread::QOS::UserInteractive:
-        return SCHED_RR;
     case Thread::QOS::UserInitiated:
+        return { SCHED_OTHER, 0, s_utilizationScale };
     case Thread::QOS::Default:
-        return SCHED_OTHER;
+        return { SCHED_OTHER, 0, s_utilizationScale * 20 / 100 };
     case Thread::QOS::Utility:
-        return SCHED_BATCH;
+        return { SCHED_BATCH, 10, 0 };
     case Thread::QOS::Background:
-        return SCHED_IDLE;
+        return { SCHED_IDLE, 19, 0 };
     }
     RELEASE_ASSERT_NOT_REACHED();
+}
+
+static void logSchedulingAttributesFailure(ThreadIdentifier id)
+{
+    // A thread that exited before its attributes were applied is expected, not a failure.
+    if (errno != ESRCH)
+        RELEASE_LOG_ERROR(Threading, "Failed to apply scheduling attributes to thread %d: %s", id, safeStrerror(errno));
+    UNUSED_PARAM(id);
 }
 #endif
 
@@ -335,7 +434,7 @@ bool Thread::establishHandle(NewThreadContext& context, StackAllocationSpecifica
         int result = pthread_attr_setstack(&attr, bounds.data(), bounds.size_bytes());
         if (result) {
             LOG_ERROR("Failed to set custom stack at %p size %zu: %s",
-                bounds.data(), bounds.size_bytes(), safeStrerror(result).data());
+                bounds.data(), bounds.size_bytes(), safeStrerror(result));
             pthread_attr_destroy(&attr);
             return false;
         } } break;
@@ -348,27 +447,86 @@ bool Thread::establishHandle(NewThreadContext& context, StackAllocationSpecifica
         return false;
     }
 
-#if OS(LINUX)
-    int policy = schedPolicy(qos, schedulingPolicy);
-    if (policy == SCHED_RR)
-        RealTimeThreads::singleton().registerThread(*this);
-    else {
-        struct sched_param param = { };
-        error = pthread_setschedparam(threadHandle, policy | SCHED_RESET_ON_FORK, &param);
-        if (error)
-            LOG_ERROR("Failed to set sched policy %d for thread %ld: %s", policy, threadHandle, safeStrerror(error).data());
-    }
-#else
 #if !HAVE(QOS_CLASSES)
     UNUSED_PARAM(qos);
 #endif
 #if !HAVE(SCHEDULING_POLICIES)
     UNUSED_PARAM(schedulingPolicy);
 #endif
-#endif
 
     establishPlatformSpecificHandle(threadHandle);
     return true;
+}
+
+void Thread::updateSchedulingAttributes(SchedulingState state) const
+{
+#if OS(LINUX) && USE(BUN_JSC_ADDITIONS)
+    // Bun's threads inherit the scheduling policy, nice level and utilization
+    // clamp of the process they run in. The per-QOS mapping below (SCHED_BATCH
+    // compiler threads on small machines, nice 0 and a DVFS floor for every
+    // other thread) is tuned for a browser and would override whatever the
+    // embedding process was started with.
+    UNUSED_PARAM(state);
+#elif OS(LINUX)
+    ASSERT(m_schedulingPolicy == SchedulingPolicy::Other);
+
+    const auto attributes = schedulingAttributesForQOS(state == SchedulingState::Demoted ? QOS::Default : m_qos);
+
+#if HAVE(SCHED_SETATTR)
+    static std::atomic<bool> utilizationClampSupported { true };
+
+    SchedAttr schedAttr { };
+    schedAttr.size = sizeof(schedAttr);
+    schedAttr.policy = attributes.policy;
+    schedAttr.flags = SCHED_FLAG_RESET_ON_FORK;
+    schedAttr.nice = attributes.niceLevel;
+
+    auto setAttributes = [&] {
+        return !syscall(SYS_sched_setattr, m_id, &schedAttr, 0);
+    };
+
+    if (utilizationClampSupported.load(std::memory_order_relaxed)) {
+        schedAttr.flags |= SCHED_FLAG_UTIL_CLAMP_MIN;
+        schedAttr.utilMin = attributes.minUtil;
+        if (setAttributes())
+            return;
+
+        // Did we fail because uclamp was rejected?
+        schedAttr.flags = SCHED_FLAG_RESET_ON_FORK;
+        schedAttr.utilMin = 0;
+        if (!setAttributes()) {
+            // No
+            logSchedulingAttributesFailure(m_id);
+            return;
+        }
+
+        // Yes, don't try uclamp again.
+        if (utilizationClampSupported.exchange(false, std::memory_order_relaxed))
+            RELEASE_LOG_WITH_LEVEL(Threading, WTFLogLevel::Info, "Utilization clamping is unavailable, scheduling every thread without it: %s", safeStrerror(errno));
+        return;
+    }
+
+    if (!setAttributes())
+        logSchedulingAttributesFailure(m_id);
+#else
+    struct sched_param param = { };
+    if (sched_setscheduler(m_id, attributes.policy | SCHED_RESET_ON_FORK, &param)
+        || setpriority(PRIO_PROCESS, m_id, attributes.niceLevel))
+        logSchedulingAttributesFailure(m_id);
+#endif // HAVE(SCHED_SETATTR)
+#else
+    UNUSED_PARAM(state);
+#endif // OS(LINUX)
+}
+
+void Thread::initializeSchedulingAttributes()
+{
+    updateSchedulingAttributes(SchedulingState::Full);
+
+#if OS(LINUX)
+    if (m_qos == QOS::UserInteractive)
+        HighPriorityThreads::singleton().registerThread(*this);
+#endif
 }
 
 void Thread::initializeCurrentThreadInternal(const char* threadName)
@@ -463,9 +621,9 @@ Thread& Thread::initializeCurrentTLS()
     // Not a WTF-created thread, Thread is not established yet.
     WTF::initialize();
 #if PLATFORM(COCOA)
-    Ref thread = adoptRef(*new Thread(SchedulingPolicy::Other, pthread_main_np() ? IsMain::Yes : IsMain::No));
+    Ref thread = adoptRef(*new Thread(defaultQOS, SchedulingPolicy::Other, pthread_main_np() ? IsMain::Yes : IsMain::No));
 #else
-    Ref thread = adoptRef(*new Thread(SchedulingPolicy::Other));
+    Ref thread = adoptRef(*new Thread(defaultQOS, SchedulingPolicy::Other));
 #endif
     thread->establishPlatformSpecificHandle(pthread_self());
     thread->initializeInThread();
@@ -483,7 +641,7 @@ bool Thread::signal(int signalNumber)
     return !errNo; // A 0 errNo means success.
 }
 
-auto Thread::suspend(const ThreadSuspendLocker&) -> Expected<void, PlatformSuspendError>
+auto Thread::suspend(const ThreadSuspendLocker&) -> std::expected<void, PlatformSuspendError>
 {
     // currentMayBeNull, not currentSingleton: the libpas scavenger calls this while holding
     // the heap lock, and currentSingleton would lazy-allocate a Thread for it.
@@ -498,10 +656,13 @@ auto Thread::suspend(const ThreadSuspendLocker&) -> Expected<void, PlatformSuspe
         targetThread.store(this);
 
         while (true) {
+            publishSuspendResumeRequest(m_handle, SuspendResumeRequest::Suspend);
             // We must use pthread_kill to avoid queue-overflow problem with real-time signals.
             int result = pthread_kill(m_handle, g_wtfConfig.sigThreadSuspendResume);
-            if (result)
+            if (result) {
+                clearSuspendResumeRequest();
                 return makeUnexpected(result);
+            }
             globalSemaphoreForSuspendResume->wait();
             if (m_platformRegisters)
                 break;
@@ -523,15 +684,14 @@ void Thread::resume(const ThreadSuspendLocker&)
     if (m_suspendCount == 1) {
         // When allowing sigThreadSuspendResume interrupt in the signal handler by sigsuspend and SigThreadSuspendResume is actually issued,
         // the signal handler itself will be called once again.
-        // There are several ways to distinguish the handler invocation for suspend and resume.
-        // 1. Use different signal numbers. And check the signal number in the handler.
-        // 2. Use some arguments to distinguish suspend and resume in the handler.
-        // 3. Use thread's flag.
-        // In this implementaiton, we take (3). m_suspendCount is used to distinguish it.
+        // The published request tells that invocation, and the suspended one that waits in sigsuspend, that this is the resume.
         // Note that we must use pthread_kill to avoid queue-overflow problem with real-time signals.
         targetThread.store(this);
-        if (pthread_kill(m_handle, g_wtfConfig.sigThreadSuspendResume) == ESRCH)
+        publishSuspendResumeRequest(m_handle, SuspendResumeRequest::Resume);
+        if (pthread_kill(m_handle, g_wtfConfig.sigThreadSuspendResume) == ESRCH) {
+            clearSuspendResumeRequest();
             return;
+        }
         globalSemaphoreForSuspendResume->wait();
     }
     --m_suspendCount;
@@ -587,6 +747,51 @@ size_t Thread::getRegisters(const ThreadSuspendLocker&, PlatformRegisters& regis
     ASSERT(m_platformRegisters);
     registers = *m_platformRegisters;
     return sizeof(PlatformRegisters);
+#endif
+}
+
+void Thread::barrierInstructionCache()
+{
+#if CPU(X86_64)
+    // x86-64 has a coherent instruction cache: instruction fetches on every core observe stores to
+    // code without any explicit synchronization, so there is nothing to publish.
+    return;
+#else
+    RELEASE_ASSERT_WITH_MESSAGE(this != &Thread::currentSingleton(), "We do not support synchronizing the current thread itself.");
+    // Every mechanism below synchronizes the core the target thread is running on at the time. It is
+    // therefore only sufficient because the kernel is responsible for instruction-cache maintenance
+    // when it migrates a thread to another core; nothing here can cover a core the thread has not run
+    // on yet.
+#if OS(DARWIN) && CPU(ARM64)
+    // Reading a thread's register state forces it through a context-synchronizing kernel round-trip
+    // (the ERET on the way back to user code is an ISB), so it re-fetches modified instructions
+    // without taking the thread-suspend lock. thread_get_state's count is an in/out argument, so
+    // restore the buffer capacity before each attempt.
+    auto metadata = threadStateMetadata();
+    const unsigned stateCapacity = metadata.userCount;
+    PlatformRegisters registers;
+    kern_return_t result;
+    do {
+        metadata.userCount = stateCapacity;
+        result = thread_get_state(m_platformThread, metadata.flavor, (thread_state_t)&registers, &metadata.userCount);
+    } while (result == KERN_ABORTED);
+    ASSERT(result == KERN_SUCCESS);
+#elif CPU(RISCV64)
+    // Not implemented on RISC-V, which means the wasm JITs cannot publish code there. Instruction
+    // fetch coherence on RISC-V requires FENCE.I to execute on the hart that will run the modified
+    // code, and neither suspend/resume nor returning from a signal is architecturally guaranteed to
+    // imply one. Publishing needs an explicit remote fence — on Linux,
+    // membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE) — rather than the mechanism below.
+    // Failing loudly is preferable to silently letting a hart execute stale instructions.
+    RELEASE_ASSERT_NOT_REACHED();
+#else
+    // Suspending and then resuming the thread makes the OS run a context-synchronizing exception
+    // return on it as it resumes, so it re-fetches modified instructions.
+    ThreadSuspendLocker locker;
+    if (!suspend(locker))
+        return;
+    resume(locker);
+#endif
 #endif
 }
 
@@ -735,7 +940,9 @@ void Thread::yield()
     constexpr mach_msg_timeout_t timeoutInMS = 1;
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, timeoutInMS);
 #else
-    sched_yield();
+    // A one nanosecond sleep costs a whole timer slack period, 50us by default on Linux (see PR_SET_TIMERSLACK)
+    struct timespec minimalSleep { 0, 1 };
+    nanosleep(&minimalSleep, nullptr);
 #endif
 }
 

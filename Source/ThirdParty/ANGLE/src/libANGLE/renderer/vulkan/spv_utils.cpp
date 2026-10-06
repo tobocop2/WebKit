@@ -7,11 +7,8 @@
 // accordingly.
 //
 
-#ifdef UNSAFE_BUFFERS_BUILD
-#    pragma allow_unsafe_buffers
-#endif
-
 #include "libANGLE/renderer/vulkan/spv_utils.h"
+#include "common/unsafe_buffers.h"
 
 #include <array>
 #include <cctype>
@@ -919,7 +916,7 @@ bool IsNonSemanticInstruction(const uint32_t *instruction)
 {
     // To avoid parsing the numerous GLSL OpExtInst instructions, take a quick peek at the set and
     // skip instructions that aren't non-semantic.
-    return instruction[3] == sh::vk::spirv::kIdNonSemanticInstructionSet;
+    return ANGLE_UNSAFE_TODO(instruction[3]) == sh::vk::spirv::kIdNonSemanticInstructionSet;
 }
 
 enum class EntryPointList
@@ -1030,7 +1027,8 @@ const uint32_t *SpirvTransformerBase::getCurrentInstruction(spv::Op *opCodeOut,
 
 void SpirvTransformerBase::copyInstruction(const uint32_t *instruction, size_t wordCount)
 {
-    mSpirvBlobOut->insert(mSpirvBlobOut->end(), instruction, instruction + wordCount);
+    mSpirvBlobOut->insert(mSpirvBlobOut->end(), instruction,
+                          ANGLE_UNSAFE_TODO(instruction + wordCount));
 }
 
 spirv::IdRef SpirvTransformerBase::GetNewId(spirv::Blob *blob)
@@ -1858,8 +1856,8 @@ class SpirvTransformFeedbackCodeGenerator final : angle::NonCopyable
                                GLenum componentType,
                                spirv::Blob *blobOut);
 
-    static constexpr size_t kXfbDecorationCount                           = 3;
-    static constexpr spv::Decoration kXfbDecorations[kXfbDecorationCount] = {
+    static constexpr size_t kXfbDecorationCount                                       = 3;
+    static constexpr std::array<spv::Decoration, kXfbDecorationCount> kXfbDecorations = {
         spv::DecorationXfbBuffer,
         spv::DecorationXfbStride,
         spv::DecorationOffset,
@@ -1911,8 +1909,8 @@ class SpirvTransformFeedbackCodeGenerator final : angle::NonCopyable
     gl::TransformFeedbackBuffersArray<std::vector<XfbVarying>> mXfbVaryings;
 };
 
-constexpr size_t SpirvTransformFeedbackCodeGenerator::kXfbDecorationCount;
-constexpr spv::Decoration SpirvTransformFeedbackCodeGenerator::kXfbDecorations[kXfbDecorationCount];
+constexpr std::array<spv::Decoration, SpirvTransformFeedbackCodeGenerator::kXfbDecorationCount>
+    SpirvTransformFeedbackCodeGenerator::kXfbDecorations;
 
 void SpirvTransformFeedbackCodeGenerator::visitVariable(const ShaderInterfaceVariableInfo &info,
                                                         const XFBInterfaceVariableInfo &xfbInfo,
@@ -2643,7 +2641,7 @@ void SpirvTransformFeedbackCodeGenerator::addMemberDecorate(const XFBInterfaceVa
         ASSERT(xfb.pod.stride != ShaderInterfaceVariableXfbInfo::kInvalid);
         ASSERT(xfb.pod.offset != ShaderInterfaceVariableXfbInfo::kInvalid);
 
-        const uint32_t xfbDecorationValues[kXfbDecorationCount] = {
+        const std::array<uint32_t, kXfbDecorationCount> xfbDecorationValues = {
             xfb.pod.buffer,
             xfb.pod.stride,
             xfb.pod.offset,
@@ -2675,7 +2673,7 @@ void SpirvTransformFeedbackCodeGenerator::addDecorate(const XFBInterfaceVariable
     ASSERT(info.xfb.pod.stride != ShaderInterfaceVariableXfbInfo::kInvalid);
     ASSERT(info.xfb.pod.offset != ShaderInterfaceVariableXfbInfo::kInvalid);
 
-    const uint32_t xfbDecorationValues[kXfbDecorationCount] = {
+    const std::array<uint32_t, kXfbDecorationCount> xfbDecorationValues = {
         info.xfb.pod.buffer,
         info.xfb.pod.stride,
         info.xfb.pod.offset,
@@ -4813,8 +4811,9 @@ TransformationState SpirvTransformer::transformExtension(const uint32_t *instruc
     spirv::LiteralString name;
     spirv::ParseExtension(instruction, &name);
 
-    return strcmp(name, "SPV_KHR_non_semantic_info") == 0 ? TransformationState::Transformed
-                                                          : TransformationState::Unchanged;
+    return ANGLE_UNSAFE_TODO(strcmp(name, "SPV_KHR_non_semantic_info")) == 0
+               ? TransformationState::Transformed
+               : TransformationState::Unchanged;
 }
 
 TransformationState SpirvTransformer::transformExtInstImport(const uint32_t *instruction)

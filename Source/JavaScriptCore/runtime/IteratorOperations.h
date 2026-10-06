@@ -28,7 +28,7 @@
 
 #include "CachedCallInlines.h"
 #include "IterationModeMetadata.h"
-#include "JSArrayIterator.h"
+#include "JSArrayIteratorInlines.h"
 #include "JSCJSValue.h"
 #include "JSGlobalObjectInlines.h"
 #include "JSMapInlines.h"
@@ -65,12 +65,19 @@ JS_EXPORT_PRIVATE JSObject* createIteratorResultObject(JSGlobalObject*, JSValue,
 
 Structure* createIteratorResultObjectStructure(VM&, JSGlobalObject&);
 
-JS_EXPORT_PRIVATE JSValue iteratorMethod(JSGlobalObject*, JSObject*);
+// https://tc39.es/ecma262/multipage/abstract-operations.html#sec-getiterator, SYNC kind
 JS_EXPORT_PRIVATE IterationRecord iteratorForIterable(JSGlobalObject*, JSObject*, JSValue iteratorMethod);
 JS_EXPORT_PRIVATE IterationRecord iteratorForIterable(JSGlobalObject*, JSValue iterable);
+
 JS_EXPORT_PRIVATE IterationRecord iteratorDirect(JSGlobalObject*, JSValue);
 IterationRecord getAsyncIterator(JSGlobalObject&, JSValue);
 JS_EXPORT_PRIVATE IterationRecord getAsyncIteratorExported(JSGlobalObject&, JSValue);
+
+class JSAsyncFromSyncIterator;
+JSAsyncFromSyncIterator* createAsyncFromSyncIterator(JSGlobalObject*, JSObject* syncIterator, std::optional<IterationMode> knownMode = std::nullopt);
+JSAsyncFromSyncIterator* createAsyncFromSyncIteratorForIterable(JSGlobalObject*, JSValue iterable);
+IterationRecord createAsyncFromSyncIteratorRecord(JSGlobalObject&, JSValue iterable);
+JSC_DECLARE_HOST_FUNCTION(asyncFromSyncIteratorCreatePrivate);
 
 JS_EXPORT_PRIVATE JSValue iteratorMethod(JSGlobalObject*, JSObject*);
 JS_EXPORT_PRIVATE bool hasIteratorMethod(JSGlobalObject*, JSValue);
@@ -89,8 +96,22 @@ enum class IterableValidationResult : uint8_t {
 JS_EXPORT_PRIVATE IterableValidationResult validateIterable(VM&, JSValue iterable, JSValue symbolIterator);
 JS_EXPORT_PRIVATE ASCIILiteral getIteratorErrorMessage(IterableValidationResult, JSValue iterable);
 
-JS_EXPORT_PRIVATE IterationMode NODELETE getIterationMode(VM&, JSGlobalObject*, JSValue iterable);
+JS_EXPORT_PRIVATE IterationMode getIterationMode(JSValue iterable);
 JS_EXPORT_PRIVATE IterationMode getIterationMode(VM&, JSGlobalObject*, JSValue iterable, JSValue symbolIterator);
+
+// op_iterator_next for an Array that op_iterator_open made no iterator object for: the Array comes out of the instruction's iterable
+// operand and the index lives in its next operand. Both are checked (see JSArrayIterator::nextValueWithIndexInFrame).
+template<typename Metadata>
+ALWAYS_INLINE bool iteratorNextWithIndexInFrame(JSGlobalObject* globalObject, Metadata& metadata, JSValue iterable, JSValue& indexInFrame, JSValue& value)
+{
+    bool hasNext = JSArrayIterator::nextValueWithIndexInFrame(globalObject, iterable, indexInFrame, value);
+    metadata.m_iterableProfile.observeStructureID(iterable.asCell()->structureID());
+    metadata.m_iterationMetadata.seenModes = metadata.m_iterationMetadata.seenModes | IterationMode::FastArray;
+    return hasNext;
+}
+
+// The Array Iterator object that the (iterable, index) pair kept in a frame by op_iterator_open / op_iterator_next stands for.
+JS_EXPORT_PRIVATE JSArrayIterator* materializeUnboxedFastArrayIterator(JSGlobalObject*, JSValue iterable, JSValue index);
 
 
 static ALWAYS_INLINE void forEachInMapStorage(VM& vm, JSGlobalObject* globalObject, JSCell* storageCell, JSMap::Helper::Entry startEntry, IterationKind iterationKind, NOESCAPE const auto& callback, NOESCAPE const auto& callbackExceptionHandler)
@@ -197,7 +218,7 @@ static ALWAYS_INLINE void forEachInFastArray(JSGlobalObject* globalObject, JSVal
     UNUSED_PARAM(iterable);
 
     auto& vm = getVM(globalObject);
-    ASSERT(getIterationMode(vm, globalObject, iterable) == IterationMode::FastArray);
+    ASSERT(getIterationMode(iterable) == IterationMode::FastArray);
 
     auto scope = DECLARE_THROW_SCOPE(vm);
 
@@ -207,8 +228,8 @@ static ALWAYS_INLINE void forEachInFastArray(JSGlobalObject* globalObject, JSVal
         callback(vm, globalObject, nextValue);
         if (scope.exception()) [[unlikely]] {
             scope.release();
-            JSArrayIterator* iterator = JSArrayIterator::create(vm, globalObject->arrayIteratorStructure(), array, IterationKind::Values);
-            iterator->internalField(JSArrayIterator::Field::Index).setWithoutWriteBarrier(jsNumber(index + 1));
+            JSArrayIterator* iterator = JSArrayIterator::create(vm, array->realm()->arrayIteratorStructure(), array, IterationKind::Values);
+            iterator->setIndex(index + 1);
             iteratorClose(globalObject, iterator);
             return;
         }
@@ -261,7 +282,7 @@ void forEachInIterable(JSGlobalObject* globalObject, JSValue iterable, NOESCAPE 
     auto& vm = getVM(globalObject);
     auto scope = DECLARE_THROW_SCOPE(vm);
 
-    if (getIterationMode(vm, globalObject, iterable) == IterationMode::FastArray) {
+    if (getIterationMode(iterable) == IterationMode::FastArray) {
         auto* array = uncheckedDowncast<JSArray>(iterable);
         forEachInFastArray(globalObject, iterable, array, callback);
         RETURN_IF_EXCEPTION(scope, void());
@@ -319,7 +340,7 @@ void forEachInIterable(JSGlobalObject& globalObject, JSObject* iterable, JSValue
             if (scope.exception()) [[unlikely]] {
                 scope.release();
                 JSArrayIterator* iterator = JSArrayIterator::create(vm, globalObject.arrayIteratorStructure(), array, IterationKind::Values);
-                iterator->internalField(JSArrayIterator::Field::Index).setWithoutWriteBarrier(jsNumber(index + 1));
+                iterator->setIndex(index + 1);
                 iteratorClose(&globalObject, iterator);
                 return;
             }

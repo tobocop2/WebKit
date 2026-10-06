@@ -31,11 +31,8 @@
 #include <WebCore/IOSurfaceDrawingBuffer.h>
 #include <WebCore/ProcessIdentity.h>
 #include <array>
-#include <wtf/CheckedPtr.h>
-
-#if ENABLE(MEDIA_STREAM)
 #include <memory>
-#endif
+#include <wtf/CheckedPtr.h>
 
 #if ENABLE(WEBXR)
 #include <WebCore/PlatformXR.h>
@@ -53,10 +50,6 @@ class GraphicsLayerContentsDisplayDelegate;
 
 #if ENABLE(VIDEO)
 class GraphicsContextGLCVCocoa;
-#endif
-
-#if ENABLE(MEDIA_STREAM)
-class ImageRotationSessionVT;
 #endif
 
 // IOSurface backing store for an image of a texture.
@@ -80,8 +73,6 @@ public:
     static RefPtr<GraphicsContextGLCocoa> create(WebCore::GraphicsContextGLAttributes&&, ProcessIdentity&& resourceOwner);
     ~GraphicsContextGLCocoa();
     IOSurface* NODELETE displayBufferSurface();
-
-    std::tuple<GCGLenum, GCGLenum> externalImageTextureBindingPoint() final;
 
     enum class PbufferAttachmentUsage { Read, Write, ReadWrite };
     // Returns a handle which, if non-null, must be released via the
@@ -118,10 +109,10 @@ public:
     RefPtr<VideoFrame> surfaceBufferToVideoFrame(SurfaceBuffer) final;
 #endif
     RefPtr<PixelBuffer> readCompositedResults() final;
-    void setDrawingBufferColorSpace(const DestinationColorSpace&) final;
+    void setDrawingBufferColorSpace(const ColorSpace&) final;
     void prepareForDisplay() override;
 
-    RefPtr<NativeImage> copyNativeImageYFlipped(SurfaceBuffer) override;
+    RefPtr<NativeImage> copyNativeImage(SurfaceBuffer) override;
 
     // Prepares current frame for display. The `finishedSignal` will be invoked once the frame has finished rendering.
     void prepareForDisplayWithFinishedSignal(Function<void()> finishedSignal);
@@ -135,12 +126,13 @@ protected:
     bool platformInitialize() final;
     void invalidateKnownTextureContent(GCGLuint) final;
     bool reshapeDrawingBuffer() final;
-    void prepareForDrawingBufferWrite() final;
 
     IOSurfacePbuffer& NODELETE drawingBuffer();
     IOSurfacePbuffer& NODELETE displayBuffer();
+    IOSurfacePbuffer& NODELETE copyBuffer();
     IOSurfacePbuffer& NODELETE surfaceBuffer(SurfaceBuffer);
     bool bindNextDrawingBuffer();
+    IOSurfacePbuffer createDrawingBuffer();
     void freeDrawingBuffers();
 
     // Inserts new fence that will invoke `signal` from a background thread when completed.
@@ -153,15 +145,12 @@ protected:
     GraphicsContextGLCV* cvContext();
 #endif
     void* createMetalSharedEventEGLSync(id, uint64_t);
+    RetainPtr<IOSurfaceRef> copySurfaceBuffer(SurfaceBuffer);
 
     ProcessIdentity m_resourceOwner;
-    DestinationColorSpace m_drawingBufferColorSpace;
+    ColorSpace m_drawingBufferColorSpace;
 #if ENABLE(VIDEO)
     std::unique_ptr<GraphicsContextGLCVCocoa> m_cv;
-#endif
-#if ENABLE(MEDIA_STREAM)
-    std::unique_ptr<ImageRotationSessionVT> m_mediaSampleRotationSession;
-    IntSize m_mediaSampleRotationSessionSize;
 #endif
     RetainPtr<MTLSharedEventListener> m_finishedMetalSharedEventListener;
     RetainPtr<id> m_finishedMetalSharedEvent; // FIXME: Remove all C++ includees and use id<MTLSharedEvent>.

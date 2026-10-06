@@ -31,6 +31,14 @@
 
 namespace JSC {
 
+#if USE(BUN_JSC_ADDITIONS)
+#define JSC_FOR_EACH_BUN_JSC_INTRINSIC(macro) \
+    macro(BufferAccessorIntrinsic) \
+
+#else
+#define JSC_FOR_EACH_BUN_JSC_INTRINSIC(macro)
+#endif
+
 #define JSC_FOR_EACH_INTRINSIC(macro) \
     /* Call intrinsics. */ \
     macro(NoIntrinsic) \
@@ -122,7 +130,6 @@ namespace JSC {
     macro(ObjectHasOwnIntrinsic) \
     macro(ObjectIsIntrinsic) \
     macro(ObjectKeysIntrinsic) \
-    macro(ObjectPrototypeIsPrototypeOfIntrinsic) \
     macro(ObjectToStringIntrinsic) \
     macro(ReflectGetPrototypeOfIntrinsic) \
     macro(ReflectOwnKeysIntrinsic) \
@@ -147,6 +154,9 @@ namespace JSC {
     macro(StringPrototypeSubstrIntrinsic) \
     macro(StringPrototypeToLowerCaseIntrinsic) \
     macro(StringPrototypeToUpperCaseIntrinsic) \
+    macro(StringPrototypeTrimIntrinsic) \
+    macro(StringPrototypeTrimStartIntrinsic) \
+    macro(StringPrototypeTrimEndIntrinsic) \
     macro(SymbolPrototypeToStringIntrinsic) \
     macro(NumberPrototypeToStringIntrinsic) \
     macro(NumberIsFiniteIntrinsic) \
@@ -165,6 +175,7 @@ namespace JSC {
     macro(TypedArrayKeysIntrinsic) \
     macro(TypedArrayEntriesIntrinsic) \
     macro(IsTypedArrayViewIntrinsic) \
+    macro(ArrayBufferIsViewIntrinsic) \
     macro(BoundFunctionCallIntrinsic) \
     macro(RemoteFunctionCallIntrinsic) \
     macro(IteratorIntrinsic) \
@@ -218,7 +229,6 @@ namespace JSC {
     macro(FunctionBindIntrinsic) \
     macro(IteratorHelperCreateIntrinsic) \
     macro(WrapForValidIteratorCreateIntrinsic) \
-    macro(AsyncFromSyncIteratorCreateIntrinsic) \
     macro(RegExpStringIteratorCreateIntrinsic) \
     macro(RegExpStringIteratorNextIntrinsic) \
     macro(ResolvePromiseWithFirstResolvingFunctionCallCheckIntrinsic) \
@@ -276,6 +286,8 @@ namespace JSC {
     macro(DataViewGetFloat16) \
     macro(DataViewGetFloat32) \
     macro(DataViewGetFloat64) \
+    macro(DataViewGetBigInt64) \
+    macro(DataViewGetBigUint64) \
     macro(DataViewSetInt8) \
     macro(DataViewSetUint8) \
     macro(DataViewSetInt16) \
@@ -285,6 +297,10 @@ namespace JSC {
     macro(DataViewSetFloat16) \
     macro(DataViewSetFloat32) \
     macro(DataViewSetFloat64) \
+    macro(DataViewSetBigInt64) \
+    macro(DataViewSetBigUint64) \
+    \
+    JSC_FOR_EACH_BUN_JSC_INTRINSIC(macro) \
     \
     macro(WasmFunctionIntrinsic) \
 

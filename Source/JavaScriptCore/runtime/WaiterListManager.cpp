@@ -26,23 +26,17 @@
 #include "config.h"
 #include "WaiterListManager.h"
 
-#include "DeferredWorkTimerInlines.h"
 #include "HeapCellInlines.h"
 #include "JSGlobalObject.h"
 #include "JSLock.h"
 #include "JSObjectInlines.h"
 #include "ObjectConstructor.h"
-#include "Options.h"
 #include "VMManager.h"
-#include "VMTraps.h"
+#include "VMTrapsInlines.h"
 #include <wtf/DataLog.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/RawPointer.h>
 #include <wtf/TZoneMallocInlines.h>
-
-#if ENABLE(WEBASSEMBLY_DEBUGGER)
-#include "WasmDebugServerUtilities.h"
-#endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
@@ -69,6 +63,44 @@ Waiter::Waiter(JSPromise* promise)
 {
 }
 
+Waiter::~Waiter() = default;
+
+void Waiter::setParkedList(RefPtr<WaiterList>&& list)
+{
+    ASSERT(!m_isAsync);
+    Locker locker { m_parkedListLock };
+    m_parkedList = WTF::move(list);
+}
+
+void Waiter::notifyOfTerminationRequest()
+{
+    ASSERT(!m_isAsync);
+    RefPtr<WaiterList> parkedList;
+    {
+        Locker locker { m_parkedListLock };
+        parkedList = m_parkedList;
+    }
+    // Not parked (yet): waitSyncImpl publishes the list before it tests for the request, so a wait
+    // that starts after this sees the NeedTermination trap our caller has already fired.
+    if (!parkedList)
+        return;
+    // Notify under the list's lock, which the waiter holds from testing for the request until it is
+    // parked, so that the notification cannot fall in between.
+    Locker listLocker { parkedList->lock };
+    m_condition.notifyOne();
+}
+
+// A termination is only ever established (VM::hasTerminationRequest) by the mutator thread itself,
+// which cannot do that while it is parked in a wait. Another thread asking this VM to terminate
+// (VM::notifyNeedTermination) is visible as the pending NeedTermination trap. Neither interrupts the
+// wait while termination is being deferred (DeferTermination); it takes effect when the deferral ends.
+static ALWAYS_INLINE bool shouldStopWaitingForTermination(VM& vm)
+{
+    if (vm.traps().isDeferringTermination()) [[unlikely]]
+        return false;
+    return vm.hasTerminationRequest() || vm.traps().needHandling(VMTraps::NeedTermination);
+}
+
 
 WaiterListManager& WaiterListManager::singleton()
 {
@@ -78,39 +110,6 @@ WaiterListManager& WaiterListManager::singleton()
         manager.construct();
     });
     return manager;
-}
-
-static void waitForSync(Locker<Lock>& listLocker, VM& vm, Ref<Waiter>& syncWaiter, Ref<WaiterList>& list, MonotonicTime time)
-{
-    listLocker.assertIsHolding(list->lock);
-    while (syncWaiter->isOnList() && time.now() < time && !vm.hasTerminationRequest()) {
-#if ENABLE(WEBASSEMBLY_DEBUGGER)
-        // FIXME: rdar://176407534 This is a workaround. Ideally VMManager would maintain a registry of all
-        // blocking operations (atomics.wait, futex, etc.) and signal them directly on STW
-        // instead of relying on each site to poll NeedStopTheWorld at a fixed interval.
-        // Implementing that correctly is non-trivial due to registration races, lock ordering
-        // between VMManager and each waiter's list lock, and unregistration races on wait
-        // completion — worth a dedicated follow-up patch.
-        if (Options::enableWasmDebugger()) [[unlikely]] {
-            if (vm.traps().hasTrapBit(VMTraps::NeedStopTheWorld)) {
-                // Unlock to participate in STW. The waiter stays on the list —
-                // isOnList() and time guards handle all outcomes on the next iteration.
-                list->lock.unlock();
-                VMManager::singleton().notifyVMStop(vm, StopTheWorldEvent::WasmAtomicsWaitBlocked);
-                list->lock.lock();
-            }
-            auto cap = MonotonicTime::now() + DebuggerSTWCheckInterval;
-            syncWaiter->condition().waitUntil(list->lock, std::min(time, cap).approximate<WallTime>());
-            continue;
-        }
-#endif
-        syncWaiter->condition().waitUntil(list->lock, time.approximate<WallTime>());
-    }
-
-#if ENABLE(WEBASSEMBLY_DEBUGGER)
-    if (Options::enableWasmDebugger()) [[unlikely]]
-        vm.debugState()->clearStop();
-#endif
 }
 
 template <typename ValueType>
@@ -123,14 +122,41 @@ WaiterListManager::WaitSyncResult WaiterListManager::waitSyncImpl(VM& vm, ValueT
     MonotonicTime time = MonotonicTime::timePointFromNow(timeout);
 
     {
+        VMBlockingScope waitScope(vm, StopTheWorldEvent::AtomicsWaitBlocked);
+
         Locker listLocker { list->lock };
         if (WTF::atomicLoad(ptr) != expectedValue)
             return WaitSyncResult::NotEqual;
 
         list->addLast(listLocker, syncWaiter);
         dataLogLnIf(WaiterListsManagerInternal::verbose, "<WaiterListManager> <Thread:", Thread::currentSingleton(), "> added a new SyncWaiter=", syncWaiter.get(), " to a waiterList for ptr ", RawPointer(ptr));
+        syncWaiter->setParkedList(list.copyRef());
 
-        waitForSync(listLocker, vm, syncWaiter, list, time);
+#if USE(MIMALLOC)
+        // Only the owning thread can return the memory its thread-local heap holds, so do that once in a wait that
+        // takes a while. A wait that is notified soon pays nothing.
+        MonotonicTime releaseFreeMemoryTime = MonotonicTime::now() + 100_ms;
+        bool didReleaseFreeMemory = false;
+#endif
+        while (syncWaiter->isOnList() && time.now() < time && !shouldStopWaitingForTermination(vm)) {
+#if USE(MIMALLOC)
+            if (!didReleaseFreeMemory && releaseFreeMemoryTime < time) {
+                if (MonotonicTime::now() < releaseFreeMemoryTime) {
+                    syncWaiter->condition().waitUntil(list->lock, releaseFreeMemoryTime.approximate<WallTime>());
+                    continue;
+                }
+                didReleaseFreeMemory = true;
+                // A notification in the meantime takes us off the list, and the loop tests for that (and for a
+                // termination request) under the lock again before it waits.
+                DropLockForScope dropLock { listLocker };
+                WTF::releaseFastMallocFreeMemoryForIdleThread();
+                continue;
+            }
+#endif
+            syncWaiter->condition().waitUntil(list->lock, time.approximate<WallTime>());
+        }
+
+        syncWaiter->setParkedList(nullptr);
 
         // At this point, syncWaiter should be either notified (dequeued) or timeout (not dequeued).
         bool didGetDequeued = !syncWaiter->isOnList();
@@ -139,8 +165,20 @@ WaiterListManager::WaitSyncResult WaiterListManager::waitSyncImpl(VM& vm, ValueT
 
         didGetDequeued = list->findAndRemove(listLocker, syncWaiter);
         ASSERT(didGetDequeued);
-        return vm.hasTerminationRequest() ? WaitSyncResult::Terminated : WaitSyncResult::TimedOut;
+        if (!shouldStopWaitingForTermination(vm))
+            return WaitSyncResult::TimedOut;
     }
+
+    // The wait was cut short by a termination request: leave with it established and the
+    // TerminationException thrown, consuming the trap if another thread's request is what woke us
+    // (as VMTraps::handleTraps() would, minus jettisoning the code blocks that have trap breakpoints
+    // installed, which throwing from here does not need).
+    ASSERT(!vm.traps().isDeferringTermination());
+    if (vm.traps().clearTrap(VMTraps::NeedTermination))
+        vm.setHasTerminationRequest();
+    if (!vm.hasPendingTerminationException())
+        vm.throwTerminationException();
+    return WaitSyncResult::Terminated;
 }
 
 template <typename ValueType>
@@ -244,8 +282,8 @@ void WaiterListManager::notifyWaiterImpl(const AbstractLocker& listLocker, Ref<W
     ASSERT(!waiter->isOnList());
 
     if (waiter->isAsync()) {
-        waiter->scheduleWorkAndClear(listLocker, [resolveResult](DeferredWorkTimer::Ticket ticket) {
-            JSPromise* promise = uncheckedDowncast<JSPromise>(ticket->target());
+        waiter->scheduleWorkAndClear(listLocker, [resolveResult](DeferredWorkTimer::Ticket& ticket) {
+            JSPromise* promise = uncheckedDowncast<JSPromise>(ticket.target());
             JSGlobalObject* globalObject = promise->realm();
             VM& vm = promise->vm();
             JSValue result = resolveResult == ResolveResult::Ok ? vm.smallStrings.okString() : vm.smallStrings.timedOutString();
@@ -283,10 +321,8 @@ size_t WaiterListManager::totalWaiterCount()
 void Waiter::scheduleWorkAndClear(const AbstractLocker& listLocker, DeferredWorkTimer::Task&& task)
 {
     ASSERT(m_isAsync && m_vm && !isOnList());
-    if (auto ticket = this->ticket(listLocker)) {
-        m_vm->deferredWorkTimer->scheduleWorkSoon(ticket.get(), WTF::move(task));
+    if (m_vm->deferredWorkTimer->scheduleWorkSoonIfActive(m_ticket, WTF::move(task)))
         clearTicket(listLocker);
-    }
     clearTimer(listLocker);
 }
 
@@ -294,8 +330,7 @@ void Waiter::cancelAndClear(const AbstractLocker& listLocker)
 {
     ASSERT(m_isAsync);
     if (auto ticket = this->ticket(listLocker)) {
-        m_vm->deferredWorkTimer->cancelPendingWork(ticket.get());
-        m_vm->deferredWorkTimer->scheduleWorkSoon(ticket.get(), [](DeferredWorkTimer::Ticket) { });
+        m_vm->deferredWorkTimer->cancelPendingWork(*ticket);
         clearTicket(listLocker);
     }
     clearTimer(listLocker);

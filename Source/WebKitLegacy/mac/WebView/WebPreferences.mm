@@ -30,6 +30,7 @@
 #import "WebPreferencesInternal.h"
 
 #import "NetworkStorageSessionMap.h"
+#import <WebCore/CookieStorageSession.h>
 #import "WebFeature.h"
 #import "WebFrameNetworkingContext.h"
 #import "WebKitLogging.h"
@@ -42,7 +43,6 @@
 #import <JavaScriptCore/InitializeThreading.h>
 #import <WebCore/AudioSession.h>
 #import <WebCore/MediaPlayerEnums.h>
-#import <WebCore/NetworkStorageSession.h>
 #import <WebCore/Settings.h>
 #import <WebCore/WebCoreJITOperations.h>
 #import <WebCore/WebCoreMainThread.h>
@@ -56,6 +56,7 @@
 #import <wtf/RunLoop.h>
 #import <wtf/RuntimeApplicationChecks.h>
 #import <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
+#import <wtf/darwin/DispatchExtras.h>
 #import <wtf/darwin/DispatchOSObject.h>
 
 
@@ -119,7 +120,7 @@ struct WebPreferencesPrivate
 public:
     WebPreferencesPrivate()
 #if PLATFORM(IOS_FAMILY)
-        : readWriteQueue { adoptOSObject(dispatch_queue_create("com.apple.WebPreferences.ReadWriteQueue", DISPATCH_QUEUE_CONCURRENT)) }
+        : readWriteQueue { adoptOSObject(dispatch_queue_create("com.apple.WebPreferences.ReadWriteQueue", concurrentQueueWithAutoreleasePoolAttrSingleton())) }
 #endif
     {
     }
@@ -1240,7 +1241,6 @@ public:
 }
 #endif
 
-#if ENABLE(TEXT_AUTOSIZING)
 - (void)_setMinimumZoomFontSize:(float)size
 {
     [self _setFloatValue:size forKey:WebKitMinimumZoomFontSizePreferenceKey];
@@ -1260,7 +1260,6 @@ public:
 {
     return [self _boolValueForKey:WebKitTextAutosizingEnabledPreferenceKey];
 }
-#endif
 
 #if PLATFORM(IOS_FAMILY)
 - (void)_setMaxParseDuration:(float)d
@@ -1573,26 +1572,6 @@ static RetainPtr<NSString>& NODELETE classIBCreatorID()
 - (void)_setLocalStorageDatabasePath:(NSString *)path
 {
     [self _setStringValue:[path stringByStandardizingPath] forKey:WebKitLocalStorageDatabasePathPreferenceKey];
-}
-
-- (NSString *)_ftpDirectoryTemplatePath
-{
-    return [[self _stringValueForKey:WebKitFTPDirectoryTemplatePath] stringByStandardizingPath];
-}
-
-- (void)_setFTPDirectoryTemplatePath:(NSString *)path
-{
-    [self _setStringValue:[path stringByStandardizingPath] forKey:WebKitFTPDirectoryTemplatePath];
-}
-
-- (BOOL)_forceFTPDirectoryListings
-{
-    return [self _boolValueForKey:WebKitForceFTPDirectoryListings];
-}
-
-- (void)_setForceFTPDirectoryListings:(BOOL)force
-{
-    [self _setBoolValue:force forKey:WebKitForceFTPDirectoryListings];
 }
 
 - (BOOL)acceleratedDrawingEnabled

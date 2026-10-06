@@ -301,6 +301,7 @@ public:
     static Structure* toUncacheableDictionaryTransition(VM&, Structure*, DeferredStructureTransitionWatchpointFire* = nullptr);
     JS_EXPORT_PRIVATE static Structure* sealTransition(VM&, Structure*, DeferredStructureTransitionWatchpointFire* = nullptr);
     JS_EXPORT_PRIVATE static Structure* freezeTransition(VM&, Structure*, DeferredStructureTransitionWatchpointFire* = nullptr);
+    JS_EXPORT_PRIVATE static Structure* makePropertiesImmutableTransition(VM&, Structure*, DeferredStructureTransitionWatchpointFire* = nullptr);
     static Structure* preventExtensionsTransition(VM&, Structure*, DeferredStructureTransitionWatchpointFire* = nullptr);
     static Structure* nonPropertyTransition(VM&, Structure*, TransitionKind, DeferredStructureTransitionWatchpointFire*);
     static Structure* setBrandTransitionFromExistingStructureConcurrently(Structure*, UniquedStringImpl*);
@@ -374,6 +375,12 @@ public:
     bool hasNonReifiedStaticProperties() const
     {
         return typeInfo().hasStaticPropertyTable() && !staticPropertiesReified();
+    }
+
+    // What sends a put off the fast path when the object is its receiver. One test, as both are bits of m_bitField.
+    bool hasReadOnlyOrGetterSetterPropertiesExcludingProtoOrImmutableProperties() const
+    {
+        return m_bitField & (s_hasReadOnlyOrGetterSetterPropertiesExcludingProtoBits | s_hasImmutablePropertiesBits);
     }
 
     bool isNonExtensibleOrHasNonConfigurableProperties() const
@@ -648,6 +655,8 @@ public:
     inline JSValue cachedSpecialProperty(CachedSpecialPropertyKey key); // Defined in StructureInlines.h
     void cacheSpecialProperty(JSGlobalObject*, VM&, JSValue, CachedSpecialPropertyKey, const PropertySlot&);
 
+    inline JSString* defaultToPrimitiveFastAndNonObservable(VM&);
+
     static constexpr ptrdiff_t prototypeOffset()
     {
         return OBJECT_OFFSETOF(Structure, m_prototype);
@@ -776,7 +785,7 @@ public:
     
     void dump(PrintStream&) const;
     void dumpInContext(PrintStream&, DumpContext*) const;
-    void dumpBrief(PrintStream&, const CString&) const;
+    void dumpBrief(PrintStream&, const ASCIICString&) const;
     
     static void dumpContextHeader(PrintStream&);
     
@@ -834,6 +843,7 @@ public:
     DEFINE_BITFIELD(bool, hasNonEnumerableProperties, HasNonEnumerableProperties, 1, 6);
     DEFINE_BITFIELD(bool, hasSpecialProperties, HasSpecialProperties, 1, 7);
     DEFINE_BITFIELD(DefinitelyNonThenableState, definitelyNonThenableState, DefinitelyNonThenableState, 2, 8); // This flag can be flipped on the main thread at any timing.
+    DEFINE_BITFIELD(bool, hasImmutableProperties, HasImmutableProperties, 1, 10); // Set by TransitionKind::MakePropertiesImmutable and inherited by every later transition. See JSObject::makePropertiesImmutable().
     DEFINE_BITFIELD(TransitionKind, transitionKind, TransitionKind, 5, 13);
     DEFINE_BITFIELD(bool, isWatchingReplacement, IsWatchingReplacement, 1, 18); // This flag can be fliped on the main thread at any timing.
     DEFINE_BITFIELD(bool, mayBePrototype, MayBePrototype, 1, 19);
@@ -864,6 +874,7 @@ public:
     {
         return flags == (flags & (
             s_didPreventExtensionsBits
+            | s_hasImmutablePropertiesBits
             | s_isQuickPropertyAccessAllowedForEnumerationBits
             | s_hasNonEnumerablePropertiesBits
             | s_hasSpecialPropertiesBits
@@ -885,7 +896,7 @@ public:
         return numberOfSlotsForMaxOffset(maxOffset(), m_inlineCapacity);
     }
 
-    void finalizeUnconditionally(VM&, CollectionScope);
+    void reconcileWeakReferencesAtGCEnd(VM&, CollectionScope);
 
 protected:
     Structure(VM&, StructureVariant, Structure* previous); // Branded/Normal only

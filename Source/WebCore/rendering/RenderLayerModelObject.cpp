@@ -56,6 +56,7 @@
 #include "SVGGraphicsElement.h"
 #include "SVGMarkerElement.h"
 #include "SVGMaskElement.h"
+#include "SVGPaintServerCacheInlines.h"
 #include "SVGTextElement.h"
 #include "SVGURIReference.h"
 #include "Settings.h"
@@ -69,6 +70,7 @@
 namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderLayerModelObject);
+WTF_MAKE_TZONE_ALLOCATED_IMPL(SVGPaintServerCache);
 
 bool RenderLayerModelObject::s_wasFloating = false;
 bool RenderLayerModelObject::s_hadLayer = false;
@@ -143,19 +145,23 @@ bool RenderLayerModelObject::hasSelfPaintingLayer() const
 
 bool RenderLayerModelObject::requiresLayerForSVGIntrinsicReasons() const
 {
+    if (RefPtr svgElement = dynamicDowncast<SVGElement>(element()); svgElement && svgElement->isReferencedByFEImage())
+        return true;
+
     // Plain 2D transforms need no layer, paintRendererByApplyingTransformForSVG() handles them.
     // 3D transforms require compositing, hence a layer, as do grouping effects, z-index, etc.
-    return createsGroup()
-        || style().transform().has3DOperation()
-        || style().translate().is3DOperation()
-        || style().scale().is3DOperation()
-        || style().rotate().is3DOperation()
-        || style().transformStyle3D() == TransformStyle3D::Preserve3D
-        || !style().perspective().isNone()
+    auto& style = this->style();
+    return createsGroupForStyleExcludingClipPathAndMask(style)
+        || style.transform().has3DOperation()
+        || style.translate().is3DOperation()
+        || style.scale().is3DOperation()
+        || style.rotate().is3DOperation()
+        || style.transformStyle3D() == TransformStyle3D::Preserve3D
+        || !style.perspective().isNone()
         || hasHiddenBackface()
         || hasReflection()
-        || !style().specifiedZIndex().isAuto()
-        || style().isolation() != Isolation::Auto;
+        || !style.specifiedZIndex().isAuto()
+        || style.isolation() != Isolation::Auto;
 }
 
 void RenderLayerModelObject::styleWillChange(Style::Difference diff, const Style::ComputedStyle& newStyle)
@@ -176,6 +182,12 @@ void RenderLayerModelObject::styleDidChange(Style::Difference diff, const Style:
 {
     updateFromStyle();
     RenderElement::styleDidChange(diff, oldStyle);
+
+    // Drop the cached paint-server resolution only when fill/stroke actually changed. SVG animation
+    // restyles the element every frame (e.g. the transform presentation attribute) without touching
+    // fill/stroke, and the cache must survive those to be worthwhile.
+    if (!oldStyle || oldStyle->fill() != style().fill() || oldStyle->stroke() != style().stroke())
+        invalidateSVGPaintServerCache();
 
     // When an out-of-flow-positioned element changes its display between block and inline-block,
     // then an incremental layout on the element's containing block lays out the element through
@@ -253,7 +265,7 @@ void RenderLayerModelObject::styleDidChange(Style::Difference diff, const Style:
     }
 }
 
-bool RenderLayerModelObject::applyCachedClipAndScrollPosition(RepaintRects&, const RenderLayerModelObject*, VisibleRectContext) const
+bool RenderLayerModelObject::applyCachedClipAndScrollPosition(RepaintRects&, const RenderLayerModelObject*, const VisibleRectContext&) const
 {
     return false;
 }
@@ -308,13 +320,6 @@ void RenderLayerModelObject::transformRelatedPropertyDidChange()
     layer()->backing()->transformRelatedPropertyDidChange();
 }
 
-void RenderLayerModelObject::suspendAnimations(MonotonicTime time)
-{
-    if (!layer() || !layer()->backing())
-        return;
-    layer()->backing()->suspendAnimations(time);
-}
-
 TransformationMatrix* RenderLayerModelObject::layerTransform() const
 {
     if (hasLayer())
@@ -352,11 +357,10 @@ bool RenderLayerModelObject::shouldPaintSVGRenderer(const PaintInfo& paintInfo, 
     return true;
 }
 
-auto RenderLayerModelObject::computeVisibleRectsInSVGContainer(const RepaintRects& rects, const RenderLayerModelObject* container, VisibleRectContext context) const -> std::optional<RepaintRects>
+auto RenderLayerModelObject::computeVisibleRectsInSVGContainer(const RepaintRects& rects, const RenderLayerModelObject* container, const VisibleRectContext& context, VisibleRectState state) const -> std::optional<RepaintRects>
 {
     ASSERT(is<RenderSVGModelObject>(this) || is<RenderSVGBlock>(this));
     ASSERT(!style().hasInFlowPosition());
-    ASSERT(!view().frameView().layoutContext().isPaintOffsetCacheEnabled());
 
     if (container == this)
         return rects;
@@ -406,7 +410,7 @@ auto RenderLayerModelObject::computeVisibleRectsInSVGContainer(const RepaintRect
         }
     }
 
-    return localContainer->computeVisibleRectsInContainer(adjustedRects, container, context);
+    return localContainer->computeVisibleRectsInContainer(adjustedRects, container, context, state);
 }
 
 void RenderLayerModelObject::mapLocalToSVGContainer(const RenderLayerModelObject* ancestorContainer, TransformState& transformState, OptionSet<MapCoordinatesMode> mode, bool* wasFixed) const
@@ -417,7 +421,7 @@ void RenderLayerModelObject::mapLocalToSVGContainer(const RenderLayerModelObject
     if (ancestorContainer == this)
         return;
 
-    ASSERT(!view().frameView().layoutContext().isPaintOffsetCacheEnabled());
+    ASSERT(ancestorContainer || !view().frameView().layoutContext().isPaintOffsetCacheEnabled());
 
     bool ancestorSkipped;
     auto* container = this->container(ancestorContainer, ancestorSkipped);
@@ -445,9 +449,13 @@ void RenderLayerModelObject::mapLocalToSVGContainer(const RenderLayerModelObject
 
 void RenderLayerModelObject::applySVGTransform(TransformationMatrix& transform, const SVGGraphicsElement& graphicsElement, const Style::ComputedStyle& style, const FloatRect& boundingBox, const std::optional<AffineTransform>& preApplySVGTransformMatrix, const std::optional<AffineTransform>& postApplySVGTransformMatrix, OptionSet<Style::TransformResolverOption> options) const
 {
-    auto svgTransform = graphicsElement.transform().concatenate().value_or(identity);
-    auto* supplementalTransform = graphicsElement.supplementalTransform(); // SMIL <animateMotion>
+    // SMIL <animateMotion> sets the supplemental transform.
+    // FIXME: Switch from "const AffineTransform*" to "std::optional<AffineTransform>" for supplementalTransform().
+    applySVGTransform(transform, graphicsElement.concatenatedTransform(), graphicsElement.supplementalTransform(), style, boundingBox, preApplySVGTransformMatrix, postApplySVGTransformMatrix, options);
+}
 
+void RenderLayerModelObject::applySVGTransform(TransformationMatrix& transform, const AffineTransform& svgTransform, const AffineTransform* supplementalTransform, const Style::ComputedStyle& style, const FloatRect& boundingBox, const std::optional<AffineTransform>& preApplySVGTransformMatrix, const std::optional<AffineTransform>& postApplySVGTransformMatrix, OptionSet<Style::TransformResolverOption> options) const
+{
     // This check does not use style.hasTransformRelatedProperty() on purpose -- we only want to know if either the 'transform' property, an
     // offset path, or the individual transform operations are set (perspective / transform-style: preserve-3d are not relevant here).
     bool hasCSSTransform = !style.transform().isNone()
@@ -455,7 +463,8 @@ void RenderLayerModelObject::applySVGTransform(TransformationMatrix& transform, 
         || !style.rotate().isNone()
         || !style.translate().isNone()
         || !style.scale().isNone();
-    bool hasSVGTransform = !svgTransform.isIdentity() || preApplySVGTransformMatrix || postApplySVGTransformMatrix || supplementalTransform;
+    bool hasSupplementalOrExternalTransformMatrix = preApplySVGTransformMatrix || postApplySVGTransformMatrix || supplementalTransform;
+    bool hasSVGTransform = !svgTransform.isIdentity() || hasSupplementalOrExternalTransformMatrix;
 
     // Common case: 'viewBox' set on outermost <svg> element -> 'preApplySVGTransformMatrix'
     // passed by RenderSVGViewportContainer::applyTransform(), the anonymous single child
@@ -479,8 +488,16 @@ void RenderLayerModelObject::applySVGTransform(TransformationMatrix& transform, 
     };
 
     FloatPoint3D originTranslate;
-    if (options.contains(Style::TransformResolverOption::TransformOrigin) && affectedByTransformOrigin())
-        originTranslate = transformResolver.computeTransformOrigin(boundingBox);
+    if (options.contains(Style::TransformResolverOption::TransformOrigin) && affectedByTransformOrigin()) {
+        // For a plain SVG transform-attribute shape (no CSS transform and no supplemental
+        // or external matrix) the transform origin depends only on the style and the reference box,
+        // both of which are stable while the shape is only animated by its transform.
+        std::optional<FloatPoint3D> cached;
+        if (!hasCSSTransform && !hasSupplementalOrExternalTransformMatrix)
+            cached = cachedTransformOriginForReferenceBox(style, boundingBox);
+
+        originTranslate = cached ? cached.value() : transformResolver.computeTransformOrigin(boundingBox);
+    }
 
     transformResolver.applyTransformOrigin(originTranslate);
 
@@ -634,44 +651,61 @@ RenderSVGResourceMarker* RenderLayerModelObject::svgMarkerResourceFromStyle(cons
     return nullptr;
 }
 
-RenderSVGResourcePaintServer* RenderLayerModelObject::svgFillPaintServerResourceFromStyle(const Style::ComputedStyle& style) const
+RenderSVGResourcePaintServer* RenderLayerModelObject::svgPaintServerResourceFromStyle(const Style::SVGPaint& paint, const Style::ComputedStyle& style, SVGPaintType paintType) const
 {
     if (!document().settings().layerBasedSVGEngineEnabled())
         return nullptr;
 
-    auto fillURL = style.fill().tryAnyURL();
-    if (!fillURL)
-        return nullptr;
-
-    if (RefPtr referencedElement = ReferencedSVGResources::referencedPaintServerElement(treeScopeForSVGReferences(), *fillURL)) {
-        if (auto* referencedPaintServerRenderer = dynamicDowncast<RenderSVGResourcePaintServer>(referencedElement->renderer()))
-            return referencedPaintServerRenderer;
+    // Only the renderer's own style is cached. A foreign style from the text selection or
+    // decoration painters resolves fresh.
+    CheckedPtr cache = &style == &this->style() ? svgPaintServerCache() : nullptr;
+    if (cache) {
+        if (auto* cached = cache->paintServer(paintType))
+            return cached;
     }
 
-    if (RefPtr element = this->element())
-        document().addPendingSVGResource(AtomString(fillURL->resolved.string()), downcast<SVGElement>(*element));
+    auto paintURL = paint.tryAnyURL();
+    if (!paintURL)
+        return nullptr;
+
+    // A paint server in an external document yields an empty fragment identifier here, since the
+    // URL does not match this document's. Such a reference registers no CSSSVGResourceElementClient,
+    // and that client is what drops the cache when the referenced element changes, so it has to
+    // resolve fresh every time.
+    auto resourceID = SVGURIReference::fragmentIdentifierFromIRIString(*paintURL, protect(document()));
+    if (resourceID.isEmpty())
+        cache = nullptr;
+
+    if (RefPtr referencedElement = ReferencedSVGResources::referencedPaintServerElement(treeScopeForSVGReferences(), *paintURL)) {
+        if (auto* referencedPaintServerRenderer = dynamicDowncast<RenderSVGResourcePaintServer>(referencedElement->renderer())) {
+            if (cache)
+                cache->setPaintServer(paintType, *referencedPaintServerRenderer);
+            return referencedPaintServerRenderer;
+        }
+    }
+
+    if (!resourceID.isEmpty()) {
+        if (RefPtr element = dynamicDowncast<SVGElement>(this->element()))
+            treeScopeForSVGReferences().addPendingSVGResource(resourceID, *element);
+    }
 
     return nullptr;
 }
 
+RenderSVGResourcePaintServer* RenderLayerModelObject::svgFillPaintServerResourceFromStyle(const Style::ComputedStyle& style) const
+{
+    return svgPaintServerResourceFromStyle(style.fill(), style, SVGPaintType::Fill);
+}
+
 RenderSVGResourcePaintServer* RenderLayerModelObject::svgStrokePaintServerResourceFromStyle(const Style::ComputedStyle& style) const
 {
-    if (!document().settings().layerBasedSVGEngineEnabled())
-        return nullptr;
+    return svgPaintServerResourceFromStyle(style.stroke(), style, SVGPaintType::Stroke);
+}
 
-    auto strokeURL = style.stroke().tryAnyURL();
-    if (!strokeURL)
-        return nullptr;
-
-    if (RefPtr referencedElement = ReferencedSVGResources::referencedPaintServerElement(treeScopeForSVGReferences(), *strokeURL)) {
-        if (auto* referencedPaintServerRenderer = dynamicDowncast<RenderSVGResourcePaintServer>(referencedElement->renderer()))
-            return referencedPaintServerRenderer;
-    }
-
-    if (RefPtr element = this->element())
-        document().addPendingSVGResource(AtomString(strokeURL->resolved.string()), downcast<SVGElement>(*element));
-
-    return nullptr;
+void RenderLayerModelObject::invalidateSVGPaintServerCache() const
+{
+    if (CheckedPtr cache = svgPaintServerCache())
+        cache->clear();
 }
 
 LegacyRenderSVGResourceClipper* RenderLayerModelObject::legacySVGClipperResourceFromStyle() const
@@ -824,6 +858,25 @@ void RenderLayerModelObject::updateTransformAndRepaintForSVGAfterAttributeChange
         }
     }
 
+    // An ancestor container's own bounding boxes (its object, stroke and repaint bounding boxes) and
+    // cached visual overflow rect are computed from its descendants, so they include this renderer's
+    // transformed bounds and go stale when its transform changes. This path skips the layout that would
+    // recompute them, so when the transform actually
+    // changed, invalidate both up the ancestor chain to the SVG root, giving getBBox() and paint or
+    // hit-test culling a fresh rect. The scale-change paths above already scheduled a relayout for this.
+    if (previousTransform != currentTransform) {
+        for (CheckedPtr ancestor = parent(); ancestor; ancestor = ancestor->parent()) {
+            if (CheckedPtr svgAncestor = dynamicDowncast<RenderLayerModelObject>(ancestor.get())) {
+                svgAncestor->invalidateCachedSVGTransformDependentBoundingBoxes();
+                svgAncestor->invalidateCachedVisualOverflowRect();
+                if (svgAncestor->hasLayer())
+                    svgAncestor->layer()->setNeedsPositionUpdate();
+            }
+            if (ancestor->isRenderSVGRoot())
+                break;
+        }
+    }
+
     // Scale unchanged, so no relayout is needed - just repaint the move. For a non-layered renderer
     // the batched transform flush repaints the moved region by comparing the renderer's repaint rect
     // from before and after the change, but it skips RenderSVGText because a text rect depends on
@@ -892,6 +945,17 @@ AffineTransform RenderLayerModelObject::computeRendererTransform() const
     auto referenceBoxRect = transformReferenceBoxRect(style());
     applyTransform(matrix, style(), referenceBoxRect, Style::TransformResolver::individualTransformOperations);
     return matrix.toAffineTransform();
+}
+
+void RenderLayerModelObject::contentChanged(ContentChangeType changeType, const std::optional<FloatRect>& dirtyRect)
+{
+    if (CheckedPtr layer = this->layer())
+        layer->contentChanged(changeType, dirtyRect);
+}
+
+bool RenderLayerModelObject::hasAcceleratedCompositing() const
+{
+    return view().compositor().hasAcceleratedCompositing();
 }
 
 #if ASSERT_ENABLED

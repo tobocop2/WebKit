@@ -38,6 +38,8 @@
 #include "JSTypedArrays.h"
 #include "MathCommon.h"
 #include "StructureCreateInlines.h"
+#include <cstddef>
+#include <optional>
 #include <wtf/Assertions.h>
 #include <wtf/text/ASCIILiteral.h>
 
@@ -83,6 +85,29 @@ Structure* JSGenericTypedArrayViewConstructor<ViewClass>::createStructure(
         vm, globalObject, prototype, TypeInfo(InternalFunctionType, StructureFlags), info());
 }
 
+// https://tc39.es/ecma262/#sec-initializetypedarrayfromlist
+template<typename ViewClass>
+inline JSObject* constructGenericTypedArrayViewFromList(JSGlobalObject* globalObject, Structure* structure, const MarkedArgumentBuffer& storage)
+{
+    VM& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    UNUSED_VARIABLE(scope);
+
+    ViewClass* result = ViewClass::createUninitialized(globalObject, structure, storage.size());
+    EXCEPTION_ASSERT(!!scope.exception() == !result);
+    if (!result) [[unlikely]]
+        return nullptr;
+
+    for (unsigned i = 0; i < storage.size(); ++i) {
+        bool success = result->setIndex(globalObject, i, storage.at(i));
+        EXCEPTION_ASSERT(scope.exception() || success);
+        if (!success)
+            return nullptr;
+    }
+
+    return result;
+}
+
 template<typename ViewClass>
 inline JSObject* constructGenericTypedArrayViewFromIterator(JSGlobalObject* globalObject, Structure* structure, JSObject* iterable, JSValue iteratorMethod)
 {
@@ -99,19 +124,24 @@ inline JSObject* constructGenericTypedArrayViewFromIterator(JSGlobalObject* glob
     });
     RETURN_IF_EXCEPTION(scope, nullptr);
 
-    ViewClass* result = ViewClass::createUninitialized(globalObject, structure, storage.size());
-    EXCEPTION_ASSERT(!!scope.exception() == !result);
-    if (!result) [[unlikely]]
-        return nullptr;
+    RELEASE_AND_RETURN(scope, constructGenericTypedArrayViewFromList<ViewClass>(globalObject, structure, storage));
+}
 
-    for (unsigned i = 0; i < storage.size(); ++i) {
-        bool success = result->setIndex(globalObject, i, storage.at(i));
-        EXCEPTION_ASSERT(scope.exception() || success);
-        if (!success)
-            return nullptr;
+template<typename ViewClass>
+inline JSObject* constructGenericTypedArrayViewFromFastArray(JSGlobalObject* globalObject, Structure* structure, JSArray* array)
+{
+    VM& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    MarkedArgumentBuffer storage;
+    array->fillArgList(globalObject, storage);
+    RETURN_IF_EXCEPTION(scope, nullptr);
+    if (storage.hasOverflowed()) [[unlikely]] {
+        throwOutOfMemoryError(globalObject, scope);
+        return nullptr;
     }
 
-    return result;
+    RELEASE_AND_RETURN(scope, constructGenericTypedArrayViewFromList<ViewClass>(globalObject, structure, storage));
 }
 
 constinit const ASCIILiteral typedArrayErrorMessageBufferIsAlreadyDetached = "Buffer is already detached"_s;
@@ -163,8 +193,8 @@ inline JSObject* constructGenericTypedArrayViewWithArguments(JSGlobalObject* glo
     if (JSArrayBuffer* jsBuffer = dynamicDowncast<JSArrayBuffer>(firstValue))
         RELEASE_AND_RETURN(scope, constructGenericTypedArrayViewWithArrayBuffer<ViewClass>(globalObject, structure, jsBuffer, offset, lengthOpt));
 
-    ASSERT(!offset && !lengthOpt);
-    
+    ASSERT(!offset);
+
     // For everything but DataView, we allow construction with any of:
     // - Another array. This creates a copy of the of that array.
     // - A primitive. This creates a new typed array of that length and zero-initializes it.
@@ -202,9 +232,14 @@ inline JSObject* constructGenericTypedArrayViewWithArguments(JSGlobalObject* glo
 
         // This getPropertySlot operation should not be observed by the Proxy.
         // So we use VMInquiry. And purge the opaque object cases (proxy and namespace object) by isTaintedByOpaqueObject() guard.
-        if (JSArray* array = dynamicDowncast<JSArray>(object); array && isJSArray(array) && array->isIteratorProtocolFastAndNonObservable()) [[likely]]
+        if (JSArray* array = dynamicDowncast<JSArray>(object); array && isJSArray(array) && array->isIteratorProtocolFastAndNonObservable()) [[likely]] {
+            // Every element must be read before any of them is converted, since converting an object
+            // runs valueOf or toString, which can modify the array. Only these shapes can hold an object.
+            IndexingType indexingType = array->indexingType();
+            if (hasContiguous(indexingType) || hasAnyArrayStorage(indexingType))
+                RELEASE_AND_RETURN(scope, constructGenericTypedArrayViewFromFastArray<ViewClass>(globalObject, structure, array));
             length = array->length();
-        else {
+        } else {
             PropertySlot lengthSlot(object, PropertySlot::InternalMethodType::VMInquiry, &vm);
             object->getPropertySlot(globalObject, vm.propertyNames->length, lengthSlot);
             RETURN_IF_EXCEPTION(scope, nullptr);
@@ -250,10 +285,29 @@ inline JSObject* constructGenericTypedArrayViewWithArguments(JSGlobalObject* glo
         return result;
     }
 
-    size_t length = firstValue.toIndex(globalObject, "length"_s);
-    RETURN_IF_EXCEPTION(scope, nullptr);
+    ASSERT(!offset && lengthOpt.has_value());
+    ASSERT(!firstValue.isObject());
 
+    size_t length = lengthOpt.value();
     RELEASE_AND_RETURN(scope, ViewClass::create(globalObject, structure, length));
+}
+
+template<typename ViewClass>
+inline JSObject* operationConstructGenericTypedArrayViewWithOneArgumentImpl(JSGlobalObject* globalObject, Structure* structure, JSValue firstValue)
+{
+    static_assert(ViewClass::TypedArrayStorageType != TypeDataView);
+
+    VM& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    std::optional<size_t> length;
+    if (!firstValue.isObject()) {
+        // the step 9 of https://tc39.es/ecma262/2026/#sec-typedarray
+        length = firstValue.toIndex(globalObject, "length"_s);
+        RETURN_IF_EXCEPTION(scope, { });
+    }
+
+    RELEASE_AND_RETURN(scope, constructGenericTypedArrayViewWithArguments<ViewClass>(globalObject, structure, firstValue, 0,  length));
 }
 
 // This is equivalent to https://tc39.es/ecma262/#sec-typedarray
@@ -306,6 +360,12 @@ ALWAYS_INLINE EncodedJSValue constructGenericTypedArrayViewImpl(JSGlobalObject* 
             }
         }
     } else {
+        if (!firstValue.isObject()) {
+            // the step 9 of https://tc39.es/ecma262/2026/#sec-typedarray
+            length = firstValue.toIndex(globalObject, "length"_s);
+            RETURN_IF_EXCEPTION(scope, { });
+        }
+
         structure = JSC_GET_DERIVED_STRUCTURE(vm, typedArrayStructureWithTypedArrayType<ViewClass::TypedArrayStorageType>, newTarget, callFrame->jsCallee());
         RETURN_IF_EXCEPTION(scope, { });
     }

@@ -46,6 +46,7 @@
 #include <wtf/RefPtr.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Vector.h>
+#include <wtf/WeakPtr.h>
 
 namespace Inspector {
 
@@ -57,7 +58,8 @@ class JS_EXPORT_PRIVATE InspectorDebuggerAgent
     : public InspectorAgentBase
     , public DebuggerBackendDispatcherHandler
     , public JSC::Debugger::Client
-    , public JSC::Debugger::Observer {
+    , public JSC::Debugger::Observer
+    , public CanMakeWeakPtr<InspectorDebuggerAgent> {
     WTF_MAKE_NONCOPYABLE(InspectorDebuggerAgent);
     WTF_MAKE_TZONE_ALLOCATED(InspectorDebuggerAgent);
 public:
@@ -108,10 +110,12 @@ public:
     JSC::JSObject* debuggerScopeExtensionObject(JSC::Debugger&, JSC::JSGlobalObject*, JSC::DebuggerCallFrame&) final;
 
     // JSC::Debugger::Observer
-    void didParseSource(JSC::SourceID, const JSC::Debugger::Script&) final;
+    void didParseSource(JSC::JSGlobalObject*, JSC::SourceID, const JSC::Debugger::Script&) final;
     void failedToParseSource(const String& url, const String& data, int firstLine, int errorLine, const String& errorMessage) final;
     void didCreateNativeExecutable(JSC::NativeExecutable&) final;
     void willCallNativeExecutable(JSC::CallFrame*) final;
+    void didCreateInternalFunction(JSC::InternalFunction&) final;
+    void willCallInternalFunction(JSC::InternalFunction&) final;
     void willEnter(JSC::CallFrame*) final;
     void didQueueMicrotask(JSC::JSGlobalObject*, JSC::MicrotaskIdentifier) final;
     void willRunMicrotask(JSC::JSGlobalObject*, JSC::MicrotaskIdentifier) final;
@@ -179,6 +183,7 @@ protected:
     virtual void unmuteConsole() = 0;
 
     virtual String sourceMapURLForScript(const JSC::Debugger::Script&);
+    virtual String requestIdForScript(JSC::JSGlobalObject*, const JSC::Debugger::Script&);
 
     void didClearGlobalObject();
     virtual void didClearAsyncStackTraceData();

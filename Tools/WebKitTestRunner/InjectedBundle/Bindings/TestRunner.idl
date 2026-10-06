@@ -141,6 +141,7 @@ interface TestRunner {
     // For Web Inspector tests
     undefined showWebInspector();
     undefined closeWebInspector();
+    undefined disconnectFrameInspectorTarget();
     undefined evaluateInWebInspector(DOMString script);
     readonly attribute DOMString inspectorTestStubURL;
 
@@ -188,6 +189,7 @@ interface TestRunner {
     undefined resumeBackgroundFetch(DOMString identifier);
     undefined simulateClickBackgroundFetch(DOMString identifier);
     undefined setBackgroundFetchPermission(boolean value);
+    undefined setVirtualWalletBehavior(DOMString action, DOMString protocol, DOMString responseJSON);
     DOMString lastAddedBackgroundFetchIdentifier();
     DOMString lastRemovedBackgroundFetchIdentifier();
     DOMString lastUpdatedBackgroundFetchIdentifier();

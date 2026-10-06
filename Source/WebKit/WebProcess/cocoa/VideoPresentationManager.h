@@ -110,6 +110,7 @@ private:
     void audioSessionCategoryChanged(WebCore::AudioSessionCategory, WebCore::AudioSessionMode, WebCore::RouteSharingPolicy) final;
     void routingContextUIDChanged(const String&) final;
     void hasBeenInteractedWith() final;
+    void hasObjectViewBoxChanged(bool) final;
 
     // CheckedPtr interface
     uint32_t checkedPtrCount() const final { return CanMakeCheckedPtr::checkedPtrCount(); }
@@ -156,6 +157,8 @@ public:
     void setupRemoteLayerHosting(WebCore::HTMLVideoElement&);
     void willRemoveLayerForID(WebCore::MediaPlayerClientIdentifier);
 
+    RefPtr<WebCore::HTMLVideoElement> videoElementForContext(WebCore::MediaPlayerClientIdentifier) const;
+
     void swapFullscreenModes(WebCore::HTMLVideoElement&, WebCore::HTMLVideoElement&);
 
     // Interface to WebChromeClient
@@ -197,6 +200,7 @@ protected:
     void setPlayerIdentifier(WebCore::MediaPlayerClientIdentifier, std::optional<WebCore::MediaPlayerIdentifier>);
     void audioSessionCategoryChanged(WebCore::MediaPlayerClientIdentifier, WebCore::AudioSessionCategory, WebCore::AudioSessionMode, WebCore::RouteSharingPolicy);
     void routingContextUIDChanged(WebCore::MediaPlayerClientIdentifier, const String&);
+    void hasObjectViewBoxChanged(WebCore::MediaPlayerClientIdentifier, bool);
 
     // Messages from VideoPresentationManagerProxy
     void requestFullscreenMode(WebCore::MediaPlayerClientIdentifier, WebCore::HTMLMediaElementEnums::VideoFullscreenMode, bool finishedWithMedia);

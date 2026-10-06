@@ -30,6 +30,9 @@
 #include "ContainerNodeInlines.h"
 #include "InlineIteratorBoxInlines.h"
 #include "InlineIteratorInlineBox.h"
+#include "LocalFrameViewInlines.h"
+#include "RenderBoxInlines.h"
+#include "RenderElementInlines.h"
 #include "RenderGrid.h"
 #include "RenderInline.h"
 #include "RenderLayer.h"
@@ -136,6 +139,32 @@ bool PositionedLayoutConstraints::isParentOpposingContainingBlock() const
     bool physicalAxisIsCBBlock = m_containingWritingMode.isHorizontal() != (m_physicalAxis == BoxAxis::Horizontal);
     bool containingBlockFlipped = physicalAxisIsCBBlock && m_containingWritingMode.isBlockFlipped();
     return parentFlipped != containingBlockFlipped;
+}
+
+bool PositionedLayoutConstraints::usesStaticPosition(const Style::ComputedStyle& style, LogicalBoxAxis axis, bool isHorizontalWritingMode)
+{
+    if (!style.positionArea().isNone())
+        return false;
+    if (axis == LogicalBoxAxis::Inline)
+        return style.hasStaticInlinePosition(isHorizontalWritingMode) && !style.justifySelf().isAnchorCenter();
+    return style.hasStaticBlockPosition(isHorizontalWritingMode) && !style.alignSelf().isAnchorCenter();
+}
+
+LayoutSize PositionedLayoutConstraints::containingBlockOffsetForNonStaticAxes(const RenderBoxModelObject& container, const Style::ComputedStyle& outOfFlowBoxStyle)
+{
+    auto isHorizontal = container.writingMode().isHorizontal();
+    auto firstFragmentBorderBoxRect = container.firstFragmentBorderBoxRect();
+    if (container.writingMode().isBlockFlipped()) {
+        // firstFragmentBorderBoxRect() is flipped for painting while this offset is added to unflipped locations.
+        if (CheckedPtr containingBlock = container.containingBlock())
+            containingBlock->flipForWritingMode(firstFragmentBorderBoxRect);
+    }
+    auto offset = toLayoutSize(firstFragmentBorderBoxRect.location());
+    if (usesStaticPosition(outOfFlowBoxStyle, LogicalBoxAxis::Inline, isHorizontal))
+        isHorizontal ? offset.setWidth(0_lu) : offset.setHeight(0_lu);
+    if (usesStaticPosition(outOfFlowBoxStyle, LogicalBoxAxis::Block, isHorizontal))
+        isHorizontal ? offset.setHeight(0_lu) : offset.setWidth(0_lu);
+    return offset;
 }
 
 void PositionedLayoutConstraints::captureInsets()
@@ -365,6 +394,32 @@ std::optional<LayoutUnit> PositionedLayoutConstraints::remainingSpaceForStaticAl
     return { };
 }
 
+bool PositionedLayoutConstraints::shouldAlignStaticPositionInInlineAxis() const
+{
+    // justify-self can align an out-of-flow box within its static-position rectangle when both
+    // inline-axis insets are auto. See https://drafts.csswg.org/css-align-3/#justify-abspos
+    if (!m_useStaticPosition)
+        return false;
+
+    // Only the box's own inline axis (justify-self); orthogonal / block-axis static positioning
+    // keeps the existing static-position path.
+    if (m_selfAxis != LogicalBoxAxis::Inline || m_containingAxis != LogicalBoxAxis::Inline)
+        return false;
+
+    // The static position must be established by a non-replaced block container, matching where
+    // justify-self applies to in-flow block-level boxes. Flex and grid containers position their
+    // abspos children with their own rules, and inline boxes don't align their out-of-flow
+    // children -- none of those are block containers.
+    CheckedPtr parent = m_renderer->parent();
+    if (!parent || !parent->isBlockContainer())
+        return false;
+
+    // normal / stretch / legacy keeps the box at its static position, which the existing path
+    // already computes correctly for every writing-mode / direction combination. Note that auto
+    // resolves against the parent's justify-items, so it may still resolve to a real alignment here.
+    return !m_style.justifySelf().resolve(m_renderer->parentStyle()).isNormalStretchOrLegacy();
+}
+
 // See CSS2 § 10.3.7-8 and 10.6.4-5.
 void PositionedLayoutConstraints::resolvePosition(RenderBox::LogicalExtentComputedValues& computedValues) const
 {
@@ -405,7 +460,12 @@ void PositionedLayoutConstraints::resolvePosition(RenderBox::LogicalExtentComput
     } else {
         if (auto staticRemainingSpace = remainingSpaceForStaticAlignment(outerSize))
             alignmentShift = resolveAlignmentShift(*staticRemainingSpace, outerSize);
-        else if (hasAutoBeforeInset != hasAutoAfterInset)
+        else if (shouldAlignStaticPositionInInlineAxis()) {
+            // Both insets were auto (static position) and an explicit justify-self was specified:
+            // align the box's margin box within its static-position rectangle.
+            // https://drafts.csswg.org/css-align-3/#justify-abspos
+            alignmentShift = resolveAlignmentShift(remainingSpace, outerSize);
+        } else if (hasAutoBeforeInset != hasAutoAfterInset)
             alignmentShift = hasAutoAfterInset ? 0_lu : remainingSpace;
         else // Align into remaining space.
             alignmentShift = resolveAlignmentShift(remainingSpace, outerSize);
@@ -435,8 +495,6 @@ LayoutUnit PositionedLayoutConstraints::resolveAlignmentShift(LayoutUnit unusedS
 {
     bool startIsBefore = this->startIsBefore();
     bool isOverflowing = unusedSpace < 0_lu;
-    if (isOverflowing && OverflowAlignment::Safe == m_alignment.overflow())
-        return startIsBefore ? 0_lu : unusedSpace;
 
     ItemPosition resolvedAlignment = resolveAlignmentValue();
     ASSERT(ItemPosition::Auto != resolvedAlignment);
@@ -454,7 +512,7 @@ LayoutUnit PositionedLayoutConstraints::resolveAlignmentShift(LayoutUnit unusedS
                     shift = unusedSpace;
             }
         }
-        if (!isOverflowing && OverflowAlignment::Default == m_alignment.overflow()) {
+        if (!isOverflowing && OverflowAlignment::Unsafe != m_alignment.overflow()) {
             // Avoid introducing overflow of the IMCB.
             if (shift < 0)
                 shift = 0;
@@ -467,12 +525,12 @@ LayoutUnit PositionedLayoutConstraints::resolveAlignmentShift(LayoutUnit unusedS
     }
 
     if (isOverflowing && ItemPosition::Normal != resolvedAlignment
-        && OverflowAlignment::Default == m_alignment.overflow()) {
+        && OverflowAlignment::Unsafe != m_alignment.overflow()) {
         // Allow overflow, but try to stay within the containing block.
         // See https://www.w3.org/TR/css-align-3/#auto-safety-position
 
         auto containingRange = m_originalContainingRange;
-        if (m_defaultAnchorBox && PositionType::Fixed == m_style.position()) {
+        if (m_defaultAnchorBox && PositionType::Fixed == m_style.position() && OverflowAlignment::Default == m_alignment.overflow()) {
             // We didn't modify the m_containingRange to include scrollable area for positioning,
             // but we should allow it for overflow management if we can scroll to reach that overflow.
             if (auto renderView = dynamicDowncast<RenderView>(m_container.get())) {
@@ -514,6 +572,11 @@ LayoutUnit PositionedLayoutConstraints::resolveAlignmentShift(LayoutUnit unusedS
 ItemPosition PositionedLayoutConstraints::resolveAlignmentValue() const
 {
     if (m_useStaticPosition) {
+        // At the static position an explicit justify-self aligns the box within its
+        // static-position rectangle, resolving against the parent (the static-position
+        // containing block); auto resolves to the parent's justify-items.
+        if (shouldAlignStaticPositionInInlineAxis())
+            return m_style.justifySelf().resolve(m_renderer->parentStyle()).position();
 #if ASSERT_ENABLED
         ASSERT(m_isEligibleForStaticRangeAlignment);
 #endif
@@ -694,7 +757,7 @@ static LayoutPoint staticDistance(const RenderBoxModelObject& container, const R
         hasSeenNonInlineBoxContainer = true;
     }
 
-    if (!hasSeenNonInlineBoxContainer && is<RenderInline>(container)) {
+    if (!hasSeenNonInlineBoxContainer && container.isInlineBox()) {
         // This is a simple case of when the containing block is formed by a positioned inline box with no block boxes in-between (e.g <span style="position: relative">)
         return initialStaticPosition();
     }

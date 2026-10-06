@@ -29,6 +29,7 @@
 #include "BatchedTransitionOptimizer.h"
 #include "CodeCache.h"
 #include "Debugger.h"
+#include "JSCInlines.h"
 #include "SymbolTableInlines.h"
 #include "VMTrapsInlines.h"
 #include <wtf/text/MakeString.h>
@@ -82,7 +83,11 @@ static ALWAYS_INLINE bool requiresCanDeclareGlobalFunctionQuirk()
 #endif
 }
 
+#if USE(BUN_JSC_ADDITIONS)
+JSObject* ProgramExecutable::initializeGlobalProperties(VM& vm, JSGlobalObject* globalObject, JSScope* scope, UnlinkedProgramCodeBlock* precompiled)
+#else
 JSObject* ProgramExecutable::initializeGlobalProperties(VM& vm, JSGlobalObject* globalObject, JSScope* scope)
+#endif
 {
     DeferTermination deferScope(vm);
     auto throwScope = DECLARE_THROW_SCOPE(vm);
@@ -93,8 +98,18 @@ JSObject* ProgramExecutable::initializeGlobalProperties(VM& vm, JSGlobalObject* 
 
     ParserError error;
     OptionSet<CodeGenerationMode> codeGenerationMode = globalObject->defaultCodeGenerationMode();
+#if USE(BUN_JSC_ADDITIONS)
+    UnlinkedProgramCodeBlock* unlinkedCodeBlock = nullptr;
+    if (precompiled && precompiled->codeGenerationMode() == codeGenerationMode) {
+        unlinkedCodeBlock = precompiled;
+        recordParseFromUnlinkedCodeBlock(this, source(), unlinkedCodeBlock);
+    } else {
+        unlinkedCodeBlock = vm.codeCache()->getUnlinkedProgramCodeBlock(vm, this, source(), codeGenerationMode, error);
+    }
+#else
     UnlinkedProgramCodeBlock* unlinkedCodeBlock = vm.codeCache()->getUnlinkedProgramCodeBlock(
         vm, this, source(), codeGenerationMode, error);
+#endif
 
     if (globalObject->hasDebugger())
         globalObject->debugger()->sourceParsed(globalObject, source().provider(), error.line(), error.message());
@@ -125,6 +140,8 @@ JSObject* ProgramExecutable::initializeGlobalProperties(VM& vm, JSGlobalObject* 
                 bool hasProperty = globalLexicalEnvironment->hasProperty(globalObject, entry.key.get());
                 RETURN_IF_EXCEPTION(throwScope, nullptr);
                 if (hasProperty) {
+                    if (vm.allowRedeclaringSymbols()) [[unlikely]]
+                        continue;
                     if (entry.value.isConst() && !vm.globalConstRedeclarationShouldThrow() && !isInStrictContext()) [[unlikely]] {
                         // We only allow "const" duplicate declarations under this setting.
                         // For example, we don't allow "let" variables to be overridden by "const" variables.
@@ -250,6 +267,8 @@ JSObject* ProgramExecutable::initializeGlobalProperties(VM& vm, JSGlobalObject* 
         SymbolTable* symbolTable = globalLexicalEnvironment->symbolTable();
         ConcurrentJSLocker locker(symbolTable->m_lock);
         for (auto& entry : lexicalDeclarations) {
+            if (vm.allowRedeclaringSymbols() && symbolTable->contains(locker, entry.key.get())) [[unlikely]]
+                continue;
             if (entry.value.isConst() && !vm.globalConstRedeclarationShouldThrow() && !isInStrictContext()) [[unlikely]] {
                 if (symbolTable->contains(locker, entry.key.get()))
                     continue;
@@ -257,7 +276,7 @@ JSObject* ProgramExecutable::initializeGlobalProperties(VM& vm, JSGlobalObject* 
             ScopeOffset offset = symbolTable->takeNextScopeOffset(locker);
             SymbolTableEntry newEntry(VarOffset(offset), static_cast<unsigned>(entry.value.isConst() ? PropertyAttribute::ReadOnly : PropertyAttribute::None));
             newEntry.prepareToWatch();
-            symbolTable->add(locker, entry.key.get(), newEntry);
+            symbolTable->add(locker, entry.key.get(), WTF::move(newEntry));
             
             ScopeOffset offsetForAssert = globalLexicalEnvironment->addVariables(1, jsTDZValue());
             RELEASE_ASSERT(offsetForAssert == offset);

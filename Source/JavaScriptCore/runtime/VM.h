@@ -30,28 +30,27 @@
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
-#include "ConcurrentJSLock.h"
-#include "DFGDoesGCCheck.h"
-#include "ExceptionEventLocation.h"
-#include "FunctionHasExecutedCache.h"
-#include "Heap.h"
-#include "ImplementationVisibility.h"
-#include "IndexingType.h"
-#include "Integrity.h"
-#include "Interpreter.h"
-#include "JSDateMath.h"
-#include "JSONAtomStringCache.h"
-#include "KeyAtomStringCache.h"
-#include "NativeFunction.h"
-#include "NumericStrings.h"
-#include "SmallStrings.h"
-#include "StringReplaceCache.h"
-#include "StringSplitCache.h"
-#include "StrongForward.h"
-#include "VMThreadContext.h"
-#include "VMTraps.h"
-#include "WeakGCMap.h"
-#include "WriteBarrier.h"
+#include <JavaScriptCore/ConcurrentJSLock.h>
+#include <JavaScriptCore/DFGDoesGCCheck.h>
+#include <JavaScriptCore/ExceptionEventLocation.h>
+#include <JavaScriptCore/FunctionHasExecutedCache.h>
+#include <JavaScriptCore/Heap.h>
+#include <JavaScriptCore/ImplementationVisibility.h>
+#include <JavaScriptCore/IndexingType.h>
+#include <JavaScriptCore/Integrity.h>
+#include <JavaScriptCore/Interpreter.h>
+#include <JavaScriptCore/JSDateMath.h>
+#include <JavaScriptCore/JSONAtomStringCache.h>
+#include <JavaScriptCore/KeyAtomStringCache.h>
+#include <JavaScriptCore/NativeFunction.h>
+#include <JavaScriptCore/NumericStrings.h>
+#include <JavaScriptCore/SmallStrings.h>
+#include <JavaScriptCore/StringReplaceCache.h>
+#include <JavaScriptCore/StrongForward.h>
+#include <JavaScriptCore/VMThreadContext.h>
+#include <JavaScriptCore/WeakGCMap.h>
+#include <JavaScriptCore/WriteBarrier.h>
+#include <wtf/ApproximateTime.h>
 #include <wtf/BumpPointerAllocator.h>
 #include <wtf/CheckedArithmetic.h>
 #include <wtf/Compiler.h>
@@ -60,6 +59,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include <wtf/Lock.h>
 #include <wtf/MallocPtr.h>
 #include <wtf/ObjectIdentifier.h>
+#include <wtf/ScopedLambda.h>
 #include <wtf/ThreadSafeRefCountedWithSuppressingSaferCPPChecking.h>
 #include <wtf/text/AdaptiveStringSearcher.h>
 
@@ -109,6 +109,8 @@ enum class CommonJITThunkID : uint8_t;
 struct CheckpointOSRExitSideState;
 class CodeBlock;
 class CodeCache;
+class DecoderStringTable;
+class PersistentBytecodePayloads;
 enum class CodeSpecializationKind : uint8_t;
 class CommonIdentifiers;
 class CompactTDZEnvironmentMap;
@@ -126,6 +128,7 @@ enum Intrinsic : uint8_t;
 class JSDestructibleObjectHeapCellType;
 class JSGlobalObject;
 class JSSentinel;
+struct CallSiteData;
 class JSLock;
 class JSObject;
 struct JSPIContext;
@@ -134,11 +137,13 @@ class JSPropertyNameEnumerator;
 class JITSizeStatistics;
 class JITThunks;
 class MegamorphicCache;
+class MicrotaskCallCache;
 class MicrotaskQueue;
 class NativeExecutable;
 #if USE(BUN_JSC_ADDITIONS)
 class QueuedTask;
 enum class InternalMicrotask : uint8_t;
+namespace FFI { class CallbackEntryScope; }
 #endif
 class Debugger;
 class DeferredWorkTimer;
@@ -155,12 +160,15 @@ class SourceProvider;
 class SourceProviderCache;
 enum class SourceTaintedOrigin : uint8_t;
 class StackFrame;
+class StringSplitCache;
 class Structure;
 class Symbol;
 class TypedArrayController;
 class VMEntryScope;
 class TypeProfiler;
 class TypeProfilerLog;
+class TerminationDeadline;
+class TerminationDeadlineSet;
 class Watchdog;
 class WatchpointSet;
 class Waiter;
@@ -169,8 +177,8 @@ constexpr bool validateDFGDoesGC = ENABLE_DFG_DOES_GC_VALIDATION;
 
 #if USE(BUN_JSC_ADDITIONS)
 using StackTraceAppenderFunction = WTF::Function<void(VM&, JSCell* owner, Vector<StackFrame>& stackTrace, size_t maxToAppend)>;
-using ErrorInfoFunction = WTF::Function<String(VM&, Vector<StackFrame>& stackTrace, unsigned& line, unsigned& column, String& sourceURL, void* bunErrorData)>;
-using ErrorInfoFunctionJSValue = WTF::Function<JSValue(VM&, Vector<StackFrame>& stackTrace, unsigned& line, unsigned& column, String& sourceURL, JSC::JSObject*, void* bunErrorData)>;
+using ErrorInfoFunction = WTF::Function<String(VM&, Vector<StackFrame>& stackTrace, unsigned& line, unsigned& column, String& sourceURL)>;
+using ErrorInfoFunctionJSValue = WTF::Function<JSValue(VM&, Vector<StackFrame>& stackTrace, unsigned& line, unsigned& column, String& sourceURL, JSC::JSObject*)>;
 #endif
 
 #if ENABLE(FTL_JIT)
@@ -259,7 +267,13 @@ public:
 
         JS_EXPORT_PRIVATE virtual String overrideSourceURL(const StackFrame&, const String& originalSourceURL) const = 0;
 
+        // Called after marking and before sweeping, alongside the cell types the Heap reconciles
+        // itself. The client owns the subspaces for its own cell types, so it has to visit the
+        // marked cells of those that hold weak references and settle them.
+        virtual void reconcileWeakReferencesAtGCEnd(VM&, CollectionScope) { }
+
         virtual bool isWebCoreJSClientData() const { return false; }
+        virtual DecoderStringTable* decoderStringTable() { return nullptr; }
     };
 
     bool usingAPI() { return vmType != VMType::Default; }
@@ -345,6 +359,7 @@ public:
     }
 
     void throwTerminationException();
+    void throwTerminationExceptionIfNeeded();
 
     enum class EntryScopeService : uint8_t {
         // Sticky services i.e. if set, these will never be cleared.
@@ -369,7 +384,7 @@ public:
         NeedStopTheWorld = 1 << 1, // FIXME rdar://161576886
     };
 
-    bool hasAnyEntryScopeServiceRequest() { return m_entryScopeServicesRawBits; }
+    bool hasAnyEntryScopeServiceRequest() { return m_entryScopeServicesRawBits || hasTimeZoneChange() || hasLanguageChange(); }
     void executeEntryScopeServicesOnEntry();
     void executeEntryScopeServicesOnExit();
 
@@ -385,7 +400,7 @@ public:
     enum class SchedulerOptions : uint8_t {
         HasImminentlyScheduledWork = 1 << 0,
     };
-    JS_EXPORT_PRIVATE void performOpportunisticallyScheduledTasks(MonotonicTime deadline, OptionSet<SchedulerOptions>);
+    JS_EXPORT_PRIVATE void performOpportunisticallyScheduledTasks(ApproximateTime deadline, OptionSet<SchedulerOptions>);
 
     Structure* cellButterflyStructure(IndexingType indexingType) { return rawImmutableButterflyStructure(indexingType).get(); }
 
@@ -432,6 +447,10 @@ public:
 
 private:
     bool m_isInService { false };
+public:
+    // See AllowLazyMaterializationOfImmutableProperties. (Declared here because it fills padding: no other field moves.)
+    unsigned allowLazyMaterializationOfImmutablePropertiesCount { 0 };
+private:
     RefPtr<CrossTaskToken> m_crossTaskToken;
     VMIdentifier m_identifier;
     const Ref<JSLock> m_apiLock;
@@ -517,6 +536,9 @@ public:
 
     VMType vmType;
     bool m_mightBeExecutingTaintedCode { false };
+#if USE(BUN_JSC_ADDITIONS)
+    bool m_asyncContextTrackingEnabled { false };
+#endif
     ClientData* clientData { nullptr };
 #if ENABLE(WEBASSEMBLY)
     Wasm::Context wasmContext;
@@ -599,12 +621,14 @@ public:
     WriteBarrier<JSSentinel> m_fastArrayValuesSentinel;
     WriteBarrier<JSSentinel> m_fastArrayKeysSentinel;
     WriteBarrier<JSSentinel> m_fastArrayEntriesSentinel;
+    WriteBarrier<JSSentinel> m_fastArrayUnboxedSentinel;
     WriteBarrier<JSSentinel> m_fastMapKeysSentinel;
     WriteBarrier<JSSentinel> m_fastMapValuesSentinel;
     WriteBarrier<JSSentinel> m_fastMapEntriesSentinel;
     WriteBarrier<JSSentinel> m_fastSetValuesSentinel;
     WriteBarrier<JSSentinel> m_fastSetEntriesSentinel;
     WriteBarrier<JSSentinel> m_fastStringValuesSentinel;
+    WriteBarrier<JSSentinel> m_fastAsyncGeneratorSentinel;
 
     WriteBarrier<JSCell> m_cachedSortScratch;
     WriteBarrier<JSCell> m_sortScratchSentinel;
@@ -633,11 +657,23 @@ public:
     Ref<AtomStringImpl> lastAtomizedIdentifierAtomStringImpl { *static_cast<AtomStringImpl*>(StringImpl::empty()) };
     JSONAtomStringCache jsonAtomStringCache;
     KeyAtomStringCache keyAtomStringCache;
-    StringSplitCache stringSplitCache;
+    // Bytecode-cache decode: one lazy [class(c0)<<6|class(c1)] -> atom table for the bulk of minified identifiers, shared by every Decoder. The 64 classes are the ASCII identifier characters (Decoder::atomForInlineString).
+    static constexpr unsigned cachedBytecodeTwoCharacterAtomsSize = 64 * 64;
+    AtomStringImpl** ensureCachedBytecodeTwoCharacterAtoms();
+    // And a direct-mapped cache for 3-character ones and the other 2-character ones (Decoder::atomForInlineString); entries hold a ref, hits verify the characters.
+    static constexpr unsigned cachedBytecodeThreeCharacterAtomsLog2Size = 12;
+    AtomStringImpl** ensureCachedBytecodeThreeCharacterAtoms();
     Vector<unsigned> stringSplitIndice;
     StringReplaceCache stringReplaceCache;
 
     bool mightBeExecutingTaintedCode() const { return m_mightBeExecutingTaintedCode; }
+#if USE(BUN_JSC_ADDITIONS)
+    // Set once the embedder starts using JSGlobalObject::m_asyncContextData (its
+    // first AsyncLocalStorage); never cleared. Until then no async context can have
+    // been captured anywhere in this VM, so the capture/restore paths are skipped.
+    bool isAsyncContextTrackingEnabled() const { return m_asyncContextTrackingEnabled; }
+    void setAsyncContextTrackingEnabled() { m_asyncContextTrackingEnabled = true; }
+#endif
     bool* addressOfMightBeExecutingTaintedCode() LIFETIME_BOUND { return &m_mightBeExecutingTaintedCode; }
     void setMightBeExecutingTaintedCode(bool value = true) { m_mightBeExecutingTaintedCode = value; }
 
@@ -653,6 +689,7 @@ public:
     WriteBarrier<JSBigInt> m_nextCachedBigIntDivisor;
     Vector<UCPURegister> m_bigIntCachedInverse;
     int m_bigIntDivisorCount { 0 };
+    UCPURegister m_bigIntFoldFactor { 0 };
 
     JSCell* orderedHashTableDeletedValue()
     {
@@ -668,12 +705,14 @@ public:
     JSSentinel* fastArrayValuesSentinel() { return m_fastArrayValuesSentinel.get(); }
     JSSentinel* fastArrayKeysSentinel() { return m_fastArrayKeysSentinel.get(); }
     JSSentinel* fastArrayEntriesSentinel() { return m_fastArrayEntriesSentinel.get(); }
+    JSSentinel* fastArrayUnboxedSentinel() { return m_fastArrayUnboxedSentinel.get(); }
     JSSentinel* fastMapKeysSentinel() { return m_fastMapKeysSentinel.get(); }
     JSSentinel* fastMapValuesSentinel() { return m_fastMapValuesSentinel.get(); }
     JSSentinel* fastMapEntriesSentinel() { return m_fastMapEntriesSentinel.get(); }
     JSSentinel* fastSetValuesSentinel() { return m_fastSetValuesSentinel.get(); }
     JSSentinel* fastSetEntriesSentinel() { return m_fastSetEntriesSentinel.get(); }
     JSSentinel* fastStringValuesSentinel() { return m_fastStringValuesSentinel.get(); }
+    JSSentinel* fastAsyncGeneratorSentinel() { return m_fastAsyncGeneratorSentinel.get(); }
 
     inline JSPropertyNameEnumerator* emptyPropertyNameEnumerator();
 
@@ -887,6 +926,7 @@ public:
 
     unsigned varargsLength;
     uint32_t osrExitIndex;
+    void* osrExitReturnPC;
     void* osrExitJumpDestination;
     RegExp* m_executingRegExp { nullptr };
 
@@ -907,6 +947,10 @@ public:
     }
 
     void gatherScratchBufferRoots(ConservativeRoots&);
+    void forEachActiveScratchBuffer(const ScopedLambda<void(void* begin, void* end)>&);
+#if USE(BUN_JSC_ADDITIONS)
+    void forEachConservativelyScannedBuffer(const ScopedLambda<void(void* begin, void* end)>&);
+#endif
 
     static constexpr unsigned expectedMaxActiveSideStateCount = 4;
     void pushCheckpointOSRSideState(std::unique_ptr<CheckpointOSRExitSideState>&&);
@@ -918,8 +962,10 @@ public:
     Interpreter interpreter;
     VMEntryScope* entryScope { nullptr };
 
+#if USE(BUN_JSC_ADDITIONS)
     JSObject* stringRecursionCheckFirstObject { nullptr };
     UncheckedKeyHashSet<JSObject*> stringRecursionCheckVisitedObjects;
+#endif // USE(BUN_JSC_ADDITIONS)
 
     DateCache dateCache;
 
@@ -941,6 +987,14 @@ public:
     ALWAYS_INLINE MegamorphicCache* megamorphicCache() { return m_megamorphicCache.getIfExists(); }
     MegamorphicCache& ensureMegamorphicCache() { return m_megamorphicCache.get(*this); }
 
+    LazyUniqueRef<VM, StringSplitCache> m_stringSplitCache;
+    ALWAYS_INLINE StringSplitCache* stringSplitCache() { return m_stringSplitCache.getIfExists(); }
+    StringSplitCache& ensureStringSplitCache() { return m_stringSplitCache.get(*this); }
+
+    const UniqueRef<MicrotaskCallCache> m_syncResumeCallCache;
+    MicrotaskCallCache& syncResumeCallCache() { return m_syncResumeCallCache.get(); }
+    void clearMicrotaskCallCaches();
+
     enum class StructureChainIntegrityEvent : uint8_t {
         Add,
         Remove,
@@ -957,6 +1011,7 @@ public:
 #endif
 
     bool hasTimeZoneChange() { return dateCache.hasTimeZoneChange(); }
+    JS_EXPORT_PRIVATE bool hasLanguageChange();
 
     RegExpCache* regExpCache() LIFETIME_BOUND { return m_regExpCache.get(); }
 
@@ -972,14 +1027,88 @@ public:
 
     JS_EXPORT_PRIVATE JSLock& apiLock();
     CodeCache* codeCache() LIFETIME_BOUND { return m_codeCache.get(); }
+    PersistentBytecodePayloads& persistentBytecodePayloads();
+    PersistentBytecodePayloads* persistentBytecodePayloadsIfExists() { return m_persistentBytecodePayloads.get(); }
+
+#if USE(BUN_JSC_ADDITIONS)
+    // While anybody asks, deleteAllCode(), shrinkFootprintNow() and whoever else goes through
+    // Heap::deleteAllUnlinkedCodeBlocks or ScriptExecutable::clearCode leave unlinked code where it is: executables
+    // keep their code blocks, code decoded from a bytecode cache is not returned to it, a program or module keeps its
+    // top-level code, and the code cache is not emptied. Linked code is dropped as ever. (Not covered, and not needed:
+    // the code cache evicts by size and age, and a collection drops aged code that nothing roots.)
+    // Who asks: a BytecodeLinkEncoder, which writes a function's record long after its module was added from what the
+    // executable holds then, so that an emptied executable would silently leave the payload without the body; and a
+    // run that records what it decodes (PersistentBytecodePayloads::enableOrderRecording). Neither is a program's
+    // steady state.
+    // deleteAllCodeToGenerateItAgain() is not held back: see there.
+    void keepUnlinkedCode() { ++m_unlinkedCodeKeepers; }
+    void stopKeepingUnlinkedCode()
+    {
+        RELEASE_ASSERT(m_unlinkedCodeKeepers);
+        --m_unlinkedCodeKeepers;
+    }
+    // A run that records keeps it until its recording is taken, which any thread may do (BytecodeOrderRecorder::take).
+    void keepUnlinkedCodeUntil(const std::atomic<bool>& isOver) { m_unlinkedCodeIsKeptUntil = &isOver; }
+    bool keepsUnlinkedCode() const
+    {
+        bool isKept = m_unlinkedCodeKeepers || (m_unlinkedCodeIsKeptUntil && !m_unlinkedCodeIsKeptUntil->load());
+        return isKept && !m_isDeletingAllCodeToGenerateItAgain;
+    }
+#else
+    bool keepsUnlinkedCode() const { return false; }
+#endif
+
+    // See LazyCallLinkInfo.
+    CallSiteData* neverExecutedCallSiteData() { return m_neverExecutedCallSiteData; }
+    CallSiteData* executedOnceCallSiteData() { return m_executedOnceCallSiteData; }
+    CallSiteData* notExecutedTailCallSiteData() { return m_notExecutedTailCallSiteData; }
     IntlCache& intlCache() { return *m_intlCache; }
+#if USE(BUN_JSC_ADDITIONS)
+    // Clears both dateCache and intlCache; callable without including IntlCache.h
+    // (which transitively includes ICU headers that Bun's C++ cannot see on macOS).
+    JS_EXPORT_PRIVATE void clearForTimeZoneChange();
+#endif
 
     JS_EXPORT_PRIVATE void whenIdle(Function<void()>&&);
 
-    JS_EXPORT_PRIVATE void deleteAllCode(DeleteAllCodeEffort);
-    JS_EXPORT_PRIVATE void deleteAllLinkedCode(DeleteAllCodeEffort);
+    // While > 1, LLInt->Baseline and Baseline->DFG compile thresholds behave as if multiplied by this.
+    // Mutator-only (tier-up slow paths). Set from Options::startupJITDeferralScale or by the embedder.
+    double startupJITDeferralScale() const { return m_startupJITDeferralScale; }
+    JS_EXPORT_PRIVATE void setStartupJITDeferralScale(double); // <= 1 ends the window
 
-    void shrinkFootprintWhenIdle();
+    JS_EXPORT_PRIVATE void deleteAllCode(DeleteAllCodeEffort);
+    // For code that has to be generated differently from now on (a debugger attached, a profiler turned on):
+    // functions that kept their unlinked code would go on running without the hooks, so keepsUnlinkedCode() does not
+    // hold this back. A recording made across it is less exact (code is decoded again); a link has no debugger.
+    JS_EXPORT_PRIVATE void deleteAllCodeToGenerateItAgain(DeleteAllCodeEffort);
+    JS_EXPORT_PRIVATE void deleteAllLinkedCode(DeleteAllCodeEffort);
+    void deleteAllRegExpCode();
+
+    enum class ShrinkFootprint : uint8_t {
+        // Only let go of what is cheap to get back: linked code, code that a persistent bytecode cache can hand back,
+        // RegExp code and caches. Code that would have to be parsed again (including the builtins') stays.
+        KeepCodeThatNeedsParsing = 1 << 0,
+        // The caller schedules the full collection that frees what this let go of.
+        LeaveCollectionToCaller = 1 << 1,
+        // KeepCodeThatNeedsParsing, and more: linked code (which ages out on its own once it stops running) and RegExp
+        // code stay, and so does the unlinked code of every function that still has linked code. Only functions that
+        // have not run for a while lose anything, and only what a cache hands back. For an embedder that cannot be sure
+        // the program is at rest.
+        KeepCodeInUse = 1 << 2,
+    };
+    // Right now, or not at all (false: nothing was done) if JS is on the stack or the caller is inside the collector.
+    // With KeepCodeThatNeedsParsing or KeepCodeInUse this blocks until a collection that is under way has finished;
+    // without flags (all code goes, as in deleteAllCode, and is parsed or decoded again when next needed) it does not
+    // wait and returns false instead. A code cache entry for code decoded from a persistent payload goes in every mode:
+    // a later lookup by a SourceProvider that has the payload decodes it again, one that only has equal source text parses.
+    // lastException() is cleared in every mode.
+    JS_EXPORT_PRIVATE bool shrinkFootprintNow(OptionSet<ShrinkFootprint> = { });
+    // As soon as no JS is on the stack.
+    JS_EXPORT_PRIVATE void shrinkFootprintWhenIdle(OptionSet<ShrinkFootprint> = { });
+
+    // How often JS was entered from outside (not from JS): unchanged between two looks means none ran in between.
+    unsigned entryCountFromOutside() const { return m_entryCountFromOutside; }
+    void didEnterFromOutside() { ++m_entryCountFromOutside; }
 
     WatchpointSet* ensureWatchpointSetForImpureProperty(UniquedStringImpl*);
     
@@ -1025,6 +1154,7 @@ public:
     MicrotaskQueue& defaultMicrotaskQueue();
 
     DrainMicrotaskDelayScope drainMicrotaskDelayScope() { return DrainMicrotaskDelayScope { *this }; }
+
     JS_EXPORT_PRIVATE void drainMicrotasks();
 #if USE(BUN_JSC_ADDITIONS)
     void drainMicrotasksForGlobalObject(JSGlobalObject* globalObject);
@@ -1046,6 +1176,9 @@ public:
 
     void setGlobalConstRedeclarationShouldThrow(bool globalConstRedeclarationThrow) { m_globalConstRedeclarationShouldThrow = globalConstRedeclarationThrow; }
     ALWAYS_INLINE bool globalConstRedeclarationShouldThrow() const { return m_globalConstRedeclarationShouldThrow; }
+
+    void setAllowRedeclaringSymbols(bool allowRedeclaringSymbols) { m_allowRedeclaringSymbols = allowRedeclaringSymbols; }
+    ALWAYS_INLINE bool allowRedeclaringSymbols() const { return m_allowRedeclaringSymbols; }
 
     void setShouldBuildPCToCodeOriginMapping() { m_shouldBuildPCToCodeOriginMapping = true; }
     bool shouldBuilderPCToCodeOriginMapping() const { return m_shouldBuildPCToCodeOriginMapping; }
@@ -1089,6 +1222,22 @@ public:
     CONCURRENT_SAFE void notifyNeedShellTimeoutCheck() { traps().fireTrap(VMTraps::NeedShellTimeoutCheck); }
     CONCURRENT_SAFE void notifyNeedTermination() { traps().fireTrap(VMTraps::NeedTermination); }
     CONCURRENT_SAFE void notifyNeedWatchdogCheck() { traps().fireTrap(VMTraps::NeedWatchdogCheck); }
+
+    // An embedder's wall-clock time limit on one bounded call: notifyNeedTermination() is called from a timer
+    // thread once `deadline` passes unless the returned TerminationDeadline is cancelled first (dropping it does
+    // not cancel it). See TerminationDeadline.h. API lock held; not for VMs that forbidExecutionOnTermination().
+    [[nodiscard]] JS_EXPORT_PRIVATE Ref<TerminationDeadline> addTerminationDeadline(MonotonicTime deadline);
+
+    // A termination has been requested and not yet withdrawn, in whichever form it has reached: the unhandled
+    // NeedTermination trap, the termination-request flag, or the TerminationException as the pending exception.
+    bool hasPendingTermination() const { return traps().needHandling(VMTraps::NeedTermination) || hasTerminationRequest() || hasPendingTerminationException(); }
+
+    // Withdraws whatever termination is pending on this VM (see hasPendingTermination()) — the counterpart of
+    // notifyNeedTermination() for a time-limited scope that has ended: what ran under the request stays cut short,
+    // what runs next is unaffected. It cannot tell requests apart: if another party's request may be pending too
+    // (a worker being stopped), the caller checks that first or requests again. Does not undo executionForbidden().
+    // API lock held, not inside a DeferTermination scope. Returns whether anything was pending.
+    JS_EXPORT_PRIVATE bool cancelTermination();
 
     CONCURRENT_SAFE void requestStop()
     {
@@ -1137,6 +1286,7 @@ public:
 #endif
 
     void beginMarking();
+    void reconcileWeakReferencesAtGCEnd();
     DECLARE_VISIT_AGGREGATE;
 
     void NODELETE addDebugger(Debugger&);
@@ -1158,6 +1308,7 @@ public:
     int64_t incrementModuleAsyncEvaluationCount() { return m_moduleAsyncEvaluationCount++; }
 
 #if ENABLE(WEBASSEMBLY_DEBUGGER)
+    Wasm::DebugState* debugStateIfExists() { return m_debugState.get(); }
     JS_EXPORT_PRIVATE Wasm::DebugState* NODELETE debugState();
 #endif
 
@@ -1251,10 +1402,23 @@ public:
 private:
     bool m_failNextNewCodeBlock { false };
     bool m_globalConstRedeclarationShouldThrow { true };
+    bool m_allowRedeclaringSymbols { false };
     bool m_shouldBuildPCToCodeOriginMapping { false };
     DeletePropertyMode m_deletePropertyMode { DeletePropertyMode::Default };
     HeapAnalyzer* m_activeHeapAnalyzer { nullptr };
     std::unique_ptr<CodeCache> m_codeCache;
+    std::unique_ptr<PersistentBytecodePayloads> m_persistentBytecodePayloads;
+#if USE(BUN_JSC_ADDITIONS)
+    unsigned m_unlinkedCodeKeepers { 0 }; // the VM's thread only
+    const std::atomic<bool>* m_unlinkedCodeIsKeptUntil { nullptr }; // a BytecodeOrderRecorder's, which the process keeps for good
+#endif
+    bool m_isDeletingAllCodeToGenerateItAgain { false };
+    CallSiteData* m_neverExecutedCallSiteData { nullptr };
+    CallSiteData* m_executedOnceCallSiteData { nullptr };
+    CallSiteData* m_notExecutedTailCallSiteData { nullptr };
+    unsigned m_entryCountFromOutside { 0 };
+    std::unique_ptr<std::array<AtomStringImpl*, cachedBytecodeTwoCharacterAtomsSize>> m_cachedBytecodeTwoCharacterAtoms;
+    std::unique_ptr<std::array<AtomStringImpl*, 1u << cachedBytecodeThreeCharacterAtomsLog2Size>> m_cachedBytecodeThreeCharacterAtoms;
     std::unique_ptr<IntlCache> m_intlCache;
     std::unique_ptr<BuiltinExecutables> m_builtinExecutables;
     UncheckedKeyHashMap<RefPtr<UniquedStringImpl>, RefPtr<WatchpointSet>> m_impurePropertyWatchpointSets;
@@ -1271,6 +1435,7 @@ private:
     unsigned m_controlFlowProfilerEnabledCount { 0 };
     MallocPtr<EncodedJSValue, VMMalloc> m_exceptionFuzzBuffer;
     LazyRef<VM, Watchdog> m_watchdog;
+    RefPtr<TerminationDeadlineSet> m_terminationDeadlines;
     LazyUniqueRef<VM, HeapProfiler> m_heapProfiler;
     LazyUniqueRef<VM, AdaptiveStringSearcherTables> m_stringSearcherTables;
 #if ENABLE(SAMPLING_PROFILER)
@@ -1303,6 +1468,7 @@ public:
         JSValue arg0;
         JSValue arg1;
         JSValue arg2;
+        JSValue arg3 { };
     };
     // While non-null, internal-microtask reactions for already-settled promises
     // are appended here instead of the global microtask queue.
@@ -1322,6 +1488,8 @@ public:
     SynchronousModuleQueue* m_synchronousModuleQueue { nullptr };
 private:
 #endif
+
+    double m_startupJITDeferralScale { 1 };
 
     bool m_hasSideData { false };
     bool m_hasTerminationRequest { false };
@@ -1355,7 +1523,11 @@ private:
     friend class ThrowScope; // Friend for exception checking purpose only.
     friend class JSDollarVMHelper;
     friend class LLIntOffsetsExtractor;
+    friend class TerminationDeadline;
     friend class SuspendExceptionScope;
+#if USE(BUN_JSC_ADDITIONS)
+    friend class FFI::CallbackEntryScope;
+#endif
     friend class VMTraps;
 };
 
@@ -1388,6 +1560,37 @@ extern "C" void SYSV_ABI sanitizeStackForVMImpl(VM*);
 #endif
 
 JS_EXPORT_PRIVATE void sanitizeStackForVM(VM&);
+JS_EXPORT_PRIVATE void sanitizeStackForVMInCallSlowPath(VM&);
+
+// While one of these is alive, properties can be put directly on an object whose Structure says hasImmutableProperties(); it changes
+// nothing for any other object. It is for the places where the engine materializes a property the object logically already has: a
+// static property table entry, a function's name, length or prototype, an error's stack, an arguments object's callee. Nothing
+// inside it may run JavaScript: with assertions enabled it counts as a DisallowVMEntry too.
+class AllowLazyMaterializationOfImmutableProperties {
+    WTF_MAKE_NONCOPYABLE(AllowLazyMaterializationOfImmutableProperties);
+    WTF_FORBID_HEAP_ALLOCATION;
+public:
+    explicit AllowLazyMaterializationOfImmutableProperties(VM& vm)
+        : m_vm(vm)
+    {
+        ++m_vm.allowLazyMaterializationOfImmutablePropertiesCount;
+#if ASSERT_ENABLED
+        ++m_vm.disallowVMEntryCount;
+#endif
+    }
+
+    ~AllowLazyMaterializationOfImmutableProperties()
+    {
+#if ASSERT_ENABLED
+        ASSERT(m_vm.disallowVMEntryCount);
+        --m_vm.disallowVMEntryCount;
+#endif
+        --m_vm.allowLazyMaterializationOfImmutablePropertiesCount;
+    }
+
+private:
+    VM& m_vm;
+};
 
 } // namespace JSC
 

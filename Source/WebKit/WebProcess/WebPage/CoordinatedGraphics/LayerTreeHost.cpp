@@ -57,11 +57,31 @@
 #include <wtf/SystemTracing.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/glib/RunLoopSourcePriority.h>
+#include <wtf/text/StringToIntegerConversion.h>
 
 namespace WebKit {
 using namespace WebCore;
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(LayerTreeHost);
+
+#if ENABLE(DAMAGE_TRACKING)
+static bool damageOverlayForcesPropagation()
+{
+    // WEBKIT_SHOW_DAMAGE draws the damage the layers report, so it needs propagation on even when the
+    // propagateDamagingInformation setting that normally turns it on is off. Only the Skia accumulated-damage
+    // overlay is handled here. The non-Skia TextureMapperDamageVisualizer draws off the propagation flags instead.
+#if USE(TEXTURE_MAPPER)
+    return false;
+#else
+    const auto* showDamageEnvvar = getenv("WEBKIT_SHOW_DAMAGE");
+    if (!showDamageEnvvar)
+        return false;
+
+    auto value = parseInteger<unsigned>(StringView::fromLatin1(showDamageEnvvar));
+    return value && *value;
+#endif
+}
+#endif
 
 std::unique_ptr<LayerTreeHost> LayerTreeHost::create(WebPage& webPage)
 {
@@ -75,8 +95,10 @@ LayerTreeHost::LayerTreeHost(WebPage& webPage)
     {
         auto& rootLayer = m_sceneState->rootLayer();
 #if ENABLE(DAMAGE_TRACKING)
-        rootLayer.setDamagePropagationEnabled(webPage.corePage()->settings().propagateDamagingInformation());
-        if (webPage.corePage()->settings().propagateDamagingInformation()) {
+        const auto& settings = webPage.corePage()->settings();
+        const bool propagateDamage = settings.propagateDamagingInformation() || damageOverlayForcesPropagation();
+        rootLayer.setDamagePropagationEnabled(propagateDamage);
+        if (propagateDamage) {
             m_damageInGlobalCoordinateSpace = std::make_shared<Damage>(m_webPage->size());
             rootLayer.setDamageInGlobalCoordinateSpace(m_damageInGlobalCoordinateSpace);
         }
@@ -87,7 +109,12 @@ LayerTreeHost::LayerTreeHost(WebPage& webPage)
     }
 
     m_compositor = ThreadedCompositor::create(webPage, *this, m_sceneState.get());
+#if USE(TEXTURE_MAPPER)
+    m_skiaPaintingEngine = SkiaPaintingEngine::create(nullptr);
+#else
     m_skiaPaintingEngine = SkiaPaintingEngine::create(m_compositor->threadSafeGrContext());
+#endif
+
 #if ENABLE(DAMAGE_TRACKING)
     std::optional<OptionSet<ThreadedCompositor::DamagePropagationFlags>> damagePropagationFlags;
     const auto& settings = webPage.corePage()->settings();
@@ -320,7 +347,7 @@ void LayerTreeHost::backgroundColorDidChange()
 void LayerTreeHost::attachLayer(CoordinatedPlatformLayer& layer)
 {
 #if ENABLE(DAMAGE_TRACKING)
-    layer.setDamagePropagationEnabled(m_webPage->corePage()->settings().propagateDamagingInformation());
+    layer.setDamagePropagationEnabled(!!m_damageInGlobalCoordinateSpace);
     if (m_damageInGlobalCoordinateSpace)
         layer.setDamageInGlobalCoordinateSpace(m_damageInGlobalCoordinateSpace);
 #endif
@@ -387,7 +414,11 @@ Ref<CoordinatedImageBackingStore> LayerTreeHost::imageBackingStore(Ref<NativeIma
 {
     auto nativeImageID = nativeImage->uniqueID();
     auto addResult = m_imageBackingStores.ensure(nativeImageID, [&] {
+#if USE(TEXTURE_MAPPER)
+        return CoordinatedImageBackingStore::create(WTF::move(nativeImage));
+#else
         return CoordinatedImageBackingStore::create(WTF::move(nativeImage), m_compositor->threadSafeGrContext());
+#endif
     });
     return addResult.iterator->value;
 }
@@ -568,10 +599,18 @@ void LayerTreeHost::foreachRegionInDamageHistoryForTesting(Function<void(const R
 
 void LayerTreeHost::fillGLInformation(RenderProcessInfo&& info, CompletionHandler<void(RenderProcessInfo&&)>&& completionHandler)
 {
+#if USE(TEXTURE_MAPPER)
     if (ProcessCapabilities::canUseAcceleratedBuffers() && PlatformDisplay::sharedDisplay().skiaGLContext())
         info.gpuPaintingThreadsCount = SkiaPaintingEngine::numberOfGPUPaintingThreads();
     else
         info.cpuPaintingThreadsCount = SkiaPaintingEngine::numberOfCPUPaintingThreads();
+#else
+    auto threadsCount = SkiaPaintingEngine::numberOfCPUPaintingThreads();
+    if (ProcessCapabilities::canUseAcceleratedBuffers())
+        info.gpuPaintingThreadsCount = threadsCount;
+    else
+        info.cpuPaintingThreadsCount = threadsCount;
+#endif
     m_compositor->fillGLInformation(WTF::move(info), WTF::move(completionHandler));
 }
 

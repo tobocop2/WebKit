@@ -75,6 +75,7 @@
 #include <wtf/Lock.h>
 #include <wtf/MathExtras.h>
 #include <wtf/PrintStream.h>
+#include <wtf/Scope.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/MakeString.h>
 
@@ -128,11 +129,19 @@ JSValue JSInjectedScriptHost::evaluateWithScopeExtension(JSGlobalObject* globalO
 
     NakedPtr<Exception> exception;
     JSObject* scopeExtension = callFrame->argument(1).getObject();
+
+    bool didAllowRedeclaringSymbols = vm.allowRedeclaringSymbols();
+    vm.setAllowRedeclaringSymbols(true);
+    auto resetAllowRedeclaringSymbols = makeScopeExit([&] {
+        vm.setAllowRedeclaringSymbols(didAllowRedeclaringSymbols);
+    });
+
     JSValue result = JSC::evaluateWithScopeExtension(globalObject, makeSource(program, callFrame->callerSourceOrigin(vm), SourceTaintedOrigin::Untainted), scopeExtension, exception);
+
     if (exception)
         throwException(globalObject, scope, exception);
 
-    return result;
+    RELEASE_AND_RETURN(scope, result);
 }
 
 JSValue JSInjectedScriptHost::internalConstructorName(JSGlobalObject* globalObject, CallFrame* callFrame)
@@ -325,6 +334,7 @@ JSValue JSInjectedScriptHost::getOwnPrivatePropertySymbols(JSGlobalObject* globa
     unsigned index = 0;
     PropertyNameArrayBuilder propertyNames(vm, PropertyNameMode::StringsAndSymbols, PrivateSymbolMode::Include);
     JSObject::getOwnPropertyNames(object, globalObject, propertyNames, DontEnumPropertiesMode::Include);
+    RETURN_IF_EXCEPTION(scope, { });
     for (const auto& propertyName : propertyNames) {
         if (!propertyName.isPrivateName())
             continue;
@@ -334,6 +344,7 @@ JSValue JSInjectedScriptHost::getOwnPrivatePropertySymbols(JSGlobalObject* globa
             continue;
 
         result->putDirectIndex(globalObject, index++, Symbol::create(vm, *static_cast<SymbolImpl*>(propertyName.impl())));
+        RETURN_IF_EXCEPTION(scope, { });
     }
 
     return result;
@@ -519,6 +530,7 @@ JSValue JSInjectedScriptHost::getInternalProperties(JSGlobalObject* globalObject
     JSValue value = callFrame->uncheckedArgument(0);
 
     JSValue internalProperties = impl().getInternalProperties(vm, globalObject, value);
+    RETURN_IF_EXCEPTION(scope, { });
     if (internalProperties)
         return internalProperties;
 
@@ -787,6 +799,7 @@ JSValue JSInjectedScriptHost::weakMapEntries(JSGlobalObject* globalObject, CallF
 
     MarkedArgumentBuffer buffer;
     auto fetchCount = callFrame->argument(1).toIntegerOrInfinity(globalObject);
+    RETURN_IF_EXCEPTION(scope, { });
     weakMap->takeSnapshot(buffer, clampTo<unsigned>(fetchCount));
     ASSERT(!buffer.hasOverflowed());
 
@@ -830,6 +843,7 @@ JSValue JSInjectedScriptHost::weakSetEntries(JSGlobalObject* globalObject, CallF
 
     MarkedArgumentBuffer buffer;
     auto fetchCount = callFrame->argument(1).toIntegerOrInfinity(globalObject);
+    RETURN_IF_EXCEPTION(scope, { });
     weakSet->takeSnapshot(buffer, clampTo<unsigned>(fetchCount));
     ASSERT(!buffer.hasOverflowed());
 
@@ -849,7 +863,7 @@ JSValue JSInjectedScriptHost::weakSetEntries(JSGlobalObject* globalObject, CallF
 static JSObject* cloneArrayIteratorObject(JSGlobalObject* globalObject, VM& vm, JSArrayIterator* iteratorObject)
 {
     JSArrayIterator* clone = JSArrayIterator::create(vm, globalObject->arrayIteratorStructure(), iteratorObject->iteratedObject(), iteratorObject->internalField(JSArrayIterator::Field::Kind).get());
-    clone->internalField(JSArrayIterator::Field::Index).set(vm, clone, iteratorObject->internalField(JSArrayIterator::Field::Index).get());
+    clone->setIndex(iteratorObject->index());
     return clone;
 }
 
@@ -908,6 +922,7 @@ JSValue JSInjectedScriptHost::iteratorEntries(JSGlobalObject* globalObject, Call
         return jsUndefined();
 
     IterationRecord iterationRecord = { iterator, iterator.get(globalObject, vm.propertyNames->next) };
+    RETURN_IF_EXCEPTION(scope, { });
 
     unsigned numberToFetch = 5;
     JSValue numberToFetchArg = callFrame->argument(1);
@@ -1015,12 +1030,17 @@ JSValue JSInjectedScriptHost::queryInstances(JSGlobalObject* globalObject, CallF
             if (value.inherits<ProxyObject>())
                 return IterationStatus::Continue;
 
-            if (JSObject::defaultHasInstance(globalObject, value, prototype))
+            bool isInstance = JSObject::defaultHasInstance(globalObject, value, prototype);
+            RETURN_IF_EXCEPTION(scope, IterationStatus::Done);
+            if (isInstance) {
                 array->putDirectIndex(globalObject, array->length(), value);
+                RETURN_IF_EXCEPTION(scope, IterationStatus::Done);
+            }
 
             return IterationStatus::Continue;
         });
     }
+    RETURN_IF_EXCEPTION(scope, { });
 
     return array;
 }
@@ -1185,8 +1205,10 @@ JSValue JSInjectedScriptHost::queryHolders(JSGlobalObject* globalObject, CallFra
 
         auto holders = copyToVector(holderFinder.holders());
         std::ranges::sort(holders);
-        for (auto* holder : holders)
+        for (auto* holder : holders) {
             result->putDirectIndex(globalObject, result->length(), holder);
+            RETURN_IF_EXCEPTION(scope, { });
+        }
     }
 
     return result;

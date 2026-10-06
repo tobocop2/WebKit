@@ -190,6 +190,13 @@ window.UIHelper = class UIHelper {
         await UIHelper.delayFor(0);
     }
 
+    static async renderingComplete()
+    {
+        // Wait for the platform layer tree to be updated
+        await UIHelper.animationFrame();
+        await UIHelper.animationFrame();
+    }
+
     static async waitForCondition(conditionFunc, maximumFrames = Infinity)
     {
         for (let frames = 0; !conditionFunc(); ++frames) {
@@ -532,6 +539,19 @@ window.UIHelper = class UIHelper {
         });
     }
 
+    static ensureVisibleContentRectAndStablePresentationUpdate()
+    {
+        if (!this.isWebKit2() || !this.isIOSFamily())
+            return UIHelper.renderingUpdate();
+
+        return new Promise(resolve => {
+            testRunner.runUIScript(`
+                uiController.doAfterNextVisibleContentRectAndStablePresentationUpdate(function() {
+                    uiController.uiScriptComplete();
+                });`, resolve);
+        });
+    }
+
     static ensurePositionInformationUpdateForElement(element)
     {
         const boundingRect = element.getBoundingClientRect();
@@ -711,6 +731,40 @@ window.UIHelper = class UIHelper {
         });
     }
 
+    static async activateAndWaitForInputSessionStartAt(x, y)
+    {
+        if (!this.isWebKit2() || !this.isIOSFamily())
+            return this.activateAt(x, y);
+
+        if (testRunner.isKeyboardImmediatelyAvailable) {
+            await new Promise(resolve => {
+                testRunner.runUIScript(`
+                    (function() {
+                        uiController.singleTapAtPoint(${x}, ${y}, function() { });
+                        uiController.uiScriptComplete();
+                    })()`, resolve);
+            });
+            await this.ensureStablePresentationUpdate();
+            return;
+        }
+
+        return new Promise(resolve => {
+            testRunner.runUIScript(`
+                (function() {
+                    function clearCallbacksAndScriptComplete() {
+                        uiController.didShowContextMenuCallback = null;
+                        uiController.didStartInputSessionCallback = null;
+                        uiController.willPresentPopoverCallback = null;
+                        uiController.uiScriptComplete();
+                    }
+                    uiController.didShowContextMenuCallback = clearCallbacksAndScriptComplete;
+                    uiController.didStartInputSessionCallback = clearCallbacksAndScriptComplete;
+                    uiController.willPresentPopoverCallback = clearCallbacksAndScriptComplete;
+                    uiController.singleTapAtPoint(${x}, ${y}, function() { });
+                })()`, resolve);
+        });
+    }
+
     static waitForInputSessionToDismiss()
     {
         if (!this.isWebKit2() || !this.isIOSFamily())
@@ -753,6 +807,13 @@ window.UIHelper = class UIHelper {
         const x = element.offsetLeft + element.offsetWidth / 2;
         const y = element.offsetTop + element.offsetHeight / 2;
         return this.activateAndWaitForInputSessionAt(x, y);
+    }
+
+    static activateElementAndWaitForInputSessionStart(element)
+    {
+        const x = element.offsetLeft + element.offsetWidth / 2;
+        const y = element.offsetTop + element.offsetHeight / 2;
+        return this.activateAndWaitForInputSessionStartAt(x, y);
     }
 
     static activateFormControl(element)
@@ -1554,6 +1615,20 @@ window.UIHelper = class UIHelper {
                 uiController.uiScriptComplete(JSON.stringify(uiController.inputViewBounds));
             })()`, jsonString => {
                 resolve(JSON.parse(jsonString));
+            });
+        });
+    }
+
+    static inputViewBoundsInWebView()
+    {
+        if (!this.isWebKit2() || !this.isIOSFamily())
+            return Promise.resolve();
+
+        return new Promise(resolve => {
+            testRunner.runUIScript(`(() => {
+                uiController.uiScriptComplete(JSON.stringify(uiController.inputViewBoundsInWebView));
+                })()`, jsonString => {
+                    resolve(JSON.parse(jsonString));
             });
         });
     }

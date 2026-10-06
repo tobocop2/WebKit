@@ -51,7 +51,6 @@ WI.DOMManager = class DOMManager extends WI.Object
 
         this._frameTargetDOMData = new Map;
         this._unsplicedFrameDocuments = [];
-        this._pageBodyChildrenRequested = false;
 
         WI.EventBreakpoint.addEventListener(WI.Breakpoint.Event.DisabledStateDidChange, this._handleEventBreakpointDisabledStateChanged, this);
         WI.EventBreakpoint.addEventListener(WI.Breakpoint.Event.ConditionDidChange, this._handleEventBreakpointEditablePropertyChanged, this);
@@ -92,7 +91,12 @@ WI.DOMManager = class DOMManager extends WI.Object
     {
         console.assert(target instanceof WI.FrameTarget);
 
-        let data = {document: null, target: target};
+        // FIXME: <https://webkit.org/b/323034> The main frame has a frame target too, so this builds a
+        // second tree for it that can never splice into the page tree. Nodes resolved through that tree
+        // report an `owningTarget`, so they are treated as cross-origin frame nodes and lose highlighting,
+        // layout overlays, and revealing in the Elements tab.
+
+        let data = {document: null, target: target, attributeLoadNodeIds: {}, loadNodeAttributesTimeout: 0};
         this._frameTargetDOMData.set(target, data);
 
         target.DOMAgent.getDocument((error, root) => {
@@ -121,45 +125,11 @@ WI.DOMManager = class DOMManager extends WI.Object
         if (this._trySpliceFrameDocumentIntoNode(frameDocument))
             return;
 
+        // The owner element may not have arrived yet, or may not exist at all: the main frame has
+        // none, so under Site Isolation at least one document stays pending for good. Do not search
+        // the page tree from here to find one — that delivers nodes nothing asked for, along with
+        // whatever other agents attach to them, such as CSS layout flags.
         this._unsplicedFrameDocuments.push(frameDocument);
-
-        this._ensurePageBodyChildrenLoaded();
-    }
-
-    _ensurePageBodyChildrenLoaded()
-    {
-        if (this._pageBodyChildrenRequested)
-            return;
-
-        // The page document may not be loaded yet (getDocument is deferred).
-        // Request body's children so iframe elements enter _idToDOMNode.
-        this.requestDocument((document) => {
-            if (!document)
-                return;
-
-            let body = document.body;
-            if (!body) {
-                // Need <html> children first to get <body>.
-                let docElement = document.documentElement;
-                if (!docElement)
-                    return;
-                docElement.getChildNodes(() => {
-                    body = document.body;
-                    if (body)
-                        body.getChildNodes(() => this._trySpliceUnsplicedFrameDocuments());
-                });
-                return;
-            }
-
-            if (body.children) {
-                this._trySpliceUnsplicedFrameDocuments();
-                return;
-            }
-
-            body.getChildNodes(() => this._trySpliceUnsplicedFrameDocuments());
-        });
-
-        this._pageBodyChildrenRequested = true;
     }
 
     // FIXME: <https://webkit.org/b/298980> URL-based matching is fragile (breaks with redirects,
@@ -194,8 +164,7 @@ WI.DOMManager = class DOMManager extends WI.Object
                     let docURL = new URL(frameDocURL);
                     if (srcURL.href === docURL.href)
                         matched = true;
-                } catch (e) {
-                }
+                } catch { }
             }
 
             if (matched) {
@@ -237,6 +206,11 @@ WI.DOMManager = class DOMManager extends WI.Object
         if (!data)
             return;
 
+        if (data.loadNodeAttributesTimeout) {
+            clearTimeout(data.loadNodeAttributesTimeout);
+            data.loadNodeAttributesTimeout = 0;
+        }
+
         let frameDocument = data.document;
         if (frameDocument && frameDocument.parentNode) {
             let iframeElement = frameDocument.parentNode;
@@ -249,12 +223,11 @@ WI.DOMManager = class DOMManager extends WI.Object
 
         this._unsplicedFrameDocuments = this._unsplicedFrameDocuments.filter((doc) => doc !== frameDocument);
 
-        let prefix = target.identifier + ":";
-        for (let id of Object.keys(this._idToDOMNode)) {
-            if (typeof id === "string" && id.startsWith(prefix)) {
-                this._idToDOMNode[id].markDestroyed();
-                delete this._idToDOMNode[id];
-            }
+        for (let [id, node] of Object.entries(this._idToDOMNode)) {
+            if (node.owningTarget !== target)
+                continue;
+            node.markDestroyed();
+            delete this._idToDOMNode[id];
         }
 
         this._frameTargetDOMData.delete(target);
@@ -268,8 +241,7 @@ WI.DOMManager = class DOMManager extends WI.Object
 
     nodeForIdInFrameTarget(nodeId, target)
     {
-        let scopedId = target.identifier + ":" + nodeId;
-        return this._idToDOMNode[scopedId] || null;
+        return this._idToDOMNode[DOMManager.keyForNodeId(nodeId, target)] || null;
     }
 
     _frameTargetSetChildNodes(target, parentId, payloads)
@@ -277,12 +249,14 @@ WI.DOMManager = class DOMManager extends WI.Object
         if (!parentId && payloads.length)
             return; // Detached root — not applicable for frame targets.
 
-        let scopedParentId = target.identifier + ":" + parentId;
-        let parent = this._idToDOMNode[scopedParentId];
+        let parent = this.nodeForIdInFrameTarget(parentId, target);
         if (!parent)
             return;
 
         parent._setChildrenPayload(payloads);
+
+        // New iframe elements may have been loaded — try to splice pending frame documents.
+        this._trySpliceUnsplicedFrameDocuments();
     }
 
     _frameTargetDocumentUpdated(target)
@@ -313,8 +287,7 @@ WI.DOMManager = class DOMManager extends WI.Object
 
     _frameTargetAttributeModified(target, nodeId, name, value)
     {
-        let scopedId = target.identifier + ":" + nodeId;
-        let node = this._idToDOMNode[scopedId];
+        let node = this.nodeForIdInFrameTarget(nodeId, target);
         if (!node)
             return;
 
@@ -325,8 +298,7 @@ WI.DOMManager = class DOMManager extends WI.Object
 
     _frameTargetAttributeRemoved(target, nodeId, name)
     {
-        let scopedId = target.identifier + ":" + nodeId;
-        let node = this._idToDOMNode[scopedId];
+        let node = this.nodeForIdInFrameTarget(nodeId, target);
         if (!node)
             return;
 
@@ -337,35 +309,53 @@ WI.DOMManager = class DOMManager extends WI.Object
 
     _frameTargetInlineStyleInvalidated(target, nodeIds)
     {
-        // FIXME: https://bugs.webkit.org/show_bug.cgi?id=316416 The page-target variant 
-        // (`_inlineStyleInvalidated`) debounces and batches the `DOM.getAttributes` calls 
-        // so they run at most once per tick. Mimic that here to avoid
-        // issuing one command per invalidated node.
-        for (let nodeId of nodeIds) {
-            let scopedId = target.identifier + ":" + nodeId;
-            let node = this._idToDOMNode[scopedId];
-            if (!node)
+        let data = this._frameTargetDOMData.get(target);
+        if (!data)
+            return;
+
+        // Batch the DOM.getAttributes calls so they run at most once per tick, mirroring the
+        // page-target `_inlineStyleInvalidated`.
+        for (let nodeId of nodeIds)
+            data.attributeLoadNodeIds[nodeId] = true;
+        if (data.loadNodeAttributesTimeout)
+            return;
+        data.loadNodeAttributesTimeout = setTimeout(this._loadFrameTargetNodeAttributes.bind(this, target), 0);
+    }
+
+    _loadFrameTargetNodeAttributes(target)
+    {
+        let data = this._frameTargetDOMData.get(target);
+        if (!data)
+            return;
+
+        data.loadNodeAttributesTimeout = 0;
+
+        let nodeIds = data.attributeLoadNodeIds;
+        data.attributeLoadNodeIds = {};
+
+        for (let nodeId in nodeIds) {
+            if (!this.nodeForIdInFrameTarget(nodeId, target))
                 continue;
 
-            target.DOMAgent.getAttributes(nodeId, (error, attributes) => {
+            let nodeIdAsNumber = parseInt(nodeId);
+            target.DOMAgent.getAttributes(nodeIdAsNumber, (error, attributes) => {
                 if (error || !attributes)
                     return;
 
-                let currentNode = this._idToDOMNode[scopedId];
-                if (!currentNode)
+                let node = this.nodeForIdInFrameTarget(nodeId, target);
+                if (!node)
                     return;
 
-                currentNode._setAttributesPayload(attributes);
-                this.dispatchEventToListeners(WI.DOMManager.Event.AttributeModified, {node: currentNode, name: "style"});
-                currentNode.dispatchEventToListeners(WI.DOMNode.Event.AttributeModified, {name: "style"});
+                node._setAttributesPayload(attributes);
+                this.dispatchEventToListeners(WI.DOMManager.Event.AttributeModified, {node, name: "style"});
+                node.dispatchEventToListeners(WI.DOMNode.Event.AttributeModified, {name: "style"});
             });
         }
     }
 
     _frameTargetCharacterDataModified(target, nodeId, newValue)
     {
-        let scopedId = target.identifier + ":" + nodeId;
-        let node = this._idToDOMNode[scopedId];
+        let node = this.nodeForIdInFrameTarget(nodeId, target);
         if (!node)
             return;
 
@@ -375,8 +365,7 @@ WI.DOMManager = class DOMManager extends WI.Object
 
     _frameTargetChildNodeCountUpdated(target, nodeId, newValue)
     {
-        let scopedId = target.identifier + ":" + nodeId;
-        let node = this._idToDOMNode[scopedId];
+        let node = this.nodeForIdInFrameTarget(nodeId, target);
         if (!node)
             return;
 
@@ -386,13 +375,11 @@ WI.DOMManager = class DOMManager extends WI.Object
 
     _frameTargetChildNodeInserted(target, parentId, prevId, payload)
     {
-        let scopedParentId = target.identifier + ":" + parentId;
-        let parent = this._idToDOMNode[scopedParentId];
+        let parent = this.nodeForIdInFrameTarget(parentId, target);
         if (!parent)
             return;
 
-        let scopedPrevId = prevId ? target.identifier + ":" + prevId : 0;
-        let prev = prevId ? this._idToDOMNode[scopedPrevId] : null;
+        let prev = prevId ? this.nodeForIdInFrameTarget(prevId, target) : null;
         let node = parent._insertChild(prev, payload);
         this._idToDOMNode[node.id] = node;
         this.dispatchEventToListeners(WI.DOMManager.Event.NodeInserted, {node, parent});
@@ -403,10 +390,8 @@ WI.DOMManager = class DOMManager extends WI.Object
 
     _frameTargetChildNodeRemoved(target, parentId, nodeId)
     {
-        let scopedParentId = target.identifier + ":" + parentId;
-        let scopedNodeId = target.identifier + ":" + nodeId;
-        let parent = this._idToDOMNode[scopedParentId];
-        let node = this._idToDOMNode[scopedNodeId];
+        let parent = this.nodeForIdInFrameTarget(parentId, target);
+        let node = this.nodeForIdInFrameTarget(nodeId, target);
         if (!parent || !node)
             return;
 
@@ -415,16 +400,84 @@ WI.DOMManager = class DOMManager extends WI.Object
         this.dispatchEventToListeners(WI.DOMManager.Event.NodeRemoved, {node, parent});
     }
 
+    _frameTargetShadowRootPushed(target, hostId, payload)
+    {
+        let host = this.nodeForIdInFrameTarget(hostId, target);
+        if (!host)
+            return;
+
+        // Insert as a child with no previous sibling, mirroring the page path's
+        // `_childNodeInserted(hostId, 0, root)`; `_insertChild` scopes the node to this target.
+        let node = host._insertChild(null, payload);
+        this._idToDOMNode[node.id] = node;
+        this.dispatchEventToListeners(WI.DOMManager.Event.NodeInserted, {node, parent: host});
+
+        // A shadow subtree may contain an iframe element.
+        this._trySpliceUnsplicedFrameDocuments();
+    }
+
+    _frameTargetShadowRootPopped(target, hostId, rootId)
+    {
+        let host = this.nodeForIdInFrameTarget(hostId, target);
+        let root = this.nodeForIdInFrameTarget(rootId, target);
+        if (!host || !root)
+            return;
+
+        host._removeChild(root);
+        this._frameTargetUnbind(root);
+        this.dispatchEventToListeners(WI.DOMManager.Event.NodeRemoved, {node: root, parent: host});
+    }
+
     _frameTargetWillDestroyDOMNode(target, nodeId)
     {
-        let scopedId = target.identifier + ":" + nodeId;
-        let node = this._idToDOMNode[scopedId];
+        let node = this.nodeForIdInFrameTarget(nodeId, target);
         if (!node)
             return;
 
         node.markDestroyed();
-        delete this._idToDOMNode[scopedId];
+        delete this._idToDOMNode[node.id];
         this.dispatchEventToListeners(WI.DOMManager.Event.NodeRemoved, {node});
+    }
+
+    _frameTargetCustomElementStateChanged(target, nodeId, newState)
+    {
+        let node = this.nodeForIdInFrameTarget(nodeId, target);
+        if (!node)
+            return;
+
+        node._customElementState = newState;
+        this.dispatchEventToListeners(WI.DOMManager.Event.CustomElementStateChanged, {node});
+    }
+
+    _frameTargetPseudoElementAdded(target, parentId, pseudoElement)
+    {
+        let parent = this.nodeForIdInFrameTarget(parentId, target);
+        if (!parent)
+            return;
+
+        let node = new WI.DOMNode(this, parent.ownerDocument, false, pseudoElement, {frameTarget: target});
+        node.parentNode = parent;
+        this._idToDOMNode[node.id] = node;
+        console.assert(!parent.pseudoElements().get(node.pseudoType()));
+        parent.pseudoElements().set(node.pseudoType(), node);
+        this.dispatchEventToListeners(WI.DOMManager.Event.NodeInserted, {node, parent});
+    }
+
+    _frameTargetPseudoElementRemoved(target, parentId, pseudoElementId)
+    {
+        let pseudoElement = this.nodeForIdInFrameTarget(pseudoElementId, target);
+        if (!pseudoElement)
+            return;
+
+        let parent = pseudoElement.parentNode;
+        console.assert(parent);
+        console.assert(parent.id === DOMManager.keyForNodeId(parentId, target));
+        if (!parent)
+            return;
+
+        parent._removeChild(pseudoElement);
+        this._frameTargetUnbind(pseudoElement);
+        this.dispatchEventToListeners(WI.DOMManager.Event.NodeRemoved, {node: pseudoElement, parent});
     }
 
     transitionPageTarget()
@@ -433,6 +486,15 @@ WI.DOMManager = class DOMManager extends WI.Object
     }
 
     // Static
+
+    static keyForNodeId(rawNodeId, target)
+    {
+        // A node id is only unique within the agent that issued it, so frame-target nodes are keyed
+        // by their target as well. Page-target ids are already unique and are used as-is.
+        if (target instanceof WI.FrameTarget)
+            return `${target.identifier}:${rawNodeId}`;
+        return rawNodeId;
+    }
 
     static buildHighlightConfigs(mode)
     {
@@ -576,11 +638,37 @@ WI.DOMManager = class DOMManager extends WI.Object
         this.requestDocument(function(){});
     }
 
-    pushNodeToFrontend(objectId, callback)
+    pushNodeToFrontend(objectId, callback, target)
     {
-        let target = WI.assumingMainTarget();
-        this._dispatchWhenDocumentAvailable((callbackWrapper) => {
-            target.DOMAgent.requestNode(objectId, callbackWrapper);
+        target ||= WI.assumingMainTarget();
+
+        // `DOM.requestNode` answers an id in the responding agent's own id space, but callers look the
+        // node up in the manager-wide map, so hand back the scoped key instead.
+        if (callback) {
+            let clientCallback = callback;
+            callback = (rawNodeId) => clientCallback(rawNodeId ? DOMManager.keyForNodeId(rawNodeId, target) : rawNodeId);
+        }
+
+        let callbackWrapper = DOMManager.wrapClientCallback(callback);
+        let dispatch = () => target.DOMAgent.requestNode(objectId, callbackWrapper);
+
+        if (target instanceof WI.FrameTarget) {
+            if (this._frameTargetDOMData.get(target)?.document) {
+                dispatch();
+                return;
+            }
+            let handler = (event) => {
+                if (event.data.target !== target)
+                    return;
+                this.removeEventListener(WI.DOMManager.Event.FrameDocumentAvailable, handler);
+                dispatch();
+            };
+            this.addEventListener(WI.DOMManager.Event.FrameDocumentAvailable, handler);
+            return;
+        }
+
+        this._dispatchWhenDocumentAvailable((wrapper) => {
+            target.DOMAgent.requestNode(objectId, wrapper);
         }, callback);
     }
 
@@ -803,8 +891,6 @@ WI.DOMManager = class DOMManager extends WI.Object
             node.markDestroyed();
             delete this._idToDOMNode[id];
         }
-
-        this._pageBodyChildrenRequested = false;
 
         for (let breakpoint of this._breakpointsForEventListeners.values())
             WI.domDebuggerManager.dispatchEventToListeners(WI.DOMDebuggerManager.Event.EventBreakpointRemoved, {breakpoint});
@@ -1112,17 +1198,8 @@ WI.DOMManager = class DOMManager extends WI.Object
             this.dispatchEventToListeners(WI.DOMManager.Event.InspectedNodeChanged, {lastInspectedNode});
         };
 
-        // FIXME: <https://webkit.org/b/298980> `DOM.setInspectedNode` for cross-origin frame nodes is not yet supported;
-        // `node.id` for frame-owned nodes is a composite "frameId:nodeId" string, not a numeric backend node id.
-        if (node.owningTarget) {
-            let lastInspectedNode = this._inspectedNode;
-            this._inspectedNode = node;
-            this.dispatchEventToListeners(WI.DOMManager.Event.InspectedNodeChanged, {lastInspectedNode});
-            return;
-        }
-
-        let target = WI.assumingMainTarget();
-        target.DOMAgent.setInspectedNode(node.id, callback);
+        let target = node.owningTarget || WI.assumingMainTarget();
+        target.DOMAgent.setInspectedNode(node.backendNodeId, callback);
     }
 
     getSupportedEventNames(callback)

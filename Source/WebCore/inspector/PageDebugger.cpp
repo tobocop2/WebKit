@@ -81,8 +81,9 @@ void PageDebugger::detachDebugger(bool isBeingDestroyed)
 {
     JSC::Debugger::detachDebugger(isBeingDestroyed);
 
-    if (protect(m_page)->debugger() == this)
-        m_page->setDebugger(nullptr);
+    Ref page = m_page;
+    if (page->debugger() == this)
+        page->setDebugger(nullptr);
     if (!isBeingDestroyed)
         recompileAllJSFunctions();
 }
@@ -147,6 +148,13 @@ void PageDebugger::runEventLoopWhilePausedInternal()
 bool PageDebugger::isContentScript(JSGlobalObject* state) const
 {
     return &currentWorld(*state) != &mainThreadNormalWorldSingleton() || JSC::Debugger::isContentScript(state);
+}
+
+URL PageDebugger::sourceURLBase(JSGlobalObject* state) const
+{
+    if (RefPtr context = uncheckedDowncast<JSDOMGlobalObject>(state)->scriptExecutionContext())
+        return context->url();
+    return { };
 }
 
 void PageDebugger::reportException(JSGlobalObject* state, JSC::Exception* exception) const

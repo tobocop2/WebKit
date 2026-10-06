@@ -55,8 +55,10 @@ else ()
 
     if (LOWERCASE_EVENT_LOOP_TYPE STREQUAL "glib")
         list(APPEND WTF_SOURCES
+            glib/FilePathWatcher.cpp
             glib/FileSystemGlib.cpp
             glib/Sandbox.cpp
+            glib/TimeZoneGLib.cpp
         )
     endif ()
 
@@ -106,6 +108,14 @@ elseif (APPLE)
             -DMACH_EXC_SERVER_TASKIDTOKEN_STATE -isysroot ${CMAKE_OSX_SYSROOT}
             MachExceptions.defs
         VERBATIM)
+    # Bun: not with USE_BUN_JSC_ADDITIONS. TimeZone.cpp then compiles its no-op listenForTimeZoneChangeNotifications()
+    # on every platform (Bun bumps the time zone ID itself, through timeZoneDidChange()), and this file defines the same
+    # function: libWTF.a would hold two strong definitions of it and the link would take whichever came first.
+    if (NOT USE_GLIB AND NOT USE_BUN_JSC_ADDITIONS)
+        list(APPEND WTF_SOURCES
+            cocoa/TimeZoneCocoa.cpp
+        )
+    endif ()
     list(APPEND WTF_SOURCES
         cocoa/MemoryFootprintCocoa.cpp
 
@@ -117,16 +127,16 @@ elseif (APPLE)
 elseif (ANDROID)
     list(APPEND WTF_SOURCES
         linux/CurrentProcessMemoryStatus.cpp
+        linux/HighPriorityThreads.cpp
         linux/MemoryFootprintLinux.cpp
-        linux/RealTimeThreads.cpp
 
         generic/MemoryPressureHandlerGeneric.cpp
     )
 elseif (CMAKE_SYSTEM_NAME MATCHES "Linux")
     list(APPEND WTF_SOURCES
         linux/CurrentProcessMemoryStatus.cpp
+        linux/HighPriorityThreads.cpp
         linux/MemoryFootprintLinux.cpp
-        linux/RealTimeThreads.cpp
 
         unix/MemoryPressureHandlerUnix.cpp
     )
@@ -146,6 +156,7 @@ endif ()
 
 if (LOWERCASE_EVENT_LOOP_TYPE STREQUAL "glib")
     list(APPEND WTF_PUBLIC_HEADERS
+        glib/FilePathWatcher.h
         glib/GRefPtr.h
         glib/GSpanExtras.h
         glib/GTypedefs.h

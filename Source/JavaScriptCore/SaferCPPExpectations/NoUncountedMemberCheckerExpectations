@@ -3,8 +3,6 @@ API/JSCallbackObject.h
 API/JSClassRef.h
 API/JSObjectRef.h
 API/JSRetainPtr.h
-API/tests/testapi.cpp
-BytecodeStructs.h
 bytecode/InlineCacheHandler.h
 bytecode/PropertyInlineCacheClearingWatchpoint.h
 bytecode/SharedJITStubSet.h
@@ -28,7 +26,6 @@ jit/OperationResult.h
 parser/Parser.h
 parser/SourceProvider.h
 profiler/ProfilerEvent.h
-runtime/GetPutInfo.h
 runtime/IndexingHeader.h
 runtime/JSArrayBuffer.h
 runtime/JSDataView.h
@@ -36,11 +33,9 @@ runtime/PropertyName.h
 runtime/PropertySlot.h
 runtime/Structure.h
 wasm/WasmBBQJIT.h
-[ macOS ] wasm/WasmConstExprGenerator.cpp
 wasm/WasmEntryPlan.cpp
 wasm/WasmFormat.h
 wasm/WasmFunctionParser.h
 wasm/WasmIPIntGenerator.cpp
 wasm/WasmNameSectionParser.h
 wasm/WasmOMGIRGenerator.cpp
-wasm/WasmStreamingCompiler.h

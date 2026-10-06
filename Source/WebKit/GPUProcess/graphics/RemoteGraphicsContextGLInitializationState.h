@@ -31,6 +31,7 @@
 #include <WebCore/GraphicsContextGLAttributes.h>
 #include <WebCore/GraphicsTypesGL.h>
 #include <array>
+#include <optional>
 #include <wtf/OptionSet.h>
 
 namespace WebKit {
@@ -39,8 +40,7 @@ struct RemoteGraphicsContextGLInitializationState {
     WebCore::GraphicsContextGLAttributes attributes;
     uint64_t knownActiveExtensions { 0 }; // EnumSet<WebCore::GCGLExtension> when EnumSet serialization works.
     uint64_t requestableExtensions { 0 }; // EnumSet<WebCore::GCGLExtension> when EnumSet serialization works.
-    GCGLenum externalImageTarget { 0 };
-    GCGLenum externalImageBindingQuery { 0 };
+    std::optional<uint64_t> estimatedMemoryCost;
     GCGLint maxCombinedTextureImageUnits { 0 };
     GCGLint maxVertexAttribs { 0 };
     GCGLint maxTextureSize { 0 };

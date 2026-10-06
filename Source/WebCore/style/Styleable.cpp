@@ -44,7 +44,7 @@
 #include "RenderElement.h"
 #include "RenderElementInlines.h"
 #include "RenderListItem.h"
-#include "RenderListMarker.h"
+#include "RenderListOutsideMarker.h"
 #include "RenderView.h"
 #include "StyleAnimations.h"
 #include "StyleableInlines.h"
@@ -364,9 +364,9 @@ void Styleable::cancelStyleOriginatedAnimations(const WeakStyleOriginatedAnimati
 
 static bool keyframesRuleExistsForAnimation(Element& element, const Style::ScopedName& animationName)
 {
-    return Style::Scope::resolveTreeScopedReference(element, animationName, [](const Style::Scope& scope, const AtomString& name) -> bool {
+    return Style::resolveTreeScopedReference(element, animationName, [](const Style::Scope& scope, const Style::ScopedName& scopedName) -> bool {
         if (RefPtr resolver = scope.resolverIfExists())
-            return resolver->isAnimationNameValid(name);
+            return resolver->isAnimationNameValid(scopedName.name);
         return false;
     });
 }
@@ -438,7 +438,7 @@ void Styleable::updateCSSAnimations(const Style::ComputedStyle* currentStyle, co
                 if (previousAnimation->animationName() == currentAnimationName) {
                     // Timing properties or play state may have changed so we need to update the backing animation with
                     // the Animation found in the current style.
-                    previousAnimation->setBackingStyleAnimation(currentAnimation);
+                    previousAnimation->setBackingStyleAnimation(currentAnimation, newStyle.usedZoomForLength());
                     // Keyframes may have been cleared if the @keyframes rules was changed since
                     // the last style update, so we must ensure keyframes are picked up.
                     previousAnimation->updateKeyframesIfNeeded(currentStyle, newStyle, resolutionContext);
@@ -452,7 +452,7 @@ void Styleable::updateCSSAnimations(const Style::ComputedStyle* currentStyle, co
             }
 
             if (!foundMatchingAnimation && isInDisplayNoneTree == Style::IsInDisplayNoneTree::No) {
-                auto cssAnimation = CSSAnimation::create(*this, Style::Animation { currentAnimation }, currentStyle, newStyle, resolutionContext);
+                auto cssAnimation = CSSAnimation::create(*this, Style::Animation { currentAnimation }, newStyle.usedZoomForLength(), currentStyle, newStyle, resolutionContext);
                 newStyleOriginatedAnimations.append(cssAnimation.ptr());
                 newAnimations.add(WTF::move(cssAnimation));
             }
@@ -874,9 +874,9 @@ void Styleable::updateCSSScrollTimelines(const Style::ComputedStyle* currentStyl
             [](CSS::Keyword::None) {
                 // Nothing to register.
             },
-            [&](const Style::CustomIdent& identifier) {
-                styleOriginatedTimelinesController->registerNamedScrollTimeline(identifier.value, *this, scrollTimeline.axis());
-                registeredScrollTimelineNames.add(identifier.value);
+            [&](const Style::ScopedName& scopedName) {
+                styleOriginatedTimelinesController->registerNamedScrollTimeline(scopedName, *this, scrollTimeline.axis());
+                registeredScrollTimelineNames.add(scopedName.name);
             }
         );
     }
@@ -889,9 +889,9 @@ void Styleable::updateCSSScrollTimelines(const Style::ComputedStyle* currentStyl
             [](CSS::Keyword::None) {
                 // Nothing to unregister.
             },
-            [&](const Style::CustomIdent& identifier) {
-                if (!registeredScrollTimelineNames.contains(identifier.value))
-                    styleOriginatedTimelinesController->unregisterNamedTimeline(identifier.value, *this);
+            [&](const Style::ScopedName& scopedName) {
+                if (!registeredScrollTimelineNames.contains(scopedName.name))
+                    styleOriginatedTimelinesController->unregisterNamedTimeline(scopedName.name, *this);
             }
         );
     }
@@ -911,9 +911,9 @@ void Styleable::updateCSSViewTimelines(const Style::ComputedStyle* currentStyle,
             [](CSS::Keyword::None) {
                 // Nothing to register.
             },
-            [&](const Style::CustomIdent& identifier) {
-                styleOriginatedTimelinesController->registerNamedViewTimeline(identifier.value, *this, viewTimeline.axis(), viewTimeline.inset());
-                registeredViewTimelineNames.add(identifier.value);
+            [&](const Style::ScopedName& scopedName) {
+                styleOriginatedTimelinesController->registerNamedViewTimeline(scopedName, *this, viewTimeline.axis(), viewTimeline.inset(), afterChangeStyle.usedZoomForLength());
+                registeredViewTimelineNames.add(scopedName.name);
             }
         );
     }
@@ -926,9 +926,9 @@ void Styleable::updateCSSViewTimelines(const Style::ComputedStyle* currentStyle,
             [](CSS::Keyword::None) {
                 // Nothing to unregister.
             },
-            [&](const Style::CustomIdent& identifier) {
-                if (!registeredViewTimelineNames.contains(identifier.value))
-                    styleOriginatedTimelinesController->unregisterNamedTimeline(identifier.value, *this);
+            [&](const Style::ScopedName& scopedName) {
+                if (!registeredViewTimelineNames.contains(scopedName.name))
+                    styleOriginatedTimelinesController->unregisterNamedTimeline(scopedName.name, *this);
             }
         );
     }

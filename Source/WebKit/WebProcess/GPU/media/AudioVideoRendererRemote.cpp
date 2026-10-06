@@ -106,7 +106,7 @@ AudioVideoRendererRemote::AudioVideoRendererRemote(LoggerHelper* loggerHelper, G
     connection.connection().addWorkQueueMessageReceiver(Messages::AudioVideoRendererRemoteMessageReceiver::messageReceiverName(), queueSingleton(), m_receiver, m_identifier.toUInt64());
     connection.addClient(*this);
 
-    connection.connection().sendWithAsyncReply(Messages::RemoteAudioVideoRendererProxyManager::Create(identifier, mediaElementIdentifier, playerIdentifier), [weakThis = ThreadSafeWeakPtr { *this }](auto&& handle) {
+    connection.connection().sendWithAsyncReply(Messages::RemoteAudioVideoRendererProxyManager::CreateManager(identifier, mediaElementIdentifier, playerIdentifier), [weakThis = ThreadSafeWeakPtr { *this }](auto&& handle) {
         RefPtr protectedThis = weakThis.get();
         if (!protectedThis)
             return;
@@ -162,8 +162,6 @@ AudioVideoRendererRemote::~AudioVideoRendererRemote() WTF_IGNORES_THREAD_SAFETY_
         });
     }
 
-    for (auto& request : std::exchange(m_layerHostingContextRequests, { }))
-        request({ });
 }
 
 void AudioVideoRendererRemote::setVolume(float volume)
@@ -333,7 +331,7 @@ void AudioVideoRendererRemote::paintCurrentVideoFrameInContext(GraphicsContext& 
         return;
 
     if (RefPtr videoFrame = currentVideoFrame())
-        context.drawVideoFrame(*videoFrame, rect, ImageOrientation::Orientation::None, false);
+        context.drawVideoFrame(*videoFrame, rect, ShouldDiscardAlpha::No);
 }
 
 RefPtr<NativeImage> AudioVideoRendererRemote::currentNativeImage() const
@@ -551,7 +549,7 @@ Ref<MediaTimePromise> AudioVideoRendererRemote::prepareToSeek(const MediaTime& t
 
             if (auto producer = std::exchange(protectedThis->m_prepareSeekPromise, std::nullopt))
                 producer->settle(WTF::move(result));
-        })->track(m_prepareSeekRequest);
+        })->track(protect(m_prepareSeekRequest));
 
         return promise;
     });
@@ -559,9 +557,14 @@ Ref<MediaTimePromise> AudioVideoRendererRemote::prepareToSeek(const MediaTime& t
 
 Ref<GenericPromise> AudioVideoRendererRemote::finishSeek(const MediaTime& time)
 {
-    if (!m_seeking)
-        ALWAYS_LOG(LOGIDENTIFIER, "state error");
-    ASSERT(m_seeking, "Invalid seeking state, bad API usage");
+    // m_seeking is set/read on MediaSourcePrivateAVFObjC::queueSingleton() but
+    // cleared on AudioVideoRendererRemote::queueSingleton(), so a superseding
+    // seek (or a GPU-not-running path) can clear it out from under this call.
+    // Treat that as a superseded seek and reject.
+    if (!m_seeking) {
+        ALWAYS_LOG(LOGIDENTIFIER, "seek superseded before finishSeek; skipping");
+        return GenericPromise::createAndReject();
+    }
     return invokeAsync(queueSingleton(), [protectedThis = Ref { *this }, this, time] -> Ref<GenericPromise> {
         cancelPendingSeek();
 
@@ -587,7 +590,7 @@ Ref<GenericPromise> AudioVideoRendererRemote::finishSeek(const MediaTime& time)
 
             if (auto producer = std::exchange(protectedThis->m_finishSeekPromise, std::nullopt))
                 producer->settle(WTF::move(result));
-        })->track(m_finishSeekRequest);
+        })->track(protect(m_finishSeekRequest));
 
         return promise;
     });
@@ -626,7 +629,7 @@ std::optional<AudioVideoRendererRemote::TrackIdentifier> AudioVideoRendererRemot
         return std::nullopt;
 
     // the sendSync() call requires us to run on the connection's dispatcher, which is the main thread.
-    Expected<WebCore::SamplesRendererTrackIdentifier, WebCore::PlatformMediaError> result = makeUnexpected(PlatformMediaError::IPCError);
+    std::expected<WebCore::SamplesRendererTrackIdentifier, WebCore::PlatformMediaError> result = makeUnexpected(PlatformMediaError::IPCError);
     callOnMainRunLoopAndWait([&] {
         // FIXME: Uses a new Connection for remote playback, and not the main GPUProcessConnection's one.
         auto sendResult = gpuProcessConnection->connection().sendSync(Messages::RemoteAudioVideoRendererProxyManager::AddTrack(m_identifier, type), 0);
@@ -779,7 +782,7 @@ Ref<MediaTimePromise> AudioVideoRendererRemote::notifyTimeReachedAndStall(const 
             protect(protectedThis->m_stallRequest)->complete();
             if (auto producer = std::exchange(protectedThis->m_stallProducer, std::nullopt))
                 producer->settle(WTF::move(result));
-        })->track(m_stallRequest);
+        })->track(protect(m_stallRequest));
         return promise;
     });
 }
@@ -935,37 +938,37 @@ void AudioVideoRendererRemote::resolveRequestMediaDataWhenReadyIfNeeded(TrackIde
     m_requestMediaDataWhenReadyDataPromises.take(iterator)->resolve(trackIdentifier);
 }
 
-void AudioVideoRendererRemote::requestHostingContext(LayerHostingContextCallback&& completionHandler)
+Ref<AudioVideoRenderer::HostingContextPromise> AudioVideoRendererRemote::requestHostingContext()
 {
-    ensureOnDispatcher([weakThis = ThreadSafeWeakPtr { *this }, completionHandler = WTF::move(completionHandler)]() mutable {
+    return invokeAsync(queueSingleton(), [weakThis = ThreadSafeWeakPtr { *this }] {
         RefPtr protectedThis = weakThis.get();
-        if (!protectedThis) {
-            completionHandler({ });
-            return;
-        }
+        if (!protectedThis)
+            return HostingContextPromise::createAndReject();
         assertIsCurrent(queueSingleton());
 
         // FIXME: should it be called on the main thread???
         RefPtr gpuProcessConnection = protectedThis->m_gpuProcessConnection.get();
-        if (!protectedThis->isGPURunning() || !gpuProcessConnection) {
-            completionHandler({ });
-            return;
-        }
+        if (!protectedThis->isGPURunning() || !gpuProcessConnection)
+            return HostingContextPromise::createAndReject();
 
         auto layerHostingContext = [&] {
             Locker locker { protectedThis->m_lock };
             return protectedThis->m_layerHostingContext;
         }();
-        if (layerHostingContext.contextID) {
-            completionHandler(layerHostingContext);
-            return;
-        }
+        if (layerHostingContext.contextID)
+            return HostingContextPromise::createAndResolve(WTF::move(layerHostingContext));
 
-        protectedThis->m_layerHostingContextRequests.append(WTF::move(completionHandler));
-        gpuProcessConnection->connection().sendWithAsyncReplyOnDispatcher(Messages::RemoteAudioVideoRendererProxyManager::RequestHostingContext(protectedThis->m_identifier), queueSingleton(), [weakThis] (WebCore::HostingContext context) {
-            if (RefPtr protectedThis = weakThis.get())
-                protectedThis->setLayerHostingContext(WTF::move(context));
+        HostingContextPromise::AutoRejectProducer producer;
+        Ref promise = producer.promise();
+        gpuProcessConnection->connection().sendWithAsyncReplyOnDispatcher(Messages::RemoteAudioVideoRendererProxyManager::RequestHostingContext(protectedThis->m_identifier), queueSingleton(), [weakThis, producer = WTF::move(producer)] (WebCore::HostingContext context) mutable {
+            RefPtr protectedThis = weakThis.get();
+            if (!protectedThis || !context.contextID)
+                return;
+            assertIsCurrent(queueSingleton());
+            protectedThis->setLayerHostingContext(WebCore::HostingContext { context });
+            producer.resolve(WTF::move(context));
         }, 0);
+        return promise;
     });
 }
 
@@ -979,22 +982,13 @@ void AudioVideoRendererRemote::setLayerHostingContext(WebCore::HostingContext&& 
 {
     assertIsCurrent(queueSingleton());
 
-    Vector<LayerHostingContextCallback> layerHostingContextRequests;
-    HostingContext layerHostingContext { hostingContext };
-    {
-        Locker locker { m_lock };
-        if (m_layerHostingContext.contextID == hostingContext.contextID)
-            return;
-
-        m_layerHostingContext = WTF::move(hostingContext);
+    Locker locker { m_lock };
+    if (m_layerHostingContext.contextID == hostingContext.contextID)
+        return;
+    m_layerHostingContext = WTF::move(hostingContext);
 #if PLATFORM(COCOA)
-        m_videoLayer = nullptr;
+    m_videoLayer = nullptr;
 #endif
-    }
-    callOnMainRunLoop([layerHostingContext = WTF::move(layerHostingContext), layerHostingContextRequests = std::exchange(m_layerHostingContextRequests, { })]() mutable {
-        for (auto& request : layerHostingContextRequests)
-            request(layerHostingContext);
-    });
 }
 
 bool AudioVideoRendererRemote::inVideoFullscreenOrPictureInPicture() const

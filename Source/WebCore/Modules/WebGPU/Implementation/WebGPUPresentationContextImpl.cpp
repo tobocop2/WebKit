@@ -32,7 +32,6 @@
 #include "WebGPUCanvasConfiguration.h"
 #include "WebGPUConvertToBackingContext.h"
 #include "WebGPUDeviceImpl.h"
-#include "WebGPUTextureDescriptor.h"
 #include "WebGPUTextureImpl.h"
 #include <WebGPU/WebGPUExt.h>
 
@@ -84,25 +83,6 @@ static WGPUCompositeAlphaMode NODELETE convertToAlphaMode(WebCore::WebGPU::Canva
     return WGPUCompositeAlphaMode_Premultiplied;
 }
 
-static WGPUColorSpace NODELETE convertToColorSpace(PredefinedColorSpace colorSpace)
-{
-    switch (colorSpace) {
-    case PredefinedColorSpace::SRGB:
-        return WGPUColorSpace::SRGB;
-    case PredefinedColorSpace::SRGBLinear:
-        return WGPUColorSpace::SRGBLinear;
-#if ENABLE(PREDEFINED_COLOR_SPACE_DISPLAY_P3)
-    case PredefinedColorSpace::DisplayP3:
-        return WGPUColorSpace::DisplayP3;
-    case PredefinedColorSpace::DisplayP3Linear:
-        return WGPUColorSpace::DisplayP3Linear;
-#endif
-    }
-
-    ASSERT_NOT_REACHED();
-    return WGPUColorSpace::SRGB;
-}
-
 bool PresentationContextImpl::configure(const CanvasConfiguration& canvasConfiguration)
 {
     m_swapChain = nullptr;
@@ -112,7 +92,7 @@ bool PresentationContextImpl::configure(const CanvasConfiguration& canvasConfigu
     Ref convertToBackingContext = m_convertToBackingContext;
 
     WGPUSwapChainDescriptor backingDescriptor {
-        .label = nullptr,
+        .label = { },
         .usage = convertToBackingContext->convertTextureUsageFlagsToBacking(canvasConfiguration.usage),
         .format = convertToBackingContext->convertToBacking(canvasConfiguration.format),
         .width = m_width,
@@ -121,7 +101,7 @@ bool PresentationContextImpl::configure(const CanvasConfiguration& canvasConfigu
         .viewFormats = canvasConfiguration.viewFormats.map([&](auto colorFormat) {
             return convertToBackingContext->convertToBacking(colorFormat);
         }),
-        .colorSpace = convertToColorSpace(canvasConfiguration.colorSpace),
+        .colorSpace = convertToBackingContext->convertToBacking(canvasConfiguration.colorSpace),
         .toneMappingMode = convertToToneMappingMode(canvasConfiguration.toneMappingMode),
         .compositeAlphaMode = convertToAlphaMode(canvasConfiguration.compositingAlphaMode),
         .reportValidationErrors = canvasConfiguration.reportValidationErrors
@@ -137,11 +117,10 @@ void PresentationContextImpl::unconfigure()
         return;
 
     m_swapChain = nullptr;
-    
+
     m_format = TextureFormat::Bgra8unorm;
     m_width = 0;
     m_height = 0;
-    m_swapChain = nullptr;
     m_currentTexture = nullptr;
 }
 
@@ -165,6 +144,13 @@ void PresentationContextImpl::present(uint32_t frameIndex, bool)
     if (auto* surface = m_swapChain.get())
         wgpuSwapChainPresent(surface, frameIndex);
     m_currentTexture = nullptr;
+}
+
+Seconds PresentationContextImpl::lastFrameGPUCost() const
+{
+    if (auto* surface = m_backing.get())
+        return Seconds { wgpuSurfaceGetLastFrameGPUCostSeconds(surface) };
+    return 0_s;
 }
 
 RefPtr<WebCore::NativeImage> PresentationContextImpl::getMetalTextureAsNativeImage(uint32_t bufferIndex, bool& isIOSurfaceSupportedFormat)

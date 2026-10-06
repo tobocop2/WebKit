@@ -51,6 +51,7 @@
 #include "NowPlayingInfo.h"
 #include "Page.h"
 #include "PlatformMediaSessionManager.h"
+#include "RenderBoxInlines.h"
 #include "RenderMediaInlines.h"
 #include "RenderObjectInlines.h"
 #include "RenderView.h"
@@ -59,10 +60,12 @@
 #include "SourceBuffer.h"
 #include "TextTrack.h"
 #include "TextTrackList.h"
+#include "UserGestureIndicator.h"
 #include "VideoTrack.h"
 #include "VideoTrackConfiguration.h"
 #include "VideoTrackList.h"
 #include <wtf/CryptographicallyRandomNumber.h>
+#include <wtf/RunLoop.h>
 #include <wtf/RuntimeApplicationChecks.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/StringBuilder.h>
@@ -230,6 +233,18 @@ void MediaElementSession::addMediaUsageManagerSessionIfNecessary()
 #endif
 }
 
+void MediaElementSession::mediaUsageManagerSessionWillBeSuspended()
+{
+#if ENABLE(MEDIA_USAGE)
+    // The back/forward cache keeps this MediaElementSession (and thus this flag) alive across
+    // suspend/resume, but the UI process unconditionally clears its usage-tracking map on every
+    // navigation commit, including the eventual restore commit.
+    // Reset the flag so the next updateMediaUsageIfChanged() after resuming re-adds the session
+    // before updating it, instead of sending an update for an identifier the UI process no longer has.
+    m_haveAddedMediaUsageManagerSession = false;
+#endif
+}
+
 void MediaElementSession::registerWithDocument(Document& document)
 {
 #if ENABLE(WIRELESS_PLAYBACK_TARGET)
@@ -262,14 +277,12 @@ void MediaElementSession::clientWillBeginAutoplaying()
     updateClientDataBuffering();
 }
 
-void MediaElementSession::clientWillBeginPlayback(CompletionHandler<void(bool)>&& completionHandler)
+Ref<GenericPromise> MediaElementSession::clientWillBeginPlayback()
 {
-    PlatformMediaSession::clientWillBeginPlayback([weakThis = WeakPtr { *this }, completionHandler = WTF::move(completionHandler)](bool willBegin) mutable {
+    return PlatformMediaSession::clientWillBeginPlayback()->whenSettled(RunLoop::mainSingleton(), [weakThis = WeakPtr { *this }](auto&& result) {
         RefPtr protectedThis = weakThis.get();
-        if (!protectedThis || !willBegin) {
-            completionHandler(false);
-            return;
-        }
+        if (!protectedThis || !result)
+            return GenericPromise::createAndReject();
 
         protectedThis->m_elementIsHiddenBecauseItWasRemovedFromDOM = false;
         protectedThis->updateClientDataBuffering();
@@ -279,7 +292,7 @@ void MediaElementSession::clientWillBeginPlayback(CompletionHandler<void(bool)>&
             session->willBeginPlayback();
 #endif
 
-        completionHandler(true);
+        return GenericPromise::createAndResolve();
     });
 }
 
@@ -429,7 +442,24 @@ void MediaElementSession::removeBehaviorRestriction(BehaviorRestrictions restric
     m_restrictions &= ~restriction;
 }
 
-Expected<void, MediaPlaybackDenialExplanation> MediaElementSession::playbackStateChangePermitted(MediaPlaybackState state) const
+#if !RELEASE_LOG_DISABLED
+
+static ASCIILiteral mediaGestureReasonString(Document::MediaGestureReason reason)
+{
+    switch (reason) {
+    case Document::MediaGestureReason::None: return "None"_s;
+    case Document::MediaGestureReason::ActiveToken: return "ActiveToken"_s;
+    case Document::MediaGestureReason::TransientActivation: return "TransientActivation"_s;
+    case Document::MediaGestureReason::MediaFinishedGrace: return "MediaFinishedGrace"_s;
+    case Document::MediaGestureReason::InheritsFromDocumentSetting: return "InheritsFromDocumentSetting"_s;
+    case Document::MediaGestureReason::InheritedUserGesturesQuirk: return "InheritedUserGesturesQuirk"_s;
+    }
+    return "Unknown"_s;
+}
+
+#endif
+
+std::expected<void, MediaPlaybackDenialExplanation> MediaElementSession::playbackStateChangePermitted(MediaPlaybackState state) const
 {
     RefPtr element = m_element.get();
     auto makeUnexpectedDenial = [](MediaPlaybackDenialReason reason, const String& explanation) {
@@ -446,6 +476,19 @@ Expected<void, MediaPlaybackDenialExplanation> MediaElementSession::playbackStat
 
     if (document->isMediaDocument() && !document->ownerElement())
         return { };
+
+    RefPtr mainFrameDocument = document->mainFrameDocument();
+
+    // Deny an audible element from starting while another element in the document is already playing audio,
+    // unless a user gesture is being directly processed.
+    if (mainFrameDocument && mainFrameDocument->quirks().shouldBlockAudiblePlaybackWhileAudioIsPlaying()
+        && state == MediaPlaybackState::Playing
+        && !element->muted() && element->volume() && element->hasAudio() && !element->isPlaying()
+        && document->mediaState().contains(MediaProducerMediaState::IsPlayingAudio)
+        && document->mediaUserGestureReason() != Document::MediaGestureReason::ActiveToken) {
+        ALWAYS_LOG(LOGIDENTIFIER, "denying audible playback while another element is playing audio; gesture reason = ", mediaGestureReasonString(document->mediaUserGestureReason()));
+        return makeUnexpectedDenial(MediaPlaybackDenialReason::UserGestureRequired, "Another audible media element is already playing"_s);
+    }
 
     if (pageExplicitlyAllowsElementToAutoplayInline(*element))
         return { };
@@ -466,7 +509,6 @@ Expected<void, MediaPlaybackDenialExplanation> MediaElementSession::playbackStat
 #endif
 
     // FIXME: Why are we checking top-level document only for PerDocumentAutoplayBehavior?
-    RefPtr mainFrameDocument = document->mainFrameDocument();
     if (!mainFrameDocument) {
         LOG_ONCE(SiteIsolation, "Unable to properly calculate MediaElementSession::playbackStateChangePermitted() without access to the main frame document ");
     }
@@ -477,6 +519,15 @@ Expected<void, MediaPlaybackDenialExplanation> MediaElementSession::playbackStat
         && !element->paused() && state == MediaPlaybackState::Paused
         && !document->processingUserGestureForMedia())
         return makeUnexpectedDenial(MediaPlaybackDenialReason::UserGestureRequired, "Quirk requires user gesture to pause in Picture-in-Picture"_s);
+
+#if ENABLE(VIDEO_PRESENTATION_MODE)
+    if (document->quirks().requiresUserGestureToPauseInFullscreenAfterOrientationChange()
+        && element->fullscreenMode() & HTMLMediaElementEnums::VideoFullscreenModeStandard
+        && !element->paused() && state == MediaPlaybackState::Paused
+        && !UserGestureIndicator::processingUserGestureForMedia()
+        && (MonotonicTime::now() - page->lastOrientationChangeTime()) < 500_ms)
+        return makeUnexpectedDenial(MediaPlaybackDenialReason::UserGestureRequired, "Quirk requires user gesture to pause in fullscreen after an orientation change"_s);
+#endif
 
 #if ENABLE(FULLSCREEN_API)
     if (mainFrameDocument && mainFrameDocument->quirks().requiresUserGestureToPlayInFullscreen() && document->fullscreen().fullscreenElement() && state == MediaPlaybackState::Playing && element->paused()) {
@@ -1176,7 +1227,7 @@ bool MediaElementSession::requiresPlaybackTargetRouteMonitoring() const
 static bool isElementMainContentForPurposesOfAutoplay(const HTMLMediaElement& element, bool shouldHitTestMainFrame)
 {
     Ref document = element.document();
-    if (!document->hasLivingRenderTree() || document->activeDOMObjectsAreStopped() || element.isSuspended() || !element.hasAudio() || !element.hasVideo())
+    if (document->renderTreeState() != Document::RenderTreeState::Built || document->activeDOMObjectsAreStopped() || element.isSuspended() || !element.hasAudio() || !element.hasVideo())
         return false;
 
     // Elements which have not yet been laid out, or which are not yet in the DOM, cannot be main content.
@@ -1229,24 +1280,31 @@ static bool isElementMainContentForPurposesOfAutoplay(const HTMLMediaElement& el
 
 static bool isElementRectMostlyInMainFrame(const HTMLMediaElement& element)
 {
-    if (!element.renderer())
+    CheckedPtr renderer = element.renderer();
+    if (!renderer)
         return false;
 
     RefPtr documentFrame = element.document().frame();
     if (!documentFrame)
         return false;
 
+    RefPtr documentView = documentFrame->virtualView();
+    if (!documentView)
+        return false;
+
     RefPtr mainFrameView = protect(documentFrame->mainFrame())->virtualView();
     if (!mainFrameView)
         return false;
 
-    IntRect mainFrameRectAdjustedForScrollPosition = IntRect(-mainFrameView->documentScrollPositionRelativeToViewOrigin(), mainFrameView->contentsSize());
-    IntRect elementRectInMainFrame = element.boundingBoxInRootViewCoordinates();
+    IntRect mainFrameRect { -mainFrameView->documentScrollPositionRelativeToViewOrigin(), mainFrameView->contentsSize() };
+
+    IntRect elementRectInMainFrame = enclosingIntRect(documentView->convertToRootViewAcrossIsolatedFrames(FloatRect { renderer->absoluteBoundingBoxRect() }));
+
     auto totalElementArea = elementRectInMainFrame.area<RecordOverflow>();
     if (totalElementArea.hasOverflowed())
         return false;
 
-    elementRectInMainFrame.intersect(mainFrameRectAdjustedForScrollPosition);
+    elementRectInMainFrame.intersect(mainFrameRect);
 
     return elementRectInMainFrame.area() > totalElementArea / 2;
 }
@@ -1266,8 +1324,8 @@ static bool isElementLargeRelativeToMainFrame(const HTMLMediaElement& element)
     if (!mainFrameView)
         return false;
 
-    auto maxVisibleClientWidth = std::min(renderer->clientWidth().toInt(), mainFrameView->visibleWidth());
-    auto maxVisibleClientHeight = std::min(renderer->clientHeight().toInt(), mainFrameView->visibleHeight());
+    auto maxVisibleClientWidth = std::min(renderer->paddingBoxWidth().toInt(), mainFrameView->visibleWidth());
+    auto maxVisibleClientHeight = std::min(renderer->paddingBoxHeight().toInt(), mainFrameView->visibleHeight());
 
     return maxVisibleClientWidth * maxVisibleClientHeight > minimumPercentageOfMainFrameAreaForMainContent * mainFrameView->visibleWidth() * mainFrameView->visibleHeight();
 }
@@ -1275,16 +1333,16 @@ static bool isElementLargeRelativeToMainFrame(const HTMLMediaElement& element)
 static bool isElementLargeEnoughForMainContent(const HTMLMediaElement& element, MediaSessionMainContentPurpose purpose)
 {
     static const double elementMainContentAreaMinimum = 400 * 300;
-    static const double maximumAspectRatio = purpose == MediaSessionMainContentPurpose::MediaControls ? 3 : 1.8;
     static const double minimumAspectRatio = .5; // Slightly smaller than 9:16.
+    const double maximumAspectRatio = purpose == MediaSessionMainContentPurpose::MediaControls ? 3 : 1.8;
 
     // Elements which have not yet been laid out, or which are not yet in the DOM, cannot be main content.
     CheckedPtr renderer = element.renderer();
     if (!renderer)
         return false;
 
-    double width = renderer->clientWidth();
-    double height = renderer->clientHeight();
+    double width = renderer->paddingBoxWidth();
+    double height = renderer->paddingBoxHeight();
     double area = width * height;
     double aspectRatio = width / height;
 
@@ -1512,9 +1570,10 @@ std::optional<NowPlayingInfo> MediaElementSession::computeNowPlayingInfo() const
 
     bool supportsSeeking = element->supportsSeeking();
     double rate = element->playbackRate();
-    double duration = supportsSeeking ? element->duration() : std::numeric_limits<double>::quiet_NaN();
+    // Report position independently of seekability.
+    double duration = element->duration();
     double currentTime = element->currentTime();
-    if (!std::isfinite(currentTime) || !supportsSeeking)
+    if (!std::isfinite(currentTime))
         currentTime = std::numeric_limits<double>::quiet_NaN();
     auto sourceApplicationIdentifier = element->sourceApplicationIdentifier();
 #if PLATFORM(COCOA)
@@ -1585,7 +1644,7 @@ void MediaElementSession::updateMediaUsageIfChanged()
 #if ENABLE(FULLSCREEN_API)
     if (RefPtr documentFullscreen = document->fullscreenIfExists()) {
         if (RefPtr fullscreenElement = protect(document->fullscreen())->fullscreenElement())
-            isOutsideOfFullscreen = element->isDescendantOf(*fullscreenElement);
+            isOutsideOfFullscreen = !element->isDescendantOf(*fullscreenElement);
     }
 #endif
     bool isAudio = client().presentationType() == MediaType::Audio;
@@ -1596,7 +1655,7 @@ void MediaElementSession::updateMediaUsageIfChanged()
     MediaUsageInfo usage = {
         element->currentSrc(),
         element->hasSource(),
-        state() == PlatformMediaSession::State::Playing,
+        isPlaying,
         canShowControlsManager(PlaybackControlsPurpose::ControlsManager),
         !page->isVisibleAndActive(),
         element->isSuspended(),

@@ -159,6 +159,8 @@ formtarget
 frame
 frameborder
 headers
+headingoffset
+headingreset
 height
 hidden
 high
@@ -180,6 +182,7 @@ kind
 label
 lang
 language
+layoutsubtree
 leftmargin
 link
 list
@@ -460,4 +463,5 @@ x-apple-data-detectors-type
 x-apple-pdf-annotation
 x-itunes-inherit-uri-query-component
 x-webkit-airplay
+x-webkit-projection
 x-webkit-wirelessvideoplaybackdisabled

@@ -183,6 +183,8 @@ class Port(object):
             self._filesystem,
             self.port_name,
             use_cmake=bool(getattr(self._options, 'use_cmake', False)),
+            use_xcode=bool(getattr(self._options, 'use_xcode', False)),
+            asan=bool(getattr(self._options, 'asan', False)),
         )
         self.pretty_patch = PrettyPatch(self._executive, self.path_from_webkit_base(), self._filesystem)
 
@@ -269,7 +271,9 @@ class Port(object):
         return baseline_search_paths[0]
 
     def baseline_search_path(self, device_type=None):
-        return self.get_option('additional_platform_directory', []) + self._compare_baseline() + self.default_baseline_search_path(device_type=device_type)
+        search_path = self.get_option('additional_platform_directory', []) + self._compare_baseline() + self.default_baseline_search_path(device_type=device_type)
+        # Ports can map two platform names onto the same directory, so drop repeats while keeping the first (highest-priority) occurrence of each.
+        return list(dict.fromkeys(search_path))
 
     def default_baseline_search_path(self, device_type=None):
         """Return a list of absolute paths to directories to search under for
@@ -643,6 +647,10 @@ class Port(object):
     def perf_tests_dir(self):
         return self._filesystem.join(self.webkit_base(), "PerformanceTests")
 
+    def harness_resources_dir(self):
+        # The harness files exist in LayoutTests even when --layout-tests-directory specifies a different dir.
+        return self._filesystem.join(self.webkit_base(), "LayoutTests", "fast", "harness")
+
     def skipped_layout_tests(self, device_type=None):
         """Returns tests skipped outside of the TestExpectations files."""
         return set(self._tests_for_other_platforms(device_type=device_type)) | set(
@@ -870,7 +878,7 @@ class Port(object):
             ports.extend(self._http_server.ports_to_forward())
         if Port._websocket_server:
             ports.extend(Port._websocket_server.ports_to_forward())
-        if Port._websocket_server:
+        if Port._websocket_secure_server:
             ports.extend(Port._websocket_secure_server.ports_to_forward())
         if Port._web_platform_test_server:
             ports.extend(Port._web_platform_test_server.ports_to_forward())
@@ -1346,6 +1354,10 @@ class Port(object):
 
         if hasattr(self, 'architecture') and self.architecture():
             config['architecture'] = self.architecture()
+
+        if self.get_option('site_isolation_enabled_by_default'):
+            # No hyphen: an interior '-' would be parsed as a version specifier rather than a flavor.
+            config['flavor'] = 'siteisolation'
 
         return config
 

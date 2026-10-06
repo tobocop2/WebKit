@@ -59,6 +59,7 @@ class GCAwareJITStubRoutine : public JITStubRoutine {
 public:
     using Base = JITStubRoutine;
     friend class JITStubRoutine;
+    friend class JSDollarVMHelper;
     GCAwareJITStubRoutine(Type, const MacroAssemblerCodeRef<JITStubRoutinePtrTag>&, JSCell* owner, bool isCodeImmutable);
 
     static Ref<JITStubRoutine> create(VM& vm, const MacroAssemblerCodeRef<JITStubRoutinePtrTag>& code, JSCell* owner, bool isCodeImmutable)
@@ -148,7 +149,7 @@ public:
             m_owners.remove(codeBlock);
     }
 
-    bool visitWeakImpl(VM&);
+    bool reconcileWeakReferencesAtGCEndImpl(VM&);
 
 protected:
     void observeZeroRefCountImpl();
@@ -172,7 +173,7 @@ public:
 
     MarkingGCAwareJITStubRoutine(Type, const MacroAssemblerCodeRef<JITStubRoutinePtrTag>&, VM&, FixedVector<Ref<AccessCase>>&&, FixedVector<StructureID>&&, JSCell* owner, const Vector<JSCell*>&, Vector<std::unique_ptr<OptimizingCallLinkInfo>, 16>&&, bool isCodeImmutable);
 
-    bool visitWeakImpl(VM&);
+    bool reconcileWeakReferencesAtGCEndImpl(VM&);
     CallLinkInfo* NODELETE callLinkInfoAtImpl(const ConcurrentJSLocker&, unsigned);
 
 protected:

@@ -27,12 +27,11 @@
 #include "CollectorPhase.h"
 #include "CompleteSubspace.h"
 #include "DeleteAllCodeEffort.h"
+#include "GCCompletionCallback.h"
 #include "GCConductor.h"
 #include "GCIncomingRefCountedSet.h"
 #include "GCMemoryOperations.h"
 #include "GCRequest.h"
-#include "HandleSet.h"
-#include "HeapFinalizerCallback.h"
 #include "HeapObserver.h"
 #include "IsoCellSet.h"
 #include "IsoHeapCellType.h"
@@ -43,14 +42,17 @@
 #include "MarkedSpace.h"
 #include "MutatorState.h"
 #include "PreciseSubspace.h"
+#include "StrongSet.h"
 #include "StructureID.h"
 #include "Synchronousness.h"
 #include "WeakHandleOwner.h"
 #include <JavaScriptCore/SubspaceAccess.h>
+#include <wtf/ApproximateTime.h>
 #include <wtf/AutomaticThread.h>
 #include <wtf/Box.h>
 #include <wtf/ConcurrentPtrHashSet.h>
 #include <wtf/Deque.h>
+#include <wtf/DoublyLinkedList.h>
 #include <wtf/HashCountedSet.h>
 #include <wtf/HashSet.h>
 #include <wtf/Lock.h>
@@ -58,6 +60,7 @@
 #include <wtf/NotFound.h>
 #include <wtf/ParallelHelperPool.h>
 #include <wtf/SegmentedVector.h>
+#include <wtf/SentinelLinkedList.h>
 #include <wtf/Threading.h>
 
 #if USE(BUN_JSC_ADDITIONS)
@@ -102,6 +105,7 @@ class RunningScope;
 class SlotVisitor;
 class SpaceTimeMutatorScheduler;
 class StopIfNecessaryTimer;
+class StructureAlignedMemoryAllocator;
 class SweepingScope;
 class VM;
 class VerifierSlotVisitor;
@@ -129,7 +133,7 @@ class Heap;
     v(calleeSpace, cellHeapCellType, JSCallee) \
     v(clonedArgumentsSpace, cellHeapCellType, ClonedArguments) \
     v(customGetterSetterSpace, cellHeapCellType, CustomGetterSetter) \
-    v(dateInstanceSpace, dateInstanceHeapCellType, DateInstance) \
+    v(dateInstanceSpace, cellHeapCellType, DateInstance) \
     v(domAttributeGetterSetterSpace, cellHeapCellType, DOMAttributeGetterSetter) \
     v(exceptionSpace, destructibleCellHeapCellType, Exception) \
     v(functionSpace, cellHeapCellType, JSFunction) \
@@ -212,9 +216,18 @@ class Heap;
 #define FOR_EACH_JSC_WEBASSEMBLY_DYNAMIC_NON_ISO_SUBSPACE(v)
 #endif
 
+#if USE(BUN_JSC_ADDITIONS)
+#define FOR_EACH_JSC_FFI_DYNAMIC_ISO_SUBSPACE(v) \
+    v(ffiFunctionSpace, ffiFunctionHeapCellType, JSFFIFunction) \
+    v(ffiCallbackSpace, ffiCallbackHeapCellType, JSFFICallback)
+#else
+#define FOR_EACH_JSC_FFI_DYNAMIC_ISO_SUBSPACE(v)
+#endif
+
 #define FOR_EACH_JSC_DYNAMIC_ISO_SUBSPACE(v) \
     FOR_EACH_JSC_OBJC_API_DYNAMIC_ISO_SUBSPACE(v) \
     FOR_EACH_JSC_GLIB_API_DYNAMIC_ISO_SUBSPACE(v) \
+    FOR_EACH_JSC_FFI_DYNAMIC_ISO_SUBSPACE(v) \
     \
     v(apiGlobalObjectSpace, apiGlobalObjectHeapCellType, JSAPIGlobalObject) \
     v(apiValueWrapperSpace, cellHeapCellType, JSAPIValueWrapper) \
@@ -334,12 +347,6 @@ public:
     static JSC::Heap* heap(const JSValue); // 0 for immediate values
     static JSC::Heap* heap(const HeapCell*);
 
-    // This constant determines how many blocks we iterate between checks of our 
-    // deadline when calling Heap::isPagedOut. Decreasing it will cause us to detect 
-    // overstepping our deadline more quickly, while increasing it will cause 
-    // our scan to run faster. 
-    static constexpr unsigned s_timeCheckResolution = 16;
-
     bool isMarked(const void*);
     static bool testAndSetMarked(HeapVersion, const void*);
 
@@ -383,6 +390,19 @@ public:
 
     MutatorState mutatorState() const { return m_mutatorState; }
     std::optional<CollectionScope> collectionScope() const { return m_collectionScope; }
+    std::optional<CollectionScope> lastCollectionScope() const { return m_lastCollectionScope; }
+#if USE(BUN_JSC_ADDITIONS)
+    // The most recent collection boundary: the end of the last one, or the start of the one in progress.
+    MonotonicTime lastGCBoundaryTime() const { return std::max(m_lastGCEndTime, m_currentGCStartTime); }
+    // Live size of the heap (cells and extra memory) as of the last finished collection, eden or full.
+    size_t sizeAfterLastCollection() const { return m_sizeAfterLastCollect; }
+    // Everything the mutator has allocated (cells and reported extra memory), the current cycle included. Mutator thread only.
+    uint64_t totalBytesAllocated() const { return m_bytesAllocatedInPastCycles + m_nonOversizedBytesAllocatedThisCycle + m_oversizedBytesAllocatedThisCycle; }
+    // How much the mutator may allocate before the heap collects by itself: what updateAllocationLimits() decided after the last
+    // collection. For an embedder that wants to say "this program is allocating a lot" in the heap's own terms and not in bytes
+    // per second of its own choosing. Mutator thread only.
+    size_t allocationBudgetThisCycle() { return effectiveMaxEdenSize(); }
+#endif
     bool hasHeapAccess() const { return m_worldState.load() & hasAccessBit; }
     bool worldIsStopped() const { return m_worldIsStopped; }
     bool worldIsRunning() const { return !worldIsStopped(); }
@@ -418,6 +438,13 @@ public:
     // collection and then return. In weird cases, there could be multiple GC requests in the backlog
     // and this will wait for that backlog before running its GC and returning.
     JS_EXPORT_PRIVATE void collectSync(GCRequest = GCRequest());
+#if USE(BUN_JSC_ADDITIONS)
+    // Lets the first `bytes` of allocation happen before the first collection is considered, for an embedder that knows
+    // the program is about to build a large, entirely live object graph (loading a big precompiled module graph) where
+    // early collections find nothing to free. Only widens the budget of the cycle in progress; once a collection has run,
+    // sizing is back to the usual rules and minimums.
+    JS_EXPORT_PRIVATE void setInitialAllocationBudget(size_t bytes);
+#endif
     
     JS_EXPORT_PRIVATE void collect(Synchronousness, GCRequest = GCRequest());
     
@@ -485,7 +512,7 @@ public:
     template<typename Functor> inline void forEachCodeBlock(NOESCAPE const Functor&);
     template<typename Functor> inline void forEachCodeBlockIgnoringJITPlans(const AbstractLocker& codeBlockSetLocker, NOESCAPE const Functor&);
 
-    HandleSet* handleSet() LIFETIME_BOUND { return &m_handleSet; }
+    StrongSet* strongSet() LIFETIME_BOUND { return &m_strongSet; }
 
     JS_EXPORT_PRIVATE void willStartIterating();
     JS_EXPORT_PRIVATE void didFinishIterating();
@@ -499,15 +526,54 @@ public:
     size_t sizeBeforeLastFullCollection() const { return m_sizeBeforeLastFullCollect; }
     size_t sizeAfterLastFullCollection() const { return m_sizeAfterLastFullCollect; }
 
-    void deleteAllCodeBlocks(DeleteAllCodeEffort);
-    void deleteAllUnlinkedCodeBlocks(DeleteAllCodeEffort);
+    void deleteAllCodeBlocks(DeleteAllCodeEffort, bool keepWhatNeedsParsing = false);
+    void deleteAllUnlinkedCodeBlocks(DeleteAllCodeEffort, OptionSet<UnlinkedCodeToDelete> = UnlinkedCodeToDelete::Generated);
+
+#if USE(BUN_JSC_ADDITIONS)
+    // When a collection last began that found the mutator had allocated more than a trickle since the one before: the
+    // mutator was at work then. Idle optimized code ages against this (CodeBlock::shouldJettisonDueToOldAge), and an
+    // embedder can. Written by whichever thread runs the collection, read from any. ApproximateTime() (zero) until the
+    // first such collection: a VM that has not allocated Options::optimizedCodeAgingQuietAllocationMB in total yet reads
+    // as quiet since the epoch, which is the right answer for "has it been busy lately".
+    ApproximateTime lastActiveCollectionTime() const { return m_lastActiveCollectionTime.load(std::memory_order_relaxed); }
+#endif
+
+#if USE(BUN_JSC_ADDITIONS)
+    // Moves the butterflies out of the sparse blocks of the Auxiliary subspace (those whose live bytes are at most
+    // maximumOccupancy of a block) into denser ones, so that the sparse blocks die with the next full collection, which
+    // the caller should request. For a program at rest; see the definition for the mechanism and for what is not moved.
+    // Never asserts on the caller's state: if this is not a moment at which it can run, nothing happens and
+    // AuxiliaryEvacuationResult::skipped says why.
+    //
+    // What this asks of an embedder: a raw pointer into an object's out-of-line storage (Butterfly*, the data() of
+    // contiguous() / contiguousDouble() / contiguousInt32(), a WriteBarrier<Unknown>* to an out-of-line property or an
+    // element) may be kept across a call that can reach this function only in a local variable or register of the VM's
+    // own thread, where the conservative scan finds it and leaves the storage in place. Anything kept elsewhere (the C++
+    // heap, another thread's stack) must be revalidated against JSObject::butterfly() afterwards, the way
+    // JSArrayIterator revalidates. No thread may read a butterfly without holding the JSLock. Typed array vectors and
+    // everything else in the Gigacage's primitive subspace are never moved: compiled code embeds their addresses.
+    struct AuxiliaryEvacuationResult {
+        ASCIILiteral skipped; // Null if the evacuation ran, otherwise the reason it did not.
+        unsigned candidateBlocks { 0 };
+        unsigned evacuatedBlocks { 0 };
+        unsigned movedCells { 0 };
+        unsigned pinnedCells { 0 };
+        unsigned cellsWithoutSingleOwner { 0 };
+        size_t movedBytes { 0 };
+        Seconds duration;
+    };
+    JS_EXPORT_PRIVATE AuxiliaryEvacuationResult evacuateSparseAuxiliaryBlocks(double maximumOccupancy);
+    void evacuateAuxiliaryBlocksIfDue();
+#endif
 
     JS_EXPORT_PRIVATE void didAllocate(size_t);
-    bool isPagedOut();
-    
+
     const JITStubRoutineSet& jitStubRoutines() { return *m_jitStubRoutines; }
     
-    void addReference(JSCell*, ArrayBuffer*);
+    // bytesAlreadyReported is the part of the buffer that this heap has already counted as allocated, because the
+    // buffer adopted storage that reportExtraMemoryAllocated() had reported. The first reference counts only the rest
+    // as allocated. The size of the heap (extraMemorySize()) gets the whole buffer either way.
+    void addReference(JSCell*, ArrayBuffer*, size_t bytesAlreadyReported = 0);
     
     bool isDeferred() const { return !!m_deferralDepth; }
 
@@ -522,8 +588,9 @@ public:
 
     JS_EXPORT_PRIVATE void registerWeakGCHashTable(WeakGCHashTable*);
     JS_EXPORT_PRIVATE void unregisterWeakGCHashTable(WeakGCHashTable*);
+    void addDirtyWeakGCHashTable(WeakGCHashTable*);
 
-    void addLogicallyEmptyWeakBlock(WeakBlock*);
+    unsigned weakBlockCount() const { return m_weakBlockCount; }
 
 #if ENABLE(RESOURCE_USAGE)
     size_t blockBytesAllocated() const { return m_blockBytesAllocated; }
@@ -610,8 +677,8 @@ public:
     
     HeapVerifier* verifier() const LIFETIME_BOUND { return m_verifier.get(); }
     
-    void addHeapFinalizerCallback(const HeapFinalizerCallback&);
-    void removeHeapFinalizerCallback(const HeapFinalizerCallback&);
+    void addGCCompletionCallback(const GCCompletionCallback&);
+    void removeGCCompletionCallback(const GCCompletionCallback&);
     
     void runTaskInParallel(RefPtr<SharedTask<void(SlotVisitor&)>>);
     
@@ -664,7 +731,6 @@ private:
     friend class GCAwareJITStubRoutine;
     friend class GCLogging;
     friend class GCThread;
-    friend class HandleSet;
     friend class HeapUtil;
     friend class HeapVerifier;
     friend class JITStubRoutine;
@@ -681,6 +747,7 @@ private:
     friend class IncrementalSweeper;
     friend class VM;
     friend class VerifierSlotVisitor;
+    friend class WeakBlock;
     friend class WeakSet;
 
     class HeapThread;
@@ -705,6 +772,13 @@ private:
     JS_EXPORT_PRIVATE void deprecatedReportExtraMemorySlowCase(size_t);
     
     size_t totalBytesAllocatedThisCycle() { return m_nonOversizedBytesAllocatedThisCycle + m_oversizedBytesAllocatedThisCycle; }
+#if USE(BUN_JSC_ADDITIONS)
+    // Read once when the current (or last) collection began; CodeBlock aging measures against it instead of reading the
+    // clock for every block it visits.
+    ApproximateTime currentGCStartApproximateTime() const { return m_currentGCStartApproximateTime; }
+    // The collection in progress was requested by the embedder because the application went idle (GCRequest::isIdle).
+    bool isIdleCollection() const { return m_currentRequest.isIdle; }
+#endif
 
     bool shouldCollectInCollectorThread(const AbstractLocker&);
     void collectInCollectorThread();
@@ -746,14 +820,14 @@ private:
     JS_EXPORT_PRIVATE void acquireAccessSlow();
     JS_EXPORT_PRIVATE void releaseAccessSlow();
     
-    bool handleNeedFinalize(unsigned);
-    void handleNeedFinalize();
+    bool handleNeedCollectionEpilogue(unsigned);
+    void handleNeedCollectionEpilogue();
     
     bool relinquishConn(unsigned);
     void finishRelinquishingConn();
     
-    void setNeedFinalize();
-    void waitWhileNeedFinalize();
+    void setNeedCollectionEpilogue();
+    void waitWhileNeedCollectionEpilogue();
     
     void setMutatorWaiting();
     void clearMutatorWaiting();
@@ -781,30 +855,37 @@ private:
 
     void cancelDeferredWorkIfNeeded();
     void reapWeakHandles();
-    void pruneStaleEntriesFromWeakGCHashTables();
+    void reconcileWeakGCHashTables();
     void sweepArrayBuffers();
     void snapshotUnswept();
     void deleteSourceProviderCaches();
-    void notifyIncrementalSweeper();
     void harvestWeakReferences();
 
     template<typename CellType, typename CellSet>
-    void finalizeMarkedUnconditionalFinalizers(CellSet&, CollectionScope);
+    void reconcileWeakReferencesInMarkedCells(CellSet&, CollectionScope);
 
-    void finalizeUnconditionalFinalizers();
+    void reconcileWeakReferencesAtGCEnd();
 
     void deleteUnmarkedCompiledCode();
+    void releaseUnusedSharedBaselineCode();
     JS_EXPORT_PRIVATE void addToRememberedSet(const JSCell*);
     void updateAllocationLimits();
     void didFinishCollection();
     void resumeCompilerThreads();
+#if USE(BUN_JSC_ADDITIONS)
+    ASCIILiteral reasonNotToEvacuateAuxiliaryBlocksNow();
+#endif
     void gatherExtraHeapData(HeapProfiler&);
     void removeDeadHeapSnapshotNodes(HeapProfiler&);
-    void finalize();
-    void sweepInFinalize();
+    void runCollectionEpilogue();
+    void sweepEagerlyInEpilogue();
     
-    void sweepAllLogicallyEmptyWeakBlocks();
-    bool sweepNextLogicallyEmptyWeakBlock();
+    void addDetachedWeakBlock(WeakBlock*);
+    void releaseDetachedWeakBlock(WeakBlock*);
+    void returnWeakBlockToPool(WeakBlock*);
+    WeakBlock* takeWeakBlockFromPool();
+    void destroyAllPooledWeakBlocks();
+    unsigned maxPooledWeakBlocks();
 
     bool shouldDoFullCollection();
 
@@ -829,6 +910,10 @@ private:
     };
 
     bool overCriticalMemoryThreshold(MemoryThresholdCallType memoryThresholdCallType = MemoryThresholdCallType::Cached);
+
+    // The eden this cycle is being paced against: m_maxEdenSize, capped to m_maxEdenSizeWhenCritical while we are
+    // over the critical memory threshold, the same way collectIfNecessaryOrDefer() caps the bytes it allows per cycle.
+    size_t effectiveMaxEdenSize();
     
     template<typename Visitor>
     void iterateExecutingAndCompilingCodeBlocks(Visitor&, NOESCAPE const Function<void(CodeBlock*)>&);
@@ -837,8 +922,6 @@ private:
     void iterateExecutingAndCompilingCodeBlocksWithoutHoldingLocks(Visitor&, const Func&);
     
     void assertMarkStacksEmpty();
-
-    void setBonusVisitorTask(RefPtr<SharedTask<void(SlotVisitor&)>>);
 
     void dumpHeapStatisticsAtVMDestruction();
 
@@ -854,6 +937,15 @@ private:
     const size_t m_ramSize;
     const size_t m_minBytesPerCycle;
     size_t m_bytesAllocatedBeforeLastEdenCollect { 0 };
+#if USE(BUN_JSC_ADDITIONS)
+    std::atomic<ApproximateTime> m_lastActiveCollectionTime { ApproximateTime() };
+    ApproximateTime m_currentGCStartApproximateTime;
+    size_t m_bytesAllocatedSinceLastActiveCollection { 0 };
+    uint64_t m_bytesAllocatedInPastCycles { 0 };
+    bool m_isCollectionPrevented { false }; // Between preventCollection() and allowCollection(), which do not nest.
+    bool m_auxiliaryEvacuationIsDue { false };
+    HeapVersion m_lastAuxiliaryEvacuationVersion { 0 }; // The marking version (one per full collection) when cells were last moved.
+#endif
     size_t m_sizeAfterLastCollect { 0 };
     size_t m_sizeAfterLastFullCollect { 0 };
     size_t m_sizeBeforeLastFullCollect { 0 };
@@ -878,6 +970,10 @@ private:
     bool m_shouldDoFullCollection { false };
     Markable<CollectionScope> m_collectionScope;
     Markable<CollectionScope> m_lastCollectionScope;
+#if USE(BUN_JSC_ADDITIONS)
+    bool m_reenableEdenActivityCallback { false };
+    bool m_reenableFullActivityCallback { false };
+#endif
     Lock m_raceMarkStackLock;
 
     MarkedSpace m_objectSpace;
@@ -904,7 +1000,7 @@ private:
     Vector<std::unique_ptr<SlotVisitor>> m_parallelSlotVisitors;
     Vector<SlotVisitor*> m_availableParallelSlotVisitors WTF_GUARDED_BY_LOCK(m_parallelSlotVisitorLock);
     
-    HandleSet m_handleSet;
+    StrongSet m_strongSet;
     std::unique_ptr<CodeBlockSet> m_codeBlocks;
     std::unique_ptr<JITStubRoutineSet> m_jitStubRoutines;
     CFinalizerOwner m_cFinalizerOwner;
@@ -928,12 +1024,17 @@ private:
     Seconds m_lastEdenGCLength { 10_ms };
 #endif
 
-    Vector<WeakBlock*> m_logicallyEmptyWeakBlocks;
-    size_t m_indexOfNextLogicallyEmptyWeakBlockToSweep { WTF::notFound };
+    DoublyLinkedList<WeakBlock> m_detachedWeakBlocks;
+    DoublyLinkedList<WeakBlock> m_pooledWeakBlocks;
+    unsigned m_pooledWeakBlockCount { 0 };
+    unsigned m_weakBlockCount { 0 };
 
 #if ASSERT_ENABLED
-    friend void setTopGCOwnedDataScopeIfNeeded(const JSCell*, const void*);
-    friend void clearTopGCOwnedDataScopeIfNeeded(const JSCell*, const void*);
+    // JS_EXPORT_PRIVATE matches GCOwnedDataScope.h. Heap.h does not include it, so
+    // whichever declaration a translation unit sees first has to carry the attribute:
+    // adding dllimport in a redeclaration is an error under -Wdll-attribute-on-redeclaration.
+    friend JS_EXPORT_PRIVATE void setTopGCOwnedDataScopeIfNeeded(const JSCell*, const void*);
+    friend JS_EXPORT_PRIVATE void clearTopGCOwnedDataScopeIfNeeded(const JSCell*, const void*);
     const void* m_topGCOwnedDataScope { nullptr };
 #endif
     // Use a SegmentedVector rather than a Vector because we don't want to have to copy in order to grow the buffer.
@@ -949,7 +1050,7 @@ private:
 
     Vector<HeapObserver*> m_observers;
     
-    Vector<HeapFinalizerCallback> m_heapFinalizerCallbacks;
+    Vector<GCCompletionCallback> m_gcCompletionCallbacks;
     
     std::unique_ptr<HeapVerifier> m_verifier;
 
@@ -964,6 +1065,7 @@ private:
     unsigned m_deferralDepth { 0 };
 
     UncheckedKeyHashSet<WeakGCHashTable*> m_weakGCHashTables;
+    SentinelLinkedList<WeakGCHashTable, BasicRawSentinelNode<WeakGCHashTable>> m_dirtyWeakGCHashTables;
     
 #if ENABLE(WEBASSEMBLY)
     UncheckedKeyHashSet<Ref<Wasm::Callee>> m_wasmCalleesPendingDestruction WTF_GUARDED_BY_LOCK(m_wasmCalleesPendingDestructionLock);
@@ -979,13 +1081,13 @@ private:
     std::unique_ptr<MarkStackArray> m_sharedCollectorMarkStack;
     std::unique_ptr<MarkStackArray> m_sharedMutatorMarkStack;
     unsigned m_numberOfActiveParallelMarkers { 0 };
-    unsigned m_numberOfWaitingParallelMarkers { 0 };
+    unsigned m_numberOfWaitingParallelMarkers WTF_GUARDED_BY_LOCK(m_markingMutex) { 0 };
 
     ConcurrentPtrHashSet m_opaqueRoots;
     static constexpr size_t s_blockFragmentLength = 32;
 
     ParallelHelperClient m_helperClient;
-    RefPtr<SharedTask<void(SlotVisitor&)>> m_bonusVisitorTask;
+    RefPtr<SharedTask<void(SlotVisitor&)>> m_bonusVisitorTask WTF_GUARDED_BY_LOCK(m_markingMutex);
 
 #if ENABLE(RESOURCE_USAGE)
     size_t m_blockBytesAllocated { 0 };
@@ -997,12 +1099,13 @@ private:
     static constexpr unsigned mutatorHasConnBit = 1u << 0u; // Must also be protected by threadLock.
     static constexpr unsigned stoppedBit = 1u << 1u; // Only set when !hasAccessBit
     static constexpr unsigned hasAccessBit = 1u << 2u;
-    static constexpr unsigned needFinalizeBit = 1u << 3u;
+    static constexpr unsigned needCollectionEpilogueBit = 1u << 3u;
     static constexpr unsigned mutatorWaitingBit = 1u << 4u; // Allows the mutator to use this as a condition variable.
     Atomic<unsigned> m_worldState;
     bool m_worldIsStopped { false };
     Lock m_markingMutex;
     Condition m_markingConditionVariable;
+    Condition m_bonusVisitorTaskConditionVariable;
 
     MonotonicTime m_beforeGC;
     MonotonicTime m_afterGC;
@@ -1020,7 +1123,7 @@ private:
     bool m_threadShouldStop { false };
     bool m_mutatorDidRun { true };
     bool m_didDeferGCWork { false };
-    bool m_shouldStopCollectingContinuously { false };
+    bool m_shouldStopCollectingContinuously WTF_GUARDED_BY_LOCK(m_collectContinuouslyLock) { false };
     bool m_isCompilerThreadsSuspended { false };
 
     uint64_t m_mutatorExecutionVersion { 0 };
@@ -1064,7 +1167,6 @@ public:
     IsoHeapCellType callbackObjectHeapCellType;
     IsoHeapCellType customGetterFunctionHeapCellType;
     IsoHeapCellType customSetterFunctionHeapCellType;
-    IsoHeapCellType dateInstanceHeapCellType;
     IsoHeapCellType errorInstanceHeapCellType;
     IsoHeapCellType finalizationRegistryCellType;
     IsoHeapCellType globalLexicalEnvironmentHeapCellType;
@@ -1101,6 +1203,10 @@ public:
     IsoHeapCellType intlSegmentIteratorHeapCellType;
     IsoHeapCellType intlSegmenterHeapCellType;
     IsoHeapCellType intlSegmentsHeapCellType;
+#if USE(BUN_JSC_ADDITIONS)
+    IsoHeapCellType ffiFunctionHeapCellType;
+    IsoHeapCellType ffiCallbackHeapCellType;
+#endif
 #if ENABLE(WEBASSEMBLY)
     IsoHeapCellType webAssemblyExceptionHeapCellType;
     IsoHeapCellType webAssemblyFunctionHeapCellType;
@@ -1117,6 +1223,7 @@ public:
     // AlignedMemoryAllocators
     std::unique_ptr<FastMallocAlignedMemoryAllocator> fastMallocAllocator;
     std::unique_ptr<GigacageAlignedMemoryAllocator> primitiveGigacageAllocator;
+    std::unique_ptr<StructureAlignedMemoryAllocator> structureAllocator;
 
     // Subspaces
     CompleteSubspace primitiveGigacageAuxiliarySpace; // Typed arrays, strings, bitvectors, etc go here.
@@ -1215,14 +1322,14 @@ public:
         IsoSubspace space;
         IsoCellSet clearableCodeSet;
         IsoCellSet outputConstraintsSet;
-        IsoCellSet finalizerSet;
+        IsoCellSet weakReconciliationSet;
 
         template<typename... Arguments>
         ScriptExecutableSpaceAndSets(Arguments&&... arguments)
             : space(std::forward<Arguments>(arguments)...)
             , clearableCodeSet(space)
             , outputConstraintsSet(space)
-            , finalizerSet(space)
+            , weakReconciliationSet(space)
         {
         }
 
@@ -1235,7 +1342,7 @@ public:
 
         static IsoCellSet& clearableCodeSetFor(Subspace& space) { return setAndSpaceFor(space).clearableCodeSet; }
         static IsoCellSet& outputConstraintsSetFor(Subspace& space) { return setAndSpaceFor(space).outputConstraintsSet; }
-        static IsoCellSet& finalizerSetFor(Subspace& space) { return setAndSpaceFor(space).finalizerSet; }
+        static IsoCellSet& weakReconciliationSetFor(Subspace& space) { return setAndSpaceFor(space).weakReconciliationSet; }
     };
 
     DYNAMIC_SPACE_AND_SET_DEFINE_MEMBER(evalExecutableSpace, ScriptExecutableSpaceAndSets)
@@ -1273,7 +1380,7 @@ public:
     FOR_EACH_JSC_WEBASSEMBLY_DYNAMIC_NON_ISO_SUBSPACE(DEFINE_NON_ISO_SUBSPACE_MEMBER)
 #undef DEFINE_NON_ISO_SUBSPACE_MEMBER
 
-    CString m_signpostMessage;
+    UTF8CString m_signpostMessage;
 };
 
 namespace GCClient {

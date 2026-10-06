@@ -86,7 +86,6 @@
 #include "NavigationRequester.h"
 #include "NavigationScheduler.h"
 #include "NetworkLoadMetrics.h"
-#include "NetworkStorageSession.h"
 #include "OriginAccessPatterns.h"
 #include "Page.h"
 #include "Performance.h"
@@ -103,6 +102,7 @@
 #include "ServiceWorkerClientData.h"
 #include "ServiceWorkerProvider.h"
 #include "Settings.h"
+#include "StorageAccessQuirks.h"
 #include "SubresourceLoader.h"
 #include "TextResourceDecoder.h"
 #include "UserContentProvider.h"
@@ -193,7 +193,7 @@ DocumentLoader::DocumentLoader(ResourceRequest&& request, SubstituteData&& subst
     , m_originalRequestCopy(originalRequest.isNull() ? request : WTF::move(originalRequest))
     , m_request(WTF::move(request))
     , m_substituteResourceDeliveryTimer(*this, &DocumentLoader::substituteResourceDeliveryTimerFired)
-    , m_originalSubstituteDataWasValid(substituteData.isValid())
+    , m_originalSubstituteDataWasValid(m_substituteData.isValid())
 {
 }
 
@@ -430,6 +430,13 @@ bool DocumentLoader::isLoading() const
     return isLoadingMainResource() || !m_subresourceLoaders.isEmpty() || !m_plugInStreamLoaders.isEmpty();
 }
 
+static void hideRedirectTimingForNoReferrerNavigation(const DocumentLoader& loader, NetworkLoadMetrics& metrics)
+{
+    // https://html.spec.whatwg.org/C#initialise-the-document-object step 15.3 resets redirectCount in case of "no-referrer".
+    if (loader.triggeringAction().requester() && loader.request().httpReferrer().isEmpty())
+        metrics.redirectCount = 0;
+}
+
 void DocumentLoader::notifyFinished(CachedResource& resource, const NetworkLoadMetrics& fetchMetrics, LoadWillContinueInAnotherProcess loadWillContinueInAnotherProcess)
 {
     ASSERT(isMainThread());
@@ -447,6 +454,8 @@ void DocumentLoader::notifyFinished(CachedResource& resource, const NetworkLoadM
     }
     if (!metrics)
         metrics = Box<NetworkLoadMetrics>::create(fetchMetrics);
+
+    hideRedirectTimingForNoReferrerNavigation(*this, *metrics);
 
     if (RefPtr document = this->document()) {
         if (RefPtr window = document->window())
@@ -605,7 +614,8 @@ bool DocumentLoader::setControllingServiceWorkerRegistration(ServiceWorkerRegist
 
 void DocumentLoader::matchRegistration(const URL& url, SWClientConnection::RegistrationCallback&& callback)
 {
-    bool shouldTryLoadingThroughServiceWorker = m_canUseServiceWorkers && !frameLoader()->isReloadingFromOrigin() && m_frame->page() && url.protocolIsInHTTPFamily();
+    bool shouldTryLoadingThroughServiceWorker = m_canUseServiceWorkers && !frameLoader()->isReloadingFromOrigin() && m_frame->page()
+        && (url.protocolIsInHTTPFamily() || LegacySchemeRegistry::shouldTreatURLSchemeAsAllowingServiceWorkerClients(url.protocol()));
     if (!shouldTryLoadingThroughServiceWorker) {
         callback(std::nullopt);
         return;
@@ -753,7 +763,7 @@ void DocumentLoader::willSendRequest(ResourceRequest&& newRequest, const Resourc
         if (!parentFrame)
             return completionHandler(WTF::move(newRequest));
 
-        if (MixedContentChecker::shouldBlockRequest(*parentFrame, newRequest.url())) {
+        if (MixedContentChecker::shouldBlockRequest(*parentFrame, newRequest.url(), MixedContentChecker::IsUpgradable::No, newRequest.targetAddressSpace())) {
             cancelMainResourceLoad(protect(frameLoader())->cancelledError(newRequest));
             return completionHandler(WTF::move(newRequest));
         }
@@ -940,7 +950,7 @@ void DocumentLoader::responseReceived(const CachedResource& resource, const Reso
         Ref document = *frame->document();
         if (Quirks::isMicrosoftTeamsRedirectURL(response.url())) {
             auto firstPartyDomain = RegistrableDomain(response.url());
-            if (auto loginDomains = NetworkStorageSession::subResourceDomainsInNeedOfStorageAccessForFirstParty(firstPartyDomain)) {
+            if (auto loginDomains = subResourceDomainsInNeedOfStorageAccessForFirstParty(firstPartyDomain)) {
                 if (!Quirks::hasStorageAccessForAllLoginDomains(*loginDomains, firstPartyDomain)) {
                     protect(frame->navigationScheduler())->scheduleRedirect(document, 0, microsoftTeamsRedirectURL(), IsMetaRefresh::No);
                     completionHandler();
@@ -1015,6 +1025,13 @@ void DocumentLoader::responseReceived(ResourceResponse&& response, CompletionHan
 
     m_response = WTF::move(response);
 
+    // blob: is a local scheme, so HTML's "determine navigation params policy container" takes the
+    // initiator's address space for it rather than the response's.
+    if (m_response.url().protocolIsBlob()) {
+        if (auto& requester = triggeringAction().requester())
+            m_response.setIPAddressSpace(requester->policyContainer.ipAddressSpace);
+    }
+
     if (m_identifierForLoadWithoutResourceLoader) {
         RefPtr frameLoader = this->frameLoader();
         if (m_mainResource && m_mainResource->wasRedirected()) {
@@ -1038,13 +1055,6 @@ void DocumentLoader::responseReceived(ResourceResponse&& response, CompletionHan
     }
 
     RefPtr frame = m_frame.get();
-#if ENABLE(FTPDIR)
-    // Respect the hidden FTP Directory Listing pref so it can be tested even if the policy delegate might otherwise disallow it
-    if (frame && frame->settings().forceFTPDirectoryListings() && m_response.mimeType() == "application/x-ftp-directory"_s) {
-        continueAfterContentPolicy(PolicyAction::Use);
-        return;
-    }
-#endif
 
     if (!frame) {
         DOCUMENTLOADER_RELEASE_LOG("responseReceived by DocumentLoader with null frame");
@@ -1146,6 +1156,16 @@ void DocumentLoader::continueAfterContentPolicy(PolicyAction policy)
         if (!m_mainResource) {
             DOCUMENTLOADER_RELEASE_LOG("continueAfterContentPolicy: cannot show URL");
             mainReceivedError(platformStrategies()->loaderStrategy()->cannotShowURLError(m_request));
+            return;
+        }
+
+        // Defense-in-depth: refuse to download a data: URL through a top-frame navigation that
+        // wasn't initiated by the user or the API client, mirroring the existing check in the
+        // PolicyAction::Use branch. The primary defense lives in the UI process; this guards
+        // ports / future flows that don't share that boundary.
+        if (disallowDataRequest()) {
+            protect(frameLoader())->policyChecker().cannotShowMIMEType(m_response);
+            stopLoadingForPolicyChange();
             return;
         }
 
@@ -1347,7 +1367,7 @@ void DocumentLoader::commitData(const SharedBuffer& data)
                     document->createNewIdentifier();
             }
 
-            if (m_frame->document()->activeServiceWorker() || document->url().protocolIsInHTTPFamily() || (document->page() && document->page()->isServiceWorkerPage()) || (document->parentDocument() && shouldUseActiveServiceWorkerFromParent(document, *protect(document->parentDocument()))))
+            if (m_frame->document()->activeServiceWorker() || document->url().protocolIsInHTTPFamily() || LegacySchemeRegistry::shouldTreatURLSchemeAsAllowingServiceWorkerClients(document->url().protocol()) || (document->page() && document->page()->isServiceWorkerPage()) || (document->parentDocument() && shouldUseActiveServiceWorkerFromParent(document, *protect(document->parentDocument()))))
                 document->setServiceWorkerConnection(&ServiceWorkerProvider::singleton().serviceWorkerConnection());
 
             if (m_resultingClientId) {
@@ -1386,6 +1406,7 @@ void DocumentLoader::commitData(const SharedBuffer& data)
                     || source == ResourceResponse::Source::MemoryCacheAfterValidation;
                 if (RefPtr frameLoader = this->frameLoader())
                     finalMetrics.fromPrefetch = frameLoader->documentPrefetcher().wasPrefetched(url());
+                hideRedirectTimingForNoReferrerNavigation(*this, finalMetrics);
                 protect(window->performance())->addNavigationTiming(*this, document, protect(*m_mainResource), timing(), finalMetrics);
             }
         }
@@ -1480,7 +1501,7 @@ void DocumentLoader::checkLoadComplete()
         return;
 
     ASSERT(this == frameLoader()->activeDocumentLoader());
-    protect(*m_frame)->document()->window()->finishedLoading();
+    protect(protect(*m_frame)->document()->window())->finishedLoading();
 }
 
 void DocumentLoader::applyPoliciesToSettings()
@@ -1493,33 +1514,14 @@ void DocumentLoader::applyPoliciesToSettings()
     if (!m_frame->isMainFrame())
         return;
 
-#if ENABLE(MEDIA_SOURCE)
-    m_frame->settings().setMediaSourceEnabled(m_mediaSourcePolicy == MediaSourcePolicy::Default ? Settings::platformDefaultMediaSourceEnabled() : m_mediaSourcePolicy == MediaSourcePolicy::Enable);
-#endif
-#if ENABLE(WEBKIT_OVERFLOW_SCROLLING_CSS_PROPERTY)
-    if (m_legacyOverflowScrollingTouchPolicy == LegacyOverflowScrollingTouchPolicy::Disable)
-        m_frame->settings().setLegacyOverflowScrollingTouchEnabled(false);
-#endif
-#if ENABLE(TEXT_AUTOSIZING)
-    m_frame->settings().setIdempotentModeAutosizingOnlyHonorsPercentages(m_idempotentModeAutosizingOnlyHonorsPercentages);
-#endif
-
-    if (m_pushAndNotificationsEnabledPolicy != PushAndNotificationsEnabledPolicy::UseGlobalPolicy) {
-        bool enabled = m_pushAndNotificationsEnabledPolicy == PushAndNotificationsEnabledPolicy::Yes;
-        m_frame->settings().setPushAPIEnabled(enabled);
-#if ENABLE(NOTIFICATIONS)
-        m_frame->settings().setNotificationsEnabled(enabled);
-#endif
-#if ENABLE(NOTIFICATION_EVENT)
-        m_frame->settings().setNotificationEventEnabled(enabled);
-#endif
-#if PLATFORM(IOS)
-        m_frame->settings().setAppBadgeEnabled(enabled);
-#endif
-    }
-
-    if (m_inlineMediaPlaybackPolicy != InlineMediaPlaybackPolicy::Default)
-        m_frame->settings().setInlineMediaPlaybackRequiresPlaysInlineAttribute(m_inlineMediaPlaybackPolicy == InlineMediaPlaybackPolicy::RequiresPlaysInlineAttribute);
+    m_frame->settings().applyMainFrameWebsitePolicies({
+        m_mediaSourcePolicy,
+        m_legacyOverflowScrollingTouchPolicy,
+        m_pushAndNotificationsEnabledPolicy,
+        m_inlineMediaPlaybackPolicy,
+        m_globalPrivacyControlEnabled,
+        m_idempotentModeAutosizingOnlyHonorsPercentages
+    });
 }
 
 ColorSchemePreference NODELETE DocumentLoader::colorSchemePreference() const
@@ -1806,10 +1808,12 @@ RefPtr<ArchiveResource> DocumentLoader::subresource(const URL& url) const
 {
     if (!isCommitted())
         return nullptr;
-    
-    RefPtr resource = m_cachedResourceLoader->cachedResource(url);
+
+    auto resourceURL = MemoryCache::removeFragmentIdentifierIfNeeded(url);
+
+    RefPtr resource = m_cachedResourceLoader->cachedResource(resourceURL);
     if (!resource || !resource->isLoaded())
-        return archiveResourceForURL(url);
+        return archiveResourceForURL(resourceURL);
 
     if (resource->type() == CachedResource::Type::MainResource)
         return nullptr;
@@ -1818,7 +1822,7 @@ RefPtr<ArchiveResource> DocumentLoader::subresource(const URL& url) const
     if (!data)
         return nullptr;
 
-    return ArchiveResource::create(data.get(), url, resource->response());
+    return ArchiveResource::create(data.get(), resourceURL, resource->response());
 }
 
 Vector<Ref<ArchiveResource>> DocumentLoader::subresources() const
@@ -1918,12 +1922,6 @@ void DocumentLoader::scheduleSubstituteResourceLoad(ResourceLoader& loader, Subs
 {
     ASSERT(!loader.options().serviceWorkerRegistrationIdentifier);
     m_pendingSubstituteResources.set(loader, &resource);
-    deliverSubstituteResourcesAfterDelay();
-}
-
-void DocumentLoader::scheduleCannotShowURLError(ResourceLoader& loader)
-{
-    m_pendingSubstituteResources.set(loader, nullptr);
     deliverSubstituteResourcesAfterDelay();
 }
 
@@ -2131,7 +2129,7 @@ bool DocumentLoader::maybeLoadEmpty()
     }
 
     SetForScope isInFinishedLoadingOfEmptyDocument { m_isInFinishedLoadingOfEmptyDocument, true };
-    m_isInitialAboutBlank = isDisplayingInitialEmptyDocument;
+    m_isInitialAboutBlank = isDisplayingInitialEmptyDocument ? IsInitialAboutBlank::Yes : IsInitialAboutBlank::No;
     finishedLoading();
     return true;
 }
@@ -2146,7 +2144,7 @@ void DocumentLoader::loadErrorDocument()
         return;
 
     commitData(SharedBuffer::create());
-    m_frame->document()->enforceSandboxFlags(SandboxFlag::Origin);
+    protect(protect(m_frame)->document())->enforceSandboxFlags(SandboxFlag::Origin);
     m_writer.end();
 }
 
@@ -2179,7 +2177,10 @@ void DocumentLoader::startLoadingMainResource()
     RefPtr frame = m_frame.get();
     m_canUseServiceWorkers = canUseServiceWorkers(frame.get());
     m_mainDocumentError = ResourceError();
-    timing().markStartTime();
+    if (m_originalNavigationStartTime)
+        timing().setStartTime(m_originalNavigationStartTime);
+    else
+        timing().markStartTime();
     ASSERT(!m_mainResource);
     ASSERT(!m_loadingMainResource);
     m_loadingMainResource = true;
@@ -2237,7 +2238,7 @@ void DocumentLoader::startLoadingMainResource()
 
         DOCUMENTLOADER_RELEASE_LOG_FORWARDABLE(DocumentLoaderStartLoadingMainResourceStartingLoad);
 
-        if (m_substituteData.isValid()) {
+        if (m_substituteData.isValid() || LegacySchemeRegistry::shouldTreatURLSchemeAsAllowingServiceWorkerClients(request.url().protocol())) {
             auto url = request.url();
             matchRegistration(url, [request = WTF::move(request), protectedThis = Ref { *this }, this] (auto&& registrationData) mutable {
                 if (!m_mainDocumentError.isNull()) {
@@ -2333,9 +2334,11 @@ void DocumentLoader::loadMainResource(ResourceRequest&& request)
             return;
         }
 
-        if (advancedPrivacyProtections().contains(AdvancedPrivacyProtections::HTTPSOnly)) {
-            if (auto httpNavigationWithHTTPSOnlyError = platformStrategies()->loaderStrategy()->httpNavigationWithHTTPSOnlyError(m_request); mainResourceOrError.error().domain() == httpNavigationWithHTTPSOnlyError.domain()
-                && mainResourceOrError.error().errorCode() == httpNavigationWithHTTPSOnlyError.errorCode()) {
+        bool isHTTPSOnlyActive = advancedPrivacyProtections().contains(AdvancedPrivacyProtections::HTTPSOnly)
+            || m_httpsByDefaultMode == HTTPSByDefaultMode::UpgradeWithUserMediatedFallback
+            || m_httpsByDefaultMode == HTTPSByDefaultMode::UpgradeAndNoFallback;
+        if (isHTTPSOnlyActive) {
+            if (platformStrategies()->loaderStrategy()->isHttpNavigationWithHTTPSOnlyError(mainResourceOrError.error())) {
                 DOCUMENTLOADER_RELEASE_LOG("loadMainResource: Unable to load main resource, URL has HTTP scheme with HTTPSOnly enabled");
                 cancelMainResourceLoad(mainResourceOrError.error());
                 return;
@@ -2545,10 +2548,24 @@ ShouldOpenExternalURLsPolicy DocumentLoader::shouldOpenExternalURLsPolicyToPropa
     return ShouldOpenExternalURLsPolicy::ShouldNotAllow;
 }
 
+bool DocumentLoader::hasCrossOriginRedirect() const
+{
+    if (m_hasCrossOriginRedirect)
+        return true;
+    const auto* metrics = m_response.deprecatedNetworkLoadMetricsOrNull();
+    return metrics && metrics->crossOriginRedirect();
+}
+
 // https://www.w3.org/TR/css-view-transitions-2/#navigation-can-trigger-a-cross-document-view-transition
 CanTriggerCrossDocumentViewTransition DocumentLoader::navigationCanTriggerCrossDocumentViewTransition(Document& oldDocument, bool fromBackForwardCache)
 {
     if (loadStartedDuringSwipeAnimation())
+        return CanTriggerCrossDocumentViewTransition::No;
+
+    // A document that navigates away before it has been revealed (had its first
+    // rendering opportunity) has no captured state to animate from, so no outbound
+    // cross-document view transition is started.
+    if (!oldDocument.hasBeenRevealed())
         return CanTriggerCrossDocumentViewTransition::No;
 
     if (std::holds_alternative<Document::SkipTransition>(oldDocument.resolveViewTransitionRule()))
@@ -2561,10 +2578,8 @@ CanTriggerCrossDocumentViewTransition DocumentLoader::navigationCanTriggerCrossD
     if (!newOrigin->isSameOriginAs(protect(oldDocument.securityOrigin())))
         return CanTriggerCrossDocumentViewTransition::No;
 
-    if (const auto* metrics = response().deprecatedNetworkLoadMetricsOrNull(); metrics && !fromBackForwardCache) {
-        if (metrics->crossOriginRedirect())
-            return CanTriggerCrossDocumentViewTransition::No;
-    }
+    if (!fromBackForwardCache && hasCrossOriginRedirect())
+        return CanTriggerCrossDocumentViewTransition::No;
 
     if (*m_triggeringAction.navigationAPIType() == NavigationNavigationType::Traverse)
         return CanTriggerCrossDocumentViewTransition::Yes;
@@ -2621,12 +2636,12 @@ PreviewConverter* DocumentLoader::previewConverter() const
 
 void DocumentLoader::addConsoleMessage(MessageSource messageSource, MessageLevel messageLevel, const String& message, unsigned long requestIdentifier)
 {
-    protect(frame())->document()->addConsoleMessage(messageSource, messageLevel, message, requestIdentifier);
+    protect(protect(frame())->document())->addConsoleMessage(messageSource, messageLevel, message, requestIdentifier);
 }
 
 void DocumentLoader::enqueueSecurityPolicyViolationEvent(SecurityPolicyViolationEventInit&& eventInit)
 {
-    protect(frame())->document()->enqueueSecurityPolicyViolationEvent(WTF::move(eventInit));
+    protect(protect(frame())->document())->enqueueSecurityPolicyViolationEvent(WTF::move(eventInit));
 }
 
 #if ENABLE(CONTENT_FILTERING)

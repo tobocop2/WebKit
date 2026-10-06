@@ -75,6 +75,10 @@
 #import <WebKitAdditions/EventHandlerIOSTouch.cpp>
 #endif
 
+#if ENABLE(SPATIAL_PORTAL)
+#import "SpatialPortalController.h"
+#endif
+
 namespace WebCore {
 
 static RetainPtr<WebEvent>& currentEventSlot()
@@ -695,6 +699,19 @@ std::optional<NodeIdentifier> EventHandler::requestInteractiveModelElementAtPoin
     }
 
     RefPtr targetElement = hitTestedMouseEvent.hitTestResult().targetElement();
+
+#if ENABLE(SPATIAL_PORTAL)
+    if (CheckedPtr controller = SpatialPortalController::interactiveControllerForHitTestedElement(targetElement.get())) {
+        if (RefPtr portalElement = controller->portalElement()) {
+            auto transform = TransformationMatrix::identity;
+            transform.translate(clientPosition.x(), clientPosition.y());
+
+            controller->beginStageModeTransform(transform);
+            return portalElement->nodeIdentifier();
+        }
+    }
+#endif
+
     if (RefPtr modelElement = dynamicDowncast<HTMLModelElement>(targetElement)) {
         if (modelElement->supportsStageModeInteraction()) {
             auto transform = TransformationMatrix::identity;
@@ -717,6 +734,15 @@ void EventHandler::stageModeSessionDidUpdate(std::optional<NodeIdentifier> nodeI
     if (!node)
         return;
 
+#if ENABLE(SPATIAL_PORTAL)
+    if (RefPtr element = dynamicDowncast<Element>(node.get())) {
+        if (CheckedPtr controller = element->spatialPortalController(); controller && controller->supportsInteraction()) {
+            controller->updateStageModeTransform(transform);
+            return;
+        }
+    }
+#endif
+
     RefPtr modelElement = dynamicDowncast<HTMLModelElement>(node);
     if (!modelElement)
         return;
@@ -737,6 +763,15 @@ void EventHandler::stageModeSessionDidEnd(std::optional<NodeIdentifier> nodeID)
     if (!node)
         return;
 
+#if ENABLE(SPATIAL_PORTAL)
+    if (RefPtr element = dynamicDowncast<Element>(node.get())) {
+        if (CheckedPtr controller = element->spatialPortalController(); controller && controller->supportsInteraction()) {
+            controller->endStageModeInteraction();
+            return;
+        }
+    }
+#endif
+
     RefPtr modelElement = dynamicDowncast<HTMLModelElement>(node);
     if (!modelElement)
         return;
@@ -756,7 +791,7 @@ bool EventHandler::eventLoopHandleMouseDragged(const MouseEventWithHitTestResult
     return false;
 }
 
-void EventHandler::tryToBeginDragAtPoint(const IntPoint& clientPosition, const IntPoint&, CompletionHandler<void(Expected<bool, RemoteFrameGeometryTransformer>)>&& completionHandler)
+void EventHandler::tryToBeginDragAtPoint(const IntPoint& clientPosition, const IntPoint&, CompletionHandler<void(std::expected<bool, RemoteFrameGeometryTransformer>)>&& completionHandler)
 {
     Ref frame = m_frame.get();
 
@@ -771,7 +806,15 @@ void EventHandler::tryToBeginDragAtPoint(const IntPoint& clientPosition, const I
     FloatPoint adjustedClientPositionAsFloatPoint(clientPosition);
     frame->nodeRespondingToClickEvents(clientPosition, adjustedClientPositionAsFloatPoint);
     IntPoint adjustedClientPosition = roundedIntPoint(adjustedClientPositionAsFloatPoint);
-    IntPoint adjustedGlobalPosition = protect(frame->view())->windowToContents(adjustedClientPosition);
+
+    // globalPosition is what dispatchDragEvent() hands the drag event as its screenX/screenY. On
+    // iOS that is a point in the top-level page's root view rather than device screen space, so map
+    // the root-view point up across any remote ancestor frames. Using this frame's contents
+    // coordinates instead subtracted the frame's own offset and scroll, which left screenX/screenY
+    // equal to clientX/clientY in a subframe.
+    IntPoint adjustedGlobalPosition = adjustedClientPosition;
+    if (RefPtr localRootView = frame->rootFrame().view())
+        adjustedGlobalPosition = roundedIntPoint(localRootView->convertToRootViewAcrossIsolatedFrames(FloatPoint { adjustedClientPosition }));
 
     PlatformMouseEvent syntheticMousePressEvent(adjustedClientPosition, adjustedGlobalPosition, MouseButton::Left, PlatformEvent::Type::MousePressed, 1, { }, MonotonicTime::now(), 0, SyntheticClickType::NoTap, MouseEventInputSource::UserDriven);
     PlatformMouseEvent syntheticMouseMoveEvent(adjustedClientPosition, adjustedGlobalPosition, MouseButton::Left, PlatformEvent::Type::MouseMoved, 0, { }, MonotonicTime::now(), 0, SyntheticClickType::NoTap, MouseEventInputSource::UserDriven);

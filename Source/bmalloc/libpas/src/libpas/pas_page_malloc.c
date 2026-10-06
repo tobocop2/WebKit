@@ -64,6 +64,18 @@ size_t pas_page_malloc_cached_alignment_shift;
 bool pas_page_malloc_decommit_zero_fill = false;
 #endif /* PAS_OS(DARWIN) */
 
+void pas_page_malloc_populate(void* base, size_t size)
+{
+    size_t page_size;
+    size_t offset;
+    volatile char* bytes;
+
+    page_size = pas_page_malloc_alignment();
+    bytes = (volatile char*)base;
+    for (offset = 0; offset < size; offset += page_size)
+        bytes[offset] = 0;
+}
+
 #if PAS_USE_MADV_ZERO
 /* It is possible that MADV_ZERO is defined but still not supported by the
  * running OS. In this case, we check once to see if we get ENOSUP, and if
@@ -195,6 +207,10 @@ pas_page_malloc_try_map_pages(size_t size, bool may_contain_small_or_medium)
 
 #if PAS_OS(LINUX)
     prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, mmap_result, size, PAS_VM_TAG_NAME);
+    /* libpas-owned memory opts out of THP per VMA (not PR_SET_THP_DISABLE, which exec'd
+       children inherit): under `enabled=always` retouching decommitted pages would
+       otherwise fault 2MB at a time. */
+    PAS_SYSCALL(madvise(mmap_result, size, MADV_NOHUGEPAGE));
 #endif
 
     return mmap_result;

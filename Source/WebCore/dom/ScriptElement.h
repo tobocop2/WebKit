@@ -53,6 +53,8 @@ public:
 
     bool prepareScript(const TextPosition& scriptStartPosition = TextPosition());
 
+    void markAlreadyStarted() { m_alreadyStarted = true; }
+
     const AtomString& scriptCharset() const LIFETIME_BOUND { return m_characterEncoding; }
     WEBCORE_EXPORT String scriptContent() const;
     void executeClassicScript(const ScriptSourceCode&);
@@ -128,6 +130,7 @@ private:
 
     bool requestClassicScript(const String& sourceURL);
     bool requestModuleScript(const String& sourceText, const TextPosition& scriptStartPosition);
+    ParserInserted effectiveParserInsertedForModule(Document&, const URL& moduleURL) const;
 
     void updateTaintedOriginFromSourceURL();
 

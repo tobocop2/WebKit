@@ -66,6 +66,7 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 
 #include <wtf/Function.h>
 #include <wtf/NeverDestroyed.h>
+#include <wtf/text/CStringView.h>
 
 #if PLATFORM(COCOA)
 #include "VP9UtilitiesCocoa.h"
@@ -141,9 +142,9 @@ static void doReleaseLogging(webrtc::LoggingSeverity severity, const char* messa
     UNUSED_PARAM(message);
 #else
     if (severity == webrtc::LS_ERROR)
-        RELEASE_LOG_ERROR_FORWARDABLE_UNSAFE_ARGS(WebRTC, LibWebRtcLogError, message);
+        RELEASE_LOG_ERROR_FORWARDABLE(WebRTC, LibWebRtcLogError, CStringView::unsafeFromUTF8(message));
     else
-        RELEASE_LOG_FORWARDABLE_UNSAFE_ARGS(WebRTC, LibWebRtcLogMessage, message);
+        RELEASE_LOG_FORWARDABLE(WebRTC, LibWebRtcLogMessage, CStringView::unsafeFromUTF8(message));
 #endif
 }
 
@@ -350,7 +351,7 @@ Ref<webrtc::PeerConnectionFactoryInterface> LibWebRTCProvider::createPeerConnect
 #endif
     );
     dependencies.network_thread = networkThread;
-    dependencies.worker_thread = signalingThread;
+    dependencies.worker_thread = networkThread;
     dependencies.signaling_thread = signalingThread;
     dependencies.event_log_factory = std::make_unique<webrtc::RtcEventLogFactory>();
 
@@ -583,9 +584,7 @@ std::optional<PlatformMediaCapabilitiesDecodingInfo> LibWebRTCProvider::videoDec
         }
         info.powerEfficient = decodingInfo ? decodingInfo->powerEfficient : isSupportingVP9HardwareDecoder();
         info.smooth = decodingInfo ? decodingInfo->smooth : isVPSoftwareDecoderSmooth(configuration);
-    } else if (equalLettersIgnoringASCIICase(containerType, "video/h264"_s))
-        info.powerEfficient = info.smooth = true;
-    else if (equalLettersIgnoringASCIICase(containerType, "video/h265"_s))
+    } else if (equalLettersIgnoringASCIICase(containerType, "video/h264"_s) || equalLettersIgnoringASCIICase(containerType, "video/h265"_s))
         info.powerEfficient = info.smooth = true;
     else if (equalLettersIgnoringASCIICase(containerType, "video/av1"_s))
         info.powerEfficient = info.smooth = isSupportingAV1HardwareDecoder();

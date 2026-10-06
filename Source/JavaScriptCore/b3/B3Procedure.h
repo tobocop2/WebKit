@@ -183,6 +183,7 @@ public:
 
     // Short for variables().remove(). It's better to call this method since it's out of line.
     void deleteVariable(Variable*);
+    void deleteAllVariables();
 
     SparseCollection<Value>& values() LIFETIME_BOUND { return m_values; }
     const SparseCollection<Value>& values() const LIFETIME_BOUND { return m_values; }
@@ -201,7 +202,7 @@ public:
     Dominators& dominators();
     JS_EXPORT_PRIVATE NaturalLoops& naturalLoops();
     BackwardsCFG& backwardsCFG();
-    BackwardsDominators& backwardsDominators();
+    JS_EXPORT_PRIVATE BackwardsDominators& backwardsDominators();
 
     void addFastConstant(const ValueKey&);
     bool NODELETE isFastConstant(const ValueKey&);
@@ -292,7 +293,7 @@ public:
     bool shouldDumpIR() const { return m_shouldDumpIR; }
     JS_EXPORT_PRIVATE void NODELETE setShouldDumpIR();
 
-    void setUsessSIMD()
+    void setUsesSIMD()
     { 
         RELEASE_ASSERT(Options::useWasmSIMD());
         m_usesSIMD = true;
@@ -317,6 +318,18 @@ public:
 
     void setIsWasm(bool flag) { m_isWasm = flag; }
     bool isWasm() const { return m_isWasm; }
+
+    void setUsesWasmGCStructAllocations(bool flag = true) { m_usesWasmGCStructAllocations = flag; }
+    bool usesWasmGCStructAllocations() const { return m_usesWasmGCStructAllocations; }
+    void setUsesWasmGCArrayAllocations(bool flag = true) { m_usesWasmGCArrayAllocations = flag; }
+    bool usesWasmGCArrayAllocations() const { return m_usesWasmGCArrayAllocations; }
+
+    void setUsesColdCCall(bool flag) { m_usesColdCCall = flag; }
+    bool usesColdCCall() const { return m_usesColdCCall; }
+    void setUsesShuffle(bool flag) { m_usesShuffle = flag; }
+    bool usesShuffle() const { return m_usesShuffle; }
+    void setUsesEntrySwitch(bool flag) { m_usesEntrySwitch = flag; }
+    bool usesEntrySwitch() const { return m_usesEntrySwitch; }
 
 private:
     friend class BlockInsertionSet;
@@ -345,12 +358,17 @@ private:
     RefPtr<JSON::Array> m_ionGraphPasses;
     unsigned m_numEntrypoints { 1 };
     unsigned m_optLevel { defaultOptLevel() };
-    bool m_needsUsedRegisters { true };
-    bool m_hasQuirks { false };
-    bool m_needsPCToOriginMap { false };
-    bool m_shouldDumpIR { false };
-    bool m_usesSIMD { false };
-    bool m_isWasm { false };
+    bool m_needsUsedRegisters : 1 { true };
+    bool m_hasQuirks : 1 { false };
+    bool m_needsPCToOriginMap : 1 { false };
+    bool m_shouldDumpIR : 1 { false };
+    bool m_usesSIMD : 1 { false };
+    bool m_isWasm : 1 { false };
+    bool m_usesWasmGCStructAllocations : 1 { false };
+    bool m_usesWasmGCArrayAllocations : 1 { false };
+    bool m_usesColdCCall : 1 { false };
+    bool m_usesShuffle : 1 { false };
+    bool m_usesEntrySwitch : 1 { false };
 };
     
 } } // namespace JSC::B3

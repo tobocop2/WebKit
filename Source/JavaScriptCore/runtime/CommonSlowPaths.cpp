@@ -38,6 +38,8 @@
 #include "FrameTracers.h"
 #include "IteratorOperations.h"
 #include "JSArrayIterator.h"
+#include "JSArrayIteratorInlines.h"
+#include "JSAsyncFromSyncIterator.h"
 #include "JSAsyncFunctionGenerator.h"
 #include "JSAsyncGenerator.h"
 #include "JSBoundFunction.h"
@@ -45,6 +47,7 @@
 #include "JSCellButterfly.h"
 #include "JSIteratorHelper.h"
 #include "JSLexicalEnvironment.h"
+#include "JSModuleEnvironment.h"
 #include "JSMap.h"
 #include "JSMapIterator.h"
 #include "JSPromise.h"
@@ -101,17 +104,19 @@ namespace JSC {
 
 #define END_IMPL() RETURN_TWO(pc, callFrame)
 
+#define THROW_IMPL() RETURN_TWO(pc, LLInt::exceptionSignal())
+
 #define THROW(exceptionToThrow) do {                        \
         throwException(globalObject, throwScope, exceptionToThrow); \
         RETURN_TO_THROW(pc);                          \
-        END_IMPL();                                         \
+        THROW_IMPL();                                       \
     } while (false)
 
 #define CHECK_EXCEPTION() do {                    \
         doExceptionFuzzingIfEnabled(globalObject, throwScope, "CommonSlowPaths", pc);   \
         if (throwScope.exception()) [[unlikely]] {   \
             RETURN_TO_THROW(pc);                     \
-            END_IMPL();                              \
+            THROW_IMPL();                            \
         }                                            \
     } while (false)
 
@@ -825,6 +830,14 @@ ALWAYS_INLINE UGPRPair iteratorOpenTryFastImpl(VM& vm, JSGlobalObject* globalObj
     case IterationMode::FastArray: {
         // We should be good to go.
         metadata.m_iterationMetadata.seenModes = metadata.m_iterationMetadata.seenModes | IterationMode::FastArray;
+        if (Options::useUnboxedFastArrayIteration()) {
+            // No iterator object: op_iterator_next finds the array in its iterable operand and keeps the next index in m_next.
+            // op_iterator_close_check makes a real iterator from these should IteratorClose ever become observable.
+            GET(bytecode.m_next) = jsNumber(0);
+            iterator = vm.fastArrayUnboxedSentinel();
+            PROFILE_VALUE_IN(iterator.jsValue(), m_iteratorValueProfile);
+            return encodeResult(pc, reinterpret_cast<void*>(static_cast<uintptr_t>(IterationMode::FastArray)));
+        }
         GET(bytecode.m_next) = vm.fastArrayValuesSentinel();
         auto* iteratedObject = uncheckedDowncast<JSObject>(iterable);
         iterator = JSArrayIterator::create(vm, globalObject->arrayIteratorStructure(), iteratedObject, IterationKind::Values);
@@ -913,6 +926,12 @@ ALWAYS_INLINE UGPRPair iteratorOpenTryFastImpl(VM& vm, JSGlobalObject* globalObj
         return encodeResult(pc, reinterpret_cast<void*>(static_cast<uintptr_t>(IterationMode::FastString)));
     }
 
+    case IterationMode::FastAsyncGenerator:
+    case IterationMode::AsyncFromSync: {
+        RELEASE_ASSERT_NOT_REACHED();
+        return encodeResult(pc, reinterpret_cast<void*>(static_cast<uintptr_t>(IterationMode::Generic)));
+    }
+
     case IterationMode::Generic: {
         auto validationResult = validateIterable(vm, iterable, symbolIterator);
         if (validationResult != IterableValidationResult::Valid) [[unlikely]] {
@@ -949,6 +968,83 @@ JSC_DEFINE_COMMON_SLOW_PATH(iterator_open_try_fast_wide32)
 }
 
 template<OpcodeSize width>
+ALWAYS_INLINE UGPRPair asyncIteratorOpenTryFastImpl(VM& vm, JSGlobalObject* globalObject, CodeBlock* codeBlock, CallFrame* callFrame, ThrowScope& throwScope, const JSInstruction* pc)
+{
+    auto bytecode = pc->asKnownWidth<OpAsyncIteratorOpen, width>();
+    auto& metadata = bytecode.metadata(codeBlock);
+    JSValue iterable = GET_C(bytecode.m_iterable).jsValue();
+    PROFILE_VALUE_IN(iterable, m_iterableValueProfile);
+    JSValue symbolIterator = GET_C(bytecode.m_symbolIterator).jsValue();
+
+    // When @@asyncIterator is absent, wrap the sync iterator in %AsyncFromSyncIteratorPrototype% here. The sentinel
+    // fuses the consumer's Await, which elides an observable PromiseResolve; only sound while the species is primordial.
+    if (symbolIterator.isUndefinedOrNull()) {
+        JSAsyncFromSyncIterator* wrapper = createAsyncFromSyncIteratorForIterable(globalObject, iterable);
+        RETURN_IF_EXCEPTION(throwScope, encodeResult(nullptr, reinterpret_cast<void*>(static_cast<uintptr_t>(IterationMode::Generic))));
+        metadata.m_iterationMetadata.seenModes = metadata.m_iterationMetadata.seenModes | IterationMode::AsyncFromSync;
+        GET(bytecode.m_iterator) = wrapper;
+        PROFILE_VALUE_IN(JSValue(wrapper), m_iteratorValueProfile);
+        if (globalObject->promiseSpeciesWatchpointSet().state() == IsWatched) [[likely]]
+            GET(bytecode.m_next) = vm.fastAsyncGeneratorSentinel();
+        else
+            GET(bytecode.m_next) = globalObject->asyncFromSyncIteratorPrototypeNextFunction();
+        return encodeResult(pc, reinterpret_cast<void*>(static_cast<uintptr_t>(IterationMode::AsyncFromSync)));
+    }
+
+    // When the iterator is a genuine async generator and @@asyncIterator is primordial, plus its `next` method is primordial %AsyncGeneratorPrototype%.next,
+    // for-of-await is guaranteed to drive async generator in a normal way. We set FastAsyncGenerator
+    // and propagate a sentinel to tell it to op_async_iterator_next.
+    IterationMode iterationMode = IterationMode::Generic;
+    if (iterable.isCell() && iterable.asCell()->type() == JSAsyncGeneratorType
+        && symbolIterator == globalObject->linkTimeConstant(LinkTimeConstant::asyncIteratorPrototypeSymbolAsyncIterator)) {
+        JSObject* iterableObject = asObject(iterable);
+        PropertySlot slot(iterableObject, PropertySlot::InternalMethodType::VMInquiry, &vm);
+        bool found = iterableObject->getPropertySlot(globalObject, vm.propertyNames->next, slot);
+        RETURN_IF_EXCEPTION(throwScope, encodeResult(nullptr, reinterpret_cast<void*>(static_cast<uintptr_t>(IterationMode::Generic))));
+
+        if (found && slot.isValue() && slot.getValue(globalObject, vm.propertyNames->next) == globalObject->linkTimeConstant(LinkTimeConstant::asyncGeneratorPrototypeNext))
+            iterationMode = IterationMode::FastAsyncGenerator;
+        RETURN_IF_EXCEPTION(throwScope, encodeResult(nullptr, reinterpret_cast<void*>(static_cast<uintptr_t>(IterationMode::Generic))));
+    }
+
+    if (iterationMode != IterationMode::Generic) {
+        if (!canUseFastIterationMode(metadata.m_iterationMetadata.seenModes, iterationMode)) [[unlikely]]
+            iterationMode = IterationMode::Generic;
+        else if (globalObject->promiseSpeciesWatchpointSet().state() != IsWatched) [[unlikely]]
+            iterationMode = IterationMode::Generic;
+    }
+
+    if (iterationMode == IterationMode::FastAsyncGenerator) {
+        metadata.m_iterationMetadata.seenModes = metadata.m_iterationMetadata.seenModes | IterationMode::FastAsyncGenerator;
+        GET(bytecode.m_iterator) = iterable;
+        PROFILE_VALUE_IN(iterable, m_iteratorValueProfile);
+        GET(bytecode.m_next) = vm.fastAsyncGeneratorSentinel();
+        return encodeResult(pc, reinterpret_cast<void*>(static_cast<uintptr_t>(IterationMode::FastAsyncGenerator)));
+    }
+
+    metadata.m_iterationMetadata.seenModes = metadata.m_iterationMetadata.seenModes | IterationMode::Generic;
+    return encodeResult(pc, reinterpret_cast<void*>(static_cast<uintptr_t>(IterationMode::Generic)));
+}
+
+JSC_DEFINE_COMMON_SLOW_PATH(async_iterator_open_try_fast_narrow)
+{
+    BEGIN();
+    return asyncIteratorOpenTryFastImpl<Narrow>(vm, globalObject, codeBlock, callFrame, throwScope, pc);
+}
+
+JSC_DEFINE_COMMON_SLOW_PATH(async_iterator_open_try_fast_wide16)
+{
+    BEGIN();
+    return asyncIteratorOpenTryFastImpl<Wide16>(vm, globalObject, codeBlock, callFrame, throwScope, pc);
+}
+
+JSC_DEFINE_COMMON_SLOW_PATH(async_iterator_open_try_fast_wide32)
+{
+    BEGIN();
+    return asyncIteratorOpenTryFastImpl<Wide32>(vm, globalObject, codeBlock, callFrame, throwScope, pc);
+}
+
+template<OpcodeSize width>
 ALWAYS_INLINE UGPRPair iteratorNextTryFastImpl(VM& vm, JSGlobalObject* globalObject, CodeBlock* codeBlock, CallFrame* callFrame, ThrowScope& throwScope, const JSInstruction* pc)
 {
     auto bytecode = pc->asKnownWidth<OpIteratorNext, width>();
@@ -976,38 +1072,13 @@ ALWAYS_INLINE UGPRPair iteratorNextTryFastImpl(VM& vm, JSGlobalObject* globalObj
         }
 
         metadata.m_iterationMetadata.seenModes = metadata.m_iterationMetadata.seenModes | mode;
-        auto& indexSlot = arrayIterator->internalField(JSArrayIterator::Field::Index);
-        int64_t index = indexSlot.get().asAnyInt();
-        ASSERT(index == JSArrayIterator::doneIndex || (0 <= index && index <= maxSafeInteger()));
 
         JSValue value;
-        bool done = index == JSArrayIterator::doneIndex || index >= array->length();
-        GET(bytecode.m_done) = jsBoolean(done);
-        if (!done) {
-            // No need for a barrier here because we know this is a primitive.
-            indexSlot.setWithoutWriteBarrier(jsNumber(index + 1));
-            ASSERT(index == static_cast<unsigned>(index));
-            switch (kind) {
-            case IterationKind::Values:
-                value = array->getIndex(globalObject, static_cast<unsigned>(index));
-                CHECK_EXCEPTION();
-                break;
-            case IterationKind::Keys:
-                value = jsNumber(static_cast<unsigned>(index));
-                break;
-            case IterationKind::Entries: {
-                JSValue element = array->getIndex(globalObject, static_cast<unsigned>(index));
-                CHECK_EXCEPTION();
-                value = constructArrayPair(globalObject, jsNumber(static_cast<unsigned>(index)), element);
-                CHECK_EXCEPTION();
-                break;
-            }
-            }
+        bool hasNext = arrayIterator->next(globalObject, value);
+        CHECK_EXCEPTION();
+        GET(bytecode.m_done) = jsBoolean(!hasNext);
+        if (hasNext)
             PROFILE_VALUE_IN(value, m_valueValueProfile);
-        } else {
-            // No need for a barrier here because we know this is a primitive.
-            indexSlot.setWithoutWriteBarrier(jsNumber(-1));
-        }
 
         GET(bytecode.m_value) = value;
         return encodeResult(pc, reinterpret_cast<void*>(static_cast<uintptr_t>(mode)));
@@ -1104,6 +1175,45 @@ ALWAYS_INLINE UGPRPair iteratorNextTryFastImpl(VM& vm, JSGlobalObject* globalObj
     RELEASE_ASSERT_NOT_REACHED();
 }
 
+template<OpcodeSize width>
+ALWAYS_INLINE UGPRPair iteratorNextIndexInFrameImpl(VM& vm, JSGlobalObject* globalObject, CodeBlock* codeBlock, CallFrame* callFrame, ThrowScope& throwScope, const JSInstruction* pc)
+{
+    // op_iterator_open made no iterator object for an Array: it is still in m_iterable, and m_next is the index of the next element.
+    auto bytecode = pc->asKnownWidth<OpIteratorNext, width>();
+    auto& metadata = bytecode.metadata(codeBlock);
+    RELEASE_ASSERT(GET(bytecode.m_iterator).jsValue() == vm.fastArrayUnboxedSentinel());
+
+    JSValue index = GET(bytecode.m_next).jsValue();
+    JSValue value;
+    bool hasNext = iteratorNextWithIndexInFrame(globalObject, metadata, GET(bytecode.m_iterable).jsValue(), index, value);
+    GET(bytecode.m_next) = index;
+    CHECK_EXCEPTION();
+    GET(bytecode.m_done) = jsBoolean(!hasNext);
+    if (hasNext)
+        PROFILE_VALUE_IN(value, m_valueValueProfile);
+
+    GET(bytecode.m_value) = value;
+    return encodeResult(pc, reinterpret_cast<void*>(static_cast<uintptr_t>(IterationMode::FastArray)));
+}
+
+JSC_DEFINE_COMMON_SLOW_PATH(iterator_next_index_in_frame_narrow)
+{
+    BEGIN();
+    return iteratorNextIndexInFrameImpl<Narrow>(vm, globalObject, codeBlock, callFrame, throwScope, pc);
+}
+
+JSC_DEFINE_COMMON_SLOW_PATH(iterator_next_index_in_frame_wide16)
+{
+    BEGIN();
+    return iteratorNextIndexInFrameImpl<Wide16>(vm, globalObject, codeBlock, callFrame, throwScope, pc);
+}
+
+JSC_DEFINE_COMMON_SLOW_PATH(iterator_next_index_in_frame_wide32)
+{
+    BEGIN();
+    return iteratorNextIndexInFrameImpl<Wide32>(vm, globalObject, codeBlock, callFrame, throwScope, pc);
+}
+
 JSC_DEFINE_COMMON_SLOW_PATH(iterator_next_try_fast_narrow)
 {
     BEGIN();
@@ -1120,6 +1230,18 @@ JSC_DEFINE_COMMON_SLOW_PATH(iterator_next_try_fast_wide32)
 {
     BEGIN();
     return iteratorNextTryFastImpl<Wide32>(vm, globalObject, codeBlock, callFrame, throwScope, pc);
+}
+
+JSC_DEFINE_COMMON_SLOW_PATH(slow_path_iterator_close_check)
+{
+    BEGIN();
+    auto bytecode = pc->as<OpIteratorCloseCheck>();
+    // The interpreter and the Baseline JIT get here when they have to fall through with no iterator object in hand: the watchpoint set, which
+    // covers a "return" property showing up anywhere on the prototype chain of this realm's Array Iterator objects, has fired.
+    auto& iterator = GET(bytecode.m_iterator);
+    RELEASE_ASSERT(iterator.jsValue() == vm.fastArrayUnboxedSentinel());
+    iterator = materializeUnboxedFastArrayIterator(globalObject, GET(bytecode.m_iterable).jsValue(), GET(bytecode.m_next).jsValue());
+    END();
 }
 
 JSC_DEFINE_COMMON_SLOW_PATH(slow_path_strcat)
@@ -1330,14 +1452,17 @@ JSC_DEFINE_COMMON_SLOW_PATH(slow_path_resolve_scope)
     auto& metadata = bytecode.metadata(codeBlock);
     const Identifier& ident = codeBlock->identifier(bytecode.m_var);
     JSScope* scope = callFrame->uncheckedR(bytecode.m_scope).Register::scope();
+    if (metadata.m_resolveType == ModuleVar) {
+        JSObject* result = JSModuleEnvironment::fillImportSlot(globalObject, scope, metadata.m_localScopeDepth, ScopeOffset(metadata.m_moduleImportSlot));
+        CHECK_EXCEPTION();
+        RETURN(result);
+    }
+
     JSObject* resolvedScope = JSScope::resolve(globalObject, scope, ident);
     // Proxy can throw an error here, e.g. Proxy in with statement's @unscopables.
     CHECK_EXCEPTION();
 
     ResolveType resolveType = metadata.m_resolveType;
-
-    // ModuleVar does not keep the scope register value alive in DFG.
-    ASSERT(resolveType != ModuleVar);
 
     switch (resolveType) {
     case GlobalProperty:
@@ -1650,10 +1775,10 @@ JSC_DEFINE_COMMON_SLOW_PATH(slow_path_spread)
         auto callData = JSC::getCallData(iterationFunction);
         ASSERT(callData.type != CallData::Type::None);
 
-        MarkedArgumentBuffer arguments;
-        arguments.append(iterableValue);
-        ASSERT(!arguments.hasOverflowed());
-        JSValue arrayResult = call(globalObject, iterationFunction, callData, jsNull(), arguments);
+        auto arguments = WTF::toArray<EncodedJSValue>({
+            JSValue::encode(iterableValue),
+        });
+        JSValue arrayResult = call(globalObject, iterationFunction, callData, jsNull(), ArgList { arguments.data(), arguments.size() });
         CHECK_EXCEPTION();
         array = uncheckedDowncast<JSArray>(arrayResult);
     }

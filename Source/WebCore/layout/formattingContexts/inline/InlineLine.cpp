@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Apple Inc. All rights reserved.
+ * Copyright (C) 2019-2026 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -356,6 +356,9 @@ void Line::appendText(const InlineTextItem& inlineTextItem, const Style::Compute
             return false;
         // This content is collapsible. Let's check if the last item is collapsed.
         for (auto& run : m_runs | std::views::reverse) {
+            // Nothing precedes the marker on the line, so this is the line's leading whitespace.
+            if (run.isListMarkerOrItsContent())
+                return true;
             if (run.isAtomicInlineBox())
                 return false;
             // https://drafts.csswg.org/css-text-3/#white-space-phase-1
@@ -363,7 +366,7 @@ void Line::appendText(const InlineTextItem& inlineTextItem, const Style::Compute
             // provided both spaces are within the same inline formatting context—is collapsed to have zero advance width.
             if (run.isText())
                 return run.hasCollapsibleTrailingWhitespace();
-            ASSERT(run.isListMarker() || run.isLineSpanningInlineBoxStart() || run.isInlineBoxStart() || run.isInlineBoxEnd() || run.isWordBreakOpportunity() || run.isOutOfFlow());
+            ASSERT(run.isLineSpanningInlineBoxStart() || run.isInlineBoxStart() || run.isInlineBoxEnd() || run.isWordBreakOpportunity() || run.isOutOfFlow());
         }
         // Leading whitespace.
         return true;
@@ -482,7 +485,7 @@ void Line::appendText(const InlineTextItem& inlineTextItem, const Style::Compute
 
 void Line::appendTextFast(const InlineTextItem& inlineTextItem, const Style::ComputedStyle& style, InlineLayoutUnit logicalWidth)
 {
-    auto lineHasContent = !m_runs.isEmpty();
+    auto lineHasContent = !m_runs.isEmpty() && !m_runs.last().isListMarkerOrItsContent();
     auto willCollapseCompletely = [&] {
         if (inlineTextItem.isEmpty())
             return true;
@@ -691,17 +694,21 @@ bool Line::restoreTrimmedTrailingWhitespace(InlineLayoutUnit trimmedTrailingWhit
     return false;
 }
 
+bool Line::Run::isListMarkerOrItsContent() const
+{
+    // A marker's contents inherit the ::marker style, so the marker and its text answer alike.
+    return isListMarker() || m_layoutBox->style().isListMarkerStyle();
+}
+
 bool Line::hasTrailingForcedLineBreak(const RunList& runs)
 {
     return !runs.isEmpty() && runs.last().isLineBreak();
 }
 
-bool Line::hasContentOrDecoration(IncludeInsideListMarker includeInsideListMarker) const
+bool Line::hasContentOrDecoration() const
 {
     if (m_runs.isEmpty())
         return false;
-    if (includeInsideListMarker == IncludeInsideListMarker::Yes && m_runs.first().isListMarkerInside())
-        return true;
     auto& formattingContext = this->formattingContext();
     for (auto& run : m_runs | std::views::reverse) {
         if (Line::Run::isContentfulOrHasDecoration(run, formattingContext) && !run.isListMarker())
@@ -794,7 +801,7 @@ inline static Line::Run::Type NODELETE toLineRunType(const InlineItem& inlineIte
         return Line::Run::Type::WordBreakOpportunity;
     case InlineItem::Type::AtomicInlineBox:
         if (inlineItem.layoutBox().isListMarkerBox())
-            return downcast<ElementBox>(inlineItem.layoutBox()).isListMarkerOutside() ? Line::Run::Type::ListMarkerOutside : Line::Run::Type::ListMarkerInside;
+            return Line::Run::Type::ListMarker;
         return Line::Run::Type::AtomicInlineBox;
     case InlineItem::Type::InlineBoxStart:
         return Line::Run::Type::InlineBoxStart;
@@ -822,56 +829,56 @@ std::optional<Line::Run::TrailingWhitespace::Type> Line::Run::trailingWhitespace
 }
 
 Line::Run::Run(const InlineItem& inlineItem, const Style::ComputedStyle& style, InlineLayoutUnit logicalLeft, InlineLayoutUnit logicalWidth, InlineLayoutUnit textSpacingAdjustment)
-    : m_type(toLineRunType(inlineItem))
+    : m_layoutBox(&inlineItem.layoutBox())
+    , m_style(style)
     , m_logicalLeft(logicalLeft)
     , m_logicalWidth(logicalWidth)
-    , m_bidiLevel(inlineItem.bidiLevel())
     , m_textSpacingAdjustment(textSpacingAdjustment)
-    , m_layoutBox(&inlineItem.layoutBox())
-    , m_style(style)
+    , m_type(toLineRunType(inlineItem))
+    , m_bidiLevel(inlineItem.bidiLevel())
 {
 }
 
-Line::Run::Run(const InlineItem& zeroWidhtInlineItem, const Style::ComputedStyle& style, InlineLayoutUnit logicalLeft)
-    : m_type(toLineRunType(zeroWidhtInlineItem))
-    , m_logicalLeft(logicalLeft)
-    , m_bidiLevel(zeroWidhtInlineItem.bidiLevel())
-    , m_layoutBox(&zeroWidhtInlineItem.layoutBox())
+Line::Run::Run(const InlineItem& zeroWidthInlineItem, const Style::ComputedStyle& style, InlineLayoutUnit logicalLeft)
+    : m_layoutBox(&zeroWidthInlineItem.layoutBox())
     , m_style(style)
+    , m_logicalLeft(logicalLeft)
+    , m_type(toLineRunType(zeroWidthInlineItem))
+    , m_bidiLevel(zeroWidthInlineItem.bidiLevel())
 {
 }
 
 Line::Run::Run(const InlineItem& lineSpanningInlineBoxItem, InlineLayoutUnit logicalLeft, InlineLayoutUnit logicalWidth, InlineLayoutUnit textSpacingAdjustment)
-    : m_type(Type::LineSpanningInlineBoxStart)
+    : m_layoutBox(&lineSpanningInlineBoxItem.layoutBox())
+    , m_style(lineSpanningInlineBoxItem.style())
     , m_logicalLeft(logicalLeft)
     , m_logicalWidth(logicalWidth)
-    , m_bidiLevel(lineSpanningInlineBoxItem.bidiLevel())
     , m_textSpacingAdjustment(textSpacingAdjustment)
-    , m_layoutBox(&lineSpanningInlineBoxItem.layoutBox())
-    , m_style(lineSpanningInlineBoxItem.style())
+    , m_type(Type::LineSpanningInlineBoxStart)
+    , m_bidiLevel(lineSpanningInlineBoxItem.bidiLevel())
 {
     ASSERT(lineSpanningInlineBoxItem.isInlineBoxStart());
 }
 
 Line::Run::Run(const InlineSoftLineBreakItem& softLineBreakItem, const Style::ComputedStyle& style, InlineLayoutUnit logicalLeft)
-    : m_type(Type::SoftLineBreak)
-    , m_logicalLeft(logicalLeft)
-    , m_bidiLevel(softLineBreakItem.bidiLevel())
-    , m_layoutBox(&softLineBreakItem.layoutBox())
+    : m_layoutBox(&softLineBreakItem.layoutBox())
     , m_style(style)
     , m_textContent({ softLineBreakItem.position(), 1 })
+    , m_logicalLeft(logicalLeft)
+    , m_type(Type::SoftLineBreak)
+    , m_bidiLevel(softLineBreakItem.bidiLevel())
 {
 }
 
 Line::Run::Run(const InlineTextItem& inlineTextItem, const Style::ComputedStyle& style, InlineLayoutUnit logicalLeft, InlineLayoutUnit logicalWidth, InlineLayoutUnit textSpacingAdjustment, std::optional<Line::ShapingBoundary> shapingBoundary)
-    : m_type(inlineTextItem.isWordSeparator() ? Type::WordSeparator : inlineTextItem.isQuirkNonBreakingSpace() ? Type::NonBreakingSpace : Type::Text)
-    , m_shapingBoundary(shapingBoundary.value_or(ShapingBoundary::NotApplicable))
+    : m_layoutBox(&inlineTextItem.layoutBox())
+    , m_style(style)
     , m_logicalLeft(logicalLeft)
     , m_logicalWidth(logicalWidth)
-    , m_bidiLevel(inlineTextItem.bidiLevel())
     , m_textSpacingAdjustment(textSpacingAdjustment)
-    , m_layoutBox(&inlineTextItem.layoutBox())
-    , m_style(style)
+    , m_type(inlineTextItem.isWordSeparator() ? Type::WordSeparator : inlineTextItem.isQuirkNonBreakingSpace() ? Type::NonBreakingSpace : Type::Text)
+    , m_shapingBoundary(shapingBoundary.value_or(ShapingBoundary::NotApplicable))
+    , m_bidiLevel(inlineTextItem.bidiLevel())
 {
     auto length = inlineTextItem.length();
     auto whitespaceType = trailingWhitespaceType(inlineTextItem);
@@ -991,9 +998,14 @@ bool Line::Run::isContentfulOrHasDecoration(const Run& run, const InlineFormatti
     if (run.isContentful())
         return true;
     if (run.isInlineBox()) {
-        if (run.logicalWidth())
-            return true;
         if (run.layoutBox().isRubyBase())
+            return true;
+        if (run.isLineSpanningInlineBoxStart()) {
+            // This inline box started on a previous line. Cloned decoration (-webkit-box-decoration-break: clone)
+            // wraps the content of the box fragment on this line and as such it can't make the line contentful by itself.
+            return false;
+        }
+        if (run.logicalWidth())
             return true;
         // Even negative horizontal margin makes the line "contentful".
         auto& inlineBoxGeometry = formattingContext.geometryForBox(run.layoutBox());
@@ -1001,11 +1013,6 @@ bool Line::Run::isContentfulOrHasDecoration(const Run& run, const InlineFormatti
             return inlineBoxGeometry.marginStart() || inlineBoxGeometry.borderStart() || inlineBoxGeometry.paddingStart();
         if (run.isInlineBoxEnd())
             return inlineBoxGeometry.marginEnd() || inlineBoxGeometry.borderEnd() || inlineBoxGeometry.paddingEnd();
-        if (run.isLineSpanningInlineBoxStart()) {
-            if (run.style().boxDecorationBreak() != BoxDecorationBreak::Clone)
-                return false;
-            return inlineBoxGeometry.borderStart() || inlineBoxGeometry.paddingStart();
-        }
     }
     return false;
 }

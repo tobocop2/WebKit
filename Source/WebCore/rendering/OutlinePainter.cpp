@@ -95,7 +95,7 @@ void OutlinePainter::paintOutline(const RenderElement& renderer, const LayoutRec
 
     auto zoom = styleToUse->usedZoomForLength();
     auto outlineWidth = Style::evaluate<LayoutUnit>(styleToUse->usedOutlineWidth(), zoom, deviceScaleFactor(renderer));
-    auto outlineOffset = Style::evaluate<LayoutUnit>(styleToUse->usedOutlineOffset(), zoom);
+    auto outlineOffset = Style::evaluate<LayoutUnit>(styleToUse->usedOutlineOffset(), zoom, deviceScaleFactor(renderer));
 
     auto outerRect = paintRect;
     outerRect.inflate(outlineOffset + outlineWidth);
@@ -126,7 +126,7 @@ void OutlinePainter::paintOutline(const RenderElement& renderer, const LayoutRec
     });
 }
 
-void OutlinePainter::paintOutline(const RenderInline& renderer, const LayoutPoint& paintOffset) const
+void OutlinePainter::paintOutline(const RenderBoxModelObject& renderer, const LayoutPoint& paintOffset) const
 {
     ASSERT(renderer.hasOutline());
 
@@ -190,7 +190,7 @@ void OutlinePainter::paintOutline(const RenderInline& renderer, const LayoutPoin
     paintOutlineWithLineRects(renderer, paintOffset, rects);
 }
 
-void OutlinePainter::paintOutlineWithLineRects(const RenderInline& renderer, const LayoutPoint& paintOffset, const Vector<LayoutRect>& lineRects) const
+void OutlinePainter::paintOutlineWithLineRects(const RenderBoxModelObject& renderer, const LayoutPoint& paintOffset, const Vector<LayoutRect>& lineRects) const
 {
     if (lineRects.size() == 1) {
         auto adjustedPaintRect = lineRects[0];
@@ -204,7 +204,7 @@ void OutlinePainter::paintOutlineWithLineRects(const RenderInline& renderer, con
     auto zoom = styleToUse->usedZoomForLength();
     auto deviceScaleFactor = WebCore::deviceScaleFactor(renderer);
 
-    auto outlineOffset = Style::evaluate<float>(styleToUse->usedOutlineOffset(), zoom);
+    auto outlineOffset = Style::evaluate<float>(styleToUse->usedOutlineOffset(), zoom, deviceScaleFactor);
     auto outlineWidth = Style::evaluate<float>(styleToUse->usedOutlineWidth(), zoom, deviceScaleFactor);
 
     Vector<FloatRect> pixelSnappedRects;
@@ -279,7 +279,7 @@ void OutlinePainter::paintFocusRing(const RenderElement& renderer, const Vector<
     auto deviceScaleFactor = WebCore::deviceScaleFactor(renderer);
     auto zoom = style->usedZoomForLength();
 
-    auto outlineOffset = Style::evaluate<float>(style->usedOutlineOffset(), zoom);
+    auto outlineOffset = Style::evaluate<float>(style->usedOutlineOffset(), zoom, deviceScaleFactor);
 
     Vector<FloatRect> pixelSnappedFocusRingRects;
     for (auto rect : focusRingRects) {
@@ -396,12 +396,18 @@ bool OutlinePainter::collectFocusRingRectsForListBox(const RenderListBox& render
     return true;
 }
 
-void OutlinePainter::collectFocusRingRectsForInline(const RenderInline& renderer, Vector<LayoutRect>& rects, const LayoutPoint& additionalOffset, const RenderLayerModelObject* paintContainer)
+void OutlinePainter::collectFocusRingRectsForInline(const RenderBoxModelObject& renderer, Vector<LayoutRect>& rects, const LayoutPoint& additionalOffset, const RenderLayerModelObject* paintContainer)
 {
-    renderer.collectLineBoxRects(rects, additionalOffset);
+    for (auto rect : renderer.localBorderBoxRects()) {
+        if (rect.isEmpty())
+            continue;
+        auto adjustedRect = LayoutRect { rect };
+        adjustedRect.moveBy(additionalOffset);
+        rects.append(adjustedRect);
+    }
 
     for (CheckedRef child : childrenOfType<RenderBoxModelObject>(renderer)) {
-        if (child->isRenderListMarker())
+        if (child->isRenderListOutsideMarker())
             continue;
         FloatPoint pos(additionalOffset);
         // FIXME: This doesn't work correctly with transforms.

@@ -28,6 +28,7 @@
 
 #include "InlineContentCache.h"
 #include "InlineFormattingContext.h"
+#include "LayoutIntegrationUtils.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "StyleComputedStyle+InitialInlines.h"
 
@@ -54,7 +55,7 @@ struct CandidateTextContent {
     InlineLayoutUnit logicalWidth { 0.f };
 };
 
-static inline InlineLayoutUnit measuredInlineTextItem(const InlineTextItem& inlineTextItem, const Style::ComputedStyle& style, InlineLayoutUnit contentLogicalLeft)
+InlineLayoutUnit TextOnlySimpleLineBuilder::measuredInlineTextItem(const InlineTextItem& inlineTextItem, const Style::ComputedStyle& style, InlineLayoutUnit contentLogicalLeft)
 {
     ASSERT(!inlineTextItem.width());
     if (!inlineTextItem.isWhitespace() || InlineTextItem::shouldPreserveSpacesAndTabs(inlineTextItem))
@@ -195,26 +196,31 @@ std::optional<LineLayoutResult> TextOnlySimpleLineBuilder::placeSingleCharacterC
     };
 }
 
+bool TextOnlySimpleLineBuilder::isAtContentEnd(std::span<const InlineItem> inlineItemList, size_t nextItemIndex, const InlineItemRange& layoutRange)
+{
+    return nextItemIndex >= layoutRange.endIndex() || inlineItemList[nextItemIndex].isLineBreak();
+}
+
+bool TextOnlySimpleLineBuilder::isAtSoftWrapOpportunityOrContentEnd(const InlineTextItem& inlineTextItem, std::span<const InlineItem> inlineItemList, size_t nextItemIndex, const InlineItemRange& layoutRange, const Style::ComputedStyle& rootStyle)
+{
+    if (inlineTextItem.isWhitespace())
+        return true;
+    if (isAtContentEnd(inlineItemList, nextItemIndex, layoutRange))
+        return true;
+    auto& nextInlineTextItem = downcast<InlineTextItem>(inlineItemList[nextItemIndex]);
+    if (nextInlineTextItem.isWhitespace())
+        return rootStyle.whiteSpaceCollapse() != WhiteSpaceCollapse::BreakSpaces && rootStyle.lineBreak() != LineBreak::AfterWhiteSpace;
+    return &inlineTextItem.inlineTextBox() == &nextInlineTextItem.inlineTextBox() || TextUtil::mayBreakInBetween(inlineTextItem, nextInlineTextItem);
+}
+
 InlineItemPosition TextOnlySimpleLineBuilder::placeInlineTextContent(const Style::ComputedStyle& rootStyle, const InlineItemRange& layoutRange)
 {
-    auto hasWrapOpportunityBeforeWhitespace = rootStyle.whiteSpaceCollapse() != WhiteSpaceCollapse::BreakSpaces && rootStyle.lineBreak() != LineBreak::AfterWhiteSpace;
     size_t placedInlineItemCount = 0;
 
     auto result = TextOnlyLineBreakResult { };
     auto candidateContent = CandidateTextContent { layoutRange.startIndex(), layoutRange.startIndex(), { } };
 
     auto nextItemIndex = layoutRange.startIndex();
-    auto isAtSoftWrapOpportunityOrContentEnd = [&](auto& inlineTextItem) {
-        if (inlineTextItem.isWhitespace())
-            return true;
-        if (nextItemIndex >= layoutRange.endIndex() || m_inlineItemList[nextItemIndex].isLineBreak())
-            return true;
-        auto& nextInlineTextItem = downcast<InlineTextItem>(m_inlineItemList[nextItemIndex]);
-        if (nextInlineTextItem.isWhitespace())
-            return hasWrapOpportunityBeforeWhitespace;
-        return &inlineTextItem.inlineTextBox() == &nextInlineTextItem.inlineTextBox() || TextUtil::mayBreakInBetween(inlineTextItem, nextInlineTextItem);
-    };
-
     auto processCandidateContent = [&] {
         result = commitCandidateContent(rootStyle, candidateContent, layoutRange);
         placedInlineItemCount = !result.isRevert ? placedInlineItemCount + result.committedCount : result.committedCount;
@@ -227,7 +233,7 @@ InlineItemPosition TextOnlySimpleLineBuilder::placeInlineTextContent(const Style
     if (m_partialLeadingTextItem) {
         candidateContent.append({ });
         ++nextItemIndex;
-        if (isAtSoftWrapOpportunityOrContentEnd(*m_partialLeadingTextItem))
+        if (isAtSoftWrapOpportunityOrContentEnd(*m_partialLeadingTextItem, m_inlineItemList, nextItemIndex, layoutRange, rootStyle))
             isEndOfLine = processCandidateContent();
     }
 
@@ -242,7 +248,7 @@ InlineItemPosition TextOnlySimpleLineBuilder::placeInlineTextContent(const Style
                 return measuredInlineTextItem(*inlineTextItem, rootStyle, m_line.contentLogicalRight() + candidateContent.logicalWidth);
             };
             candidateContent.append(contentWidth());
-            if (isAtSoftWrapOpportunityOrContentEnd(*inlineTextItem))
+            if (isAtSoftWrapOpportunityOrContentEnd(*inlineTextItem, m_inlineItemList, nextItemIndex, layoutRange, rootStyle))
                 isEndOfLine = processCandidateContent();
             continue;
         }
@@ -501,6 +507,10 @@ bool TextOnlySimpleLineBuilder::isEligibleForSimplifiedInlineLayoutByStyle(const
     auto isEligibleByStyle = [](auto& style) {
         if (style.fontCascade().wordSpacing())
             return false;
+        // 'white-space-trim' discards inline items adjacent to box edges; the text-only fast paths
+        // (used for both layout and intrinsic sizing) don't account for that, so fall back to the line builder.
+        if (!style.whiteSpaceTrim().isNone())
+            return false;
         if (style.writingMode().isBidiRTL())
             return false;
         if (style.wordBreak() == WordBreak::AutoPhrase)
@@ -536,7 +546,8 @@ bool TextOnlySimpleLineBuilder::isEligibleForSimplifiedDisplayBuild(const Elemen
         return false;
 
     auto& rootStyle = rootBlockContainer.style();
-    if (rootStyle.textOverflow() != Style::ComputedStyle::initialTextOverflow())
+    CheckedRef styleForTruncation = rootBlockContainer.isAnonymous() ? IntegrationUtils::firstNonAnonymousAncestorStyle(rootBlockContainer) : rootStyle;
+    if (styleForTruncation->textOverflow() != Style::ComputedStyle::initialTextOverflow())
         return false;
     if (!rootStyle.writingMode().isHorizontal())
         return false;

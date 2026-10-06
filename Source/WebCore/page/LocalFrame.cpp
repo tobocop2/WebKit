@@ -317,7 +317,7 @@ void LocalFrame::setView(RefPtr<LocalFrameView>&& view)
     
     m_eventHandler->clear();
 
-    RELEASE_ASSERT(!m_doc || !m_doc->hasLivingRenderTree());
+    RELEASE_ASSERT(!m_doc || m_doc->renderTreeState() != Document::RenderTreeState::Built);
 
     m_view = WTF::move(view);
     
@@ -356,6 +356,9 @@ void LocalFrame::setDocument(RefPtr<Document>&& newDocument)
     ASSERT(!m_doc || m_doc->window());
     ASSERT(!m_doc || m_doc->window()->frame() == this);
 
+    if (newDocument && newDocument->firstPartyForCookies().isEmpty())
+        loader().updateFirstPartyForCookies();
+
     // Don't use m_doc because it can be overwritten and we want to guarantee
     // that the document is not destroyed during this function call.
     if (newDocument)
@@ -387,7 +390,7 @@ void LocalFrame::frameDetached()
 
 bool LocalFrame::preventsParentFromBeingComplete() const
 {
-    if (loader().isWaitingForAsyncBackForwardNavigation())
+    if (loader().isWaitingForDelegatedBackForwardLoad())
         return true;
     return !loader().isComplete() && (!ownerElement() || !protect(ownerElement())->isLazyLoadObserverActive());
 }
@@ -1131,10 +1134,14 @@ void LocalFrame::setPageAndTextZoomFactors(float pageZoomFactor, float textZoomF
     }
 }
 
-float LocalFrame::usedZoomForChild(const Frame& child) const
+float LocalFrame::frameScaleFactorForChild(const Frame& child) const
 {
+    // The frame scale factor for a child frame is the accumulated CSS zoom
+    // applied to the frame element. On the ComputedStyle, the used zoom also
+    // includes the page zoom factor, so we must divide it out to get back to
+    // the accumulated CSS zoom value.
     if (CheckedPtr ownerRenderer = child.ownerRenderer())
-        return ownerRenderer->style().usedZoom();
+        return ownerRenderer->style().usedZoom() / m_pageZoomFactor;
 
     return 1.0;
 }
@@ -1203,6 +1210,18 @@ FloatSize LocalFrame::screenSize() const
         return m_overrideScreenSize->size;
 
     auto defaultSize = screenRect(protect(view()).get()).size();
+
+    if (settings().shouldReportViewportSizeAsScreenSize()) {
+        if (RefPtr view = this->view()) {
+            auto unobscuredSize = view->unobscuredContentRectIncludingScrollbars().size();
+            return {
+                static_cast<float>(view->mapFromLayoutToCSSUnits(unobscuredSize.width())),
+                static_cast<float>(view->mapFromLayoutToCSSUnits(unobscuredSize.height()))
+            };
+        }
+        return defaultSize;
+    }
+
     RefPtr document = this->document();
     if (!document)
         return defaultSize;
@@ -1317,11 +1336,19 @@ void LocalFrame::documentURLOrOriginDidChange()
         page->setMainFrameURLAndOrigin(document->url(), protect(document->securityOrigin()));
 }
 
+bool LocalFrame::dispatchLoadEventToRemoteParent()
+{
+    if (!is<RemoteFrame>(tree().parent()))
+        return false;
+    loader().client().dispatchLoadEventToOwnerElementInAnotherProcess();
+    return true;
+}
+
 void LocalFrame::dispatchLoadEventToParent()
 {
-    if (is<RemoteFrame>(tree().parent()))
-        loader().client().dispatchLoadEventToOwnerElementInAnotherProcess();
-    else if (RefPtr owner = ownerElement())
+    if (dispatchLoadEventToRemoteParent())
+        return;
+    if (RefPtr owner = ownerElement())
         owner->dispatchEvent(Event::create(eventNames().loadEvent, Event::CanBubble::No, Event::IsCancelable::No));
 }
 
@@ -1346,7 +1373,11 @@ void LocalFrame::frameWasDisconnectedFromOwner() const
             jsDOMWindow->setAssociatedContextIsFullyActive(false);
     }
 
-    protect(document())->willBeRemovedFromFrame();
+    // Skip while in the back/forward cache: such a document is cleared and removed by
+    // CachedFrame::destroy, so running willBeRemovedFromFrame here would fire it while still
+    // cached (matches the guards in setView() and setDocument()).
+    if (m_doc->backForwardCacheState() != Document::InBackForwardCache)
+        protect(document())->willBeRemovedFromFrame();
 }
 
 void LocalFrame::storageAccessExceptionReceivedForDomain(const RegistrableDomain& domain)
@@ -1410,6 +1441,13 @@ AutoplayPolicy LocalFrame::autoplayPolicy() const
     if (auto* documentLoader = loader().activeDocumentLoader())
         return documentLoader->autoplayPolicy();
     return AutoplayPolicy::Default;
+}
+
+ColorSchemePreference LocalFrame::colorSchemePreference() const
+{
+    if (auto* documentLoader = loader().documentLoader())
+        return documentLoader->colorSchemePreference();
+    return ColorSchemePreference::NoPreference;
 }
 
 SandboxFlags LocalFrame::effectiveSandboxFlags() const
@@ -1542,7 +1580,7 @@ void LocalFrame::showResourceMonitoringError()
         page->diagnosticLoggingClient().logDiagnosticMessageWithValueDictionary(DiagnosticLoggingKeys::iframeResourceMonitoringKey(), "IFrame ResourceMonitoring Unloaded"_s, valueDictionaryForResult(true), ShouldSample::No);
     }
 
-    FRAME_RELEASE_LOG(ResourceMonitoring, "Detected excessive network usage in frame at %" SENSITIVE_LOG_STRING " and main frame at %" SENSITIVE_LOG_STRING ": unloading", url.isValid() ? url.string().utf8().data() : "invalid", mainFrameURL.isValid() ? mainFrameURL.string().utf8().data() : "invalid");
+    FRAME_RELEASE_LOG(ResourceMonitoring, "Detected excessive network usage in frame at %" SENSITIVE_LOG_STRING " and main frame at %" SENSITIVE_LOG_STRING ": unloading", url.isValid() ? url.string().utf8() : "invalid"_s, mainFrameURL.isValid() ? mainFrameURL.string().utf8() : "invalid"_s);
 
     document->addConsoleMessage(MessageSource::ContentBlocker, MessageLevel::Error, makeString("Frame was unloaded because its network usage exceeded the limit: "_s, ResourceMonitorChecker::singleton().networkUsageThreshold(), " bytes, url="_s, url.string()));
 
@@ -1573,7 +1611,7 @@ void LocalFrame::reportResourceMonitoringWarning()
         page->diagnosticLoggingClient().logDiagnosticMessageWithValueDictionary(DiagnosticLoggingKeys::iframeResourceMonitoringKey(), "IFrame ResourceMonitoring Throttled"_s, valueDictionaryForResult(false), ShouldSample::No);
     }
 
-    FRAME_RELEASE_LOG(ResourceMonitoring, "Detected excessive network usage in frame at %" SENSITIVE_LOG_STRING " and main frame at %" SENSITIVE_LOG_STRING ": not unloading due to global limits", url.isValid() ? url.string().utf8().data() : "invalid", mainFrameURL.isValid() ? mainFrameURL.string().utf8().data() : "invalid");
+    FRAME_RELEASE_LOG(ResourceMonitoring, "Detected excessive network usage in frame at %" SENSITIVE_LOG_STRING " and main frame at %" SENSITIVE_LOG_STRING ": not unloading due to global limits", url.isValid() ? url.string().utf8() : "invalid"_s, mainFrameURL.isValid() ? mainFrameURL.string().utf8() : "invalid"_s);
 
     if (RefPtr document = this->document())
         document->addConsoleMessage(MessageSource::ContentBlocker, MessageLevel::Warning, "Frame's network usage exceeded the limit."_s);
@@ -1915,7 +1953,7 @@ RefPtr<Node> LocalFrame::nodeRespondingToDoubleClickEvent(const FloatPoint& view
         for (; node && node != terminationNode; node = node->parentInComposedTree()) {
             if (!node->hasEventListeners(eventNames().dblclickEvent))
                 continue;
-#if ENABLE(TOUCH_EVENTS)
+#if ENABLE(TWO_PHASE_CLICKS)
             if (!node->allowsDoubleTapGesture())
                 continue;
 #endif
@@ -1927,6 +1965,15 @@ RefPtr<Node> LocalFrame::nodeRespondingToDoubleClickEvent(const FloatPoint& view
     };
 
     return qualifyingNodeAtViewportLocation(viewportLocation, adjustedViewportLocation, WTF::move(ancestorRespondingToDoubleClickEvent), ShouldApproximate::Yes);
+}
+
+RefPtr<LocalDOMWindow> LocalFrame::windowWithDoubleClickEventListener() const
+{
+    RefPtr window = this->window();
+    if (!window || !window->hasEventListeners(eventNames().dblclickEvent))
+        return nullptr;
+
+    return window;
 }
 
 #endif // PLATFORM(COCOA)

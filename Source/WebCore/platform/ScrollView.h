@@ -246,7 +246,7 @@ public:
 
     // Functions for getting/setting the size of the document contained inside the ScrollView (as an IntSize or as individual width and height
     // values).
-    WEBCORE_EXPORT IntSize contentsSize() const final; // Always at least as big as the visibleWidth()/visibleHeight().
+    WEBCORE_EXPORT IntSize contentsSize() const override; // Always at least as big as the visibleWidth()/visibleHeight().
     int contentsWidth() const { return contentsSize().width(); }
     int contentsHeight() const { return contentsSize().height(); }
     virtual void setContentsSize(const IntSize&);
@@ -379,7 +379,7 @@ public:
     void clipRectChanged() final;
 
     // For platforms that need to hit test scrollbars from within the engine's event handlers (like Win32).
-    Scrollbar* scrollbarAtPoint(const IntPoint& windowPoint);
+    Scrollbar* scrollbarAtPoint(const IntPoint& windowPoint, ScrollbarHitTestTolerance = ScrollbarHitTestTolerance::None);
 
     IntPoint convertChildToSelf(const Widget*, IntPoint) const;
     FloatPoint convertChildToSelf(const Widget*, FloatPoint) const;

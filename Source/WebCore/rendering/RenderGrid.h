@@ -27,7 +27,6 @@
 #pragma once
 
 #include "Grid.h"
-#include "GridMasonryLayout.h"
 #include "GridTrackSizingAlgorithm.h"
 #include "RenderBlock.h"
 #include "StyleGridTrackSizingDirection.h"
@@ -46,8 +45,16 @@ class GridLayout;
 
 class GridArea;
 class RenderGridLayoutState;
+class GridLanesLayout;
+class GridLanesResult;
 class GridSpan;
 class LayoutRange;
+
+// The result of a grid lanes placement only exists for the duration of a single layout (or intrinsic
+// width computation) of a grid lanes container, so it is threaded through the layout call chain as a
+// non-owning reference rather than living on the renderer. It is std::nullopt for grids which are
+// not performing a grid lanes layout.
+using GridLanesResultRef = std::optional<std::reference_wrapper<const GridLanesResult>>;
 
 struct ContentAlignmentData {
     LayoutUnit positionOffset;
@@ -88,7 +95,7 @@ public:
     const std::optional<LayoutUnit> availableLogicalHeightForContentBox() const;
 
     void setNeedsItemPlacement(SubgridDidChange descendantSubgridsNeedItemPlacement = SubgridDidChange::No);
-    Vector<LayoutUnit> trackSizesForComputedStyle(Style::GridTrackSizingDirection) const;
+    const Vector<LayoutUnit>& trackSizesForComputedStyle(Style::GridTrackSizingDirection) const LIFETIME_BOUND;
 
     const Vector<LayoutUnit>& columnPositions() const LIFETIME_BOUND { return m_columnPositions; }
     const Vector<LayoutUnit>& rowPositions() const LIFETIME_BOUND { return m_rowPositions; }
@@ -111,11 +118,11 @@ public:
     bool willStretchItem(const RenderBox& item, LogicalBoxAxis containingAxis, StretchingMode = StretchingMode::Normal) const override;
 
     // These functions handle the actual implementation of layoutBlock based on if
-    // the grid is a standard grid or a masonry one. While masonry is an extension of grid,
+    // the grid is a standard grid or a grid lanes one. While grid lanes layout is an extension of grid,
     // keeping the logic in the same function was leading to a messy amount of if statements being added to handle
-    // specific masonry cases.
+    // specific grid lanes cases.
     void layoutGrid(RelayoutChildren);
-    void layoutMasonry(RelayoutChildren);
+    void layoutGridLanes(RelayoutChildren);
 
     // Computes the span relative to this RenderGrid, even if the RenderBox is a grid item
     // of a descendant subgrid.
@@ -132,11 +139,11 @@ public:
     // nested subgrids, where ancestor may not be our direct parent.
     bool isSubgridOf(Style::GridTrackSizingDirection, const RenderGrid& ancestor) const;
 
-    bool NODELETE isMasonry() const;
-    bool isMasonry(Style::GridTrackSizingDirection) const;
-    bool isMasonry(LogicalBoxAxis axis) const { return isMasonry(Style::gridTrackSizingDirection(axis)); }
-    bool areMasonryRows() const { return isMasonry(Style::GridTrackSizingDirection::Rows); }
-    bool areMasonryColumns() const { return isMasonry(Style::GridTrackSizingDirection::Columns); }
+    bool NODELETE isGridLanes() const;
+    bool isStackingAxis(Style::GridTrackSizingDirection) const;
+    bool isStackingAxis(LogicalBoxAxis axis) const { return isStackingAxis(Style::gridTrackSizingDirection(axis)); }
+    bool hasStackingAxisRows() const { return isStackingAxis(Style::GridTrackSizingDirection::Rows); }
+    bool hasStackingAxisColumns() const { return isStackingAxis(Style::GridTrackSizingDirection::Columns); }
 
     const Grid& NODELETE currentGrid() const LIFETIME_BOUND;
     Grid& NODELETE currentGrid() LIFETIME_BOUND;
@@ -149,7 +156,11 @@ public:
     LayoutUnit gridGap(Style::GridTrackSizingDirection) const;
     LayoutUnit gridGap(Style::GridTrackSizingDirection, std::optional<LayoutUnit> availableSize) const;
 
-    LayoutUnit NODELETE masonryContentSize() const;
+    // The stacking axis content size produced by the most recent grid lanes layout. Unlike the rest of
+    // the GridLanesResult this has to outlive layout, because the web inspector's grid overlay reads it
+    // at paint time. Nothing in layout should use this; layout threads the result itself through as a
+    // GridLanesResultRef instead.
+    LayoutUnit NODELETE gridLanesContentSizeForWebInspectorOverlay() const { return m_gridLanesContentSizeForWebInspectorOverlay; }
 
     void updateIntrinsicLogicalHeightsForRowSizingFirstPassCacheAvailability();
     std::optional<GridItemSizeCache>& NODELETE intrinsicLogicalHeightsForRowSizingFirstPass() const LIFETIME_BOUND;
@@ -161,10 +172,12 @@ public:
     // grid is determined by the lines/grid areas which come from track sizing.
     bool isExtrinsicallySized() const;
 
+    LayoutRange gridAreaRangeForOutOfFlow(const RenderBox&, Style::GridTrackSizingDirection) const;
+
 private:
     friend class GridTrackSizingAlgorithm;
     friend class GridTrackSizingAlgorithmStrategy;
-    friend class GridMasonryLayout;
+    friend class GridLanesLayout;
     friend class PositionedLayoutConstraints;
     friend class LayoutIntegration::GridLayout;
 
@@ -223,23 +236,22 @@ private:
 
     void repeatTracksSizingIfNeeded(LayoutUnit availableSpaceForColumns, LayoutUnit availableSpaceForRows, RenderGridLayoutState&);
 
-    void updateGridAreaForAspectRatioItems(const Vector<RenderBox*>&, RenderGridLayoutState&);
+    void updateGridAreaForAspectRatioItems(const Vector<RenderBox*>&, RenderGridLayoutState&, GridLanesResultRef);
 
-    void layoutGridItems(RenderGridLayoutState&);
-    void layoutMasonryItems(RenderGridLayoutState&);
+    void layoutGridItems(RenderGridLayoutState&, GridLanesResultRef);
+    void layoutGridLanesItems(RenderGridLayoutState&, const GridLanesResult&);
 
-    void populateGridPositionsForDirection(const GridTrackSizingAlgorithm&, Style::GridTrackSizingDirection);
+    void populateGridPositionsForDirection(const GridTrackSizingAlgorithm&, Style::GridTrackSizingDirection, GridLanesResultRef);
 
-    LayoutRange gridAreaRangeForOutOfFlow(const RenderBox&, Style::GridTrackSizingDirection) const;
     std::pair<LayoutUnit, LayoutUnit> gridAreaPositionForInFlowGridItem(const RenderBox&, Style::GridTrackSizingDirection) const;
 
     GridAxisPosition columnAxisPositionForGridItem(const RenderBox&) const;
     GridAxisPosition rowAxisPositionForGridItem(const RenderBox&) const;
-    LayoutUnit columnAxisOffsetForGridItem(const RenderBox&) const;
-    LayoutUnit rowAxisOffsetForGridItem(const RenderBox&) const;
+    LayoutUnit columnAxisOffsetForGridItem(const RenderBox&, GridLanesResultRef) const;
+    LayoutUnit rowAxisOffsetForGridItem(const RenderBox&, GridLanesResultRef) const;
     ContentAlignmentData computeContentPositionAndDistributionOffset(Style::GridTrackSizingDirection, const LayoutUnit& availableFreeSpace, unsigned numberOfGridTracks) const;
-    void setLogicalPositionForGridItem(RenderBox&) const;
-    LayoutUnit logicalOffsetForGridItem(const RenderBox&, Style::GridTrackSizingDirection) const;
+    void setLogicalPositionForGridItem(RenderBox&, GridLanesResultRef) const;
+    LayoutUnit logicalOffsetForGridItem(const RenderBox&, Style::GridTrackSizingDirection, GridLanesResultRef) const;
 
     LayoutUnit gridAreaBreadthForGridItemIncludingAlignmentOffsets(const RenderBox&, Style::GridTrackSizingDirection) const;
 
@@ -249,8 +261,9 @@ private:
     LayoutRect contentOverflowRect() const;
 
     void applyStretchAlignmentToGridItemIfNeeded(RenderBox&, RenderGridLayoutState&);
+    void stretchBlockSizeForGridItem(RenderBox&, LayoutUnit alignmentContainerSize, RenderGridLayoutState&);
+    void stretchInlineSizeForGridItem(RenderBox&, LayoutUnit alignmentContainerSize);
     void applySubgridStretchAlignmentToGridItemIfNeeded(RenderBox&);
-    bool isChildEligibleForMarginTrim(Style::MarginTrimSide, const RenderBox&) const final;
 
     std::optional<LayoutUnit> firstLineBaseline() const final;
     std::optional<LayoutUnit> lastLineBaseline() const final;
@@ -277,6 +290,14 @@ private:
 
     Vector<LayoutUnit>& positions(Style::GridTrackSizingDirection direction) LIFETIME_BOUND { return direction == Style::GridTrackSizingDirection::Columns ? m_columnPositions : m_rowPositions; }
 
+    // https://drafts.csswg.org/css-grid-2/#resolved-track-list
+    // The resolved value of grid-template-columns / grid-template-rows for a grid container is its
+    // used value: every track listed individually with its size serialized as a length in pixels.
+    // We compute this once at the end of layout instead of on demand for each getComputedStyle query.
+    Vector<LayoutUnit> computeResolvedTrackList(Style::GridTrackSizingDirection) const;
+    void updateResolvedTrackListsAfterLayout();
+    void setResolvedTrackSizes(Vector<LayoutUnit>&& columnSizes, Vector<LayoutUnit>&& rowSizes);
+
     ContentAlignmentData& offsetBetweenTracks(Style::GridTrackSizingDirection direction) LIFETIME_BOUND { return direction == Style::GridTrackSizingDirection::Columns ? m_offsetBetweenColumns : m_offsetBetweenRows; }
     const ContentAlignmentData& offsetBetweenTracks(Style::GridTrackSizingDirection direction) const LIFETIME_BOUND { return direction == Style::GridTrackSizingDirection::Columns ? m_offsetBetweenColumns : m_offsetBetweenRows; }
 
@@ -290,7 +311,7 @@ private:
         mutable std::reference_wrapper<Grid> m_currentGrid { std::ref(m_layoutGrid) };
     } m_grid;
 
-    // FIXME: Refactor m_trackSizingAlgorithm to be inside of layoutGrid and layoutMasonry.
+    // FIXME: Refactor m_trackSizingAlgorithm to be inside of layoutGrid and layoutGridLanes.
     // https://bugs.webkit.org/show_bug.cgi?id=277496
     GridTrackSizingAlgorithm m_trackSizingAlgorithm;
 
@@ -298,8 +319,26 @@ private:
     Vector<LayoutUnit> m_rowPositions;
     ContentAlignmentData m_offsetBetweenColumns;
     ContentAlignmentData m_offsetBetweenRows;
+    LayoutUnit m_gridLanesContentSizeForWebInspectorOverlay;
 
-    mutable GridMasonryLayout m_masonryLayout;
+    // Cached resolved value of grid-template-columns / grid-template-rows (see computeResolvedTrackList).
+    // Invalidated when a full (non-simplified) layout begins and repopulated at the end of that layout,
+    // so a stale read trips the assert in trackSizesForComputedStyle().
+    struct ResolvedTrackList {
+        Vector<LayoutUnit> columnSizes;
+        Vector<LayoutUnit> rowSizes;
+        bool isValid { false };
+
+        void invalidate()
+        {
+            isValid = false;
+            columnSizes.clear();
+            rowSizes.clear();
+        }
+
+        const Vector<LayoutUnit>& sizes(Style::GridTrackSizingDirection direction) const LIFETIME_BOUND { return direction == Style::GridTrackSizingDirection::Columns ? columnSizes : rowSizes; }
+        Vector<LayoutUnit>& sizes(Style::GridTrackSizingDirection direction) LIFETIME_BOUND { return direction == Style::GridTrackSizingDirection::Columns ? columnSizes : rowSizes; }
+    } m_resolvedTrackList;
 
     mutable std::optional<GridItemSizeCache> m_intrinsicLogicalHeightsForRowSizingFirstPass;
 

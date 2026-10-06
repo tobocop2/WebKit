@@ -563,6 +563,8 @@ public:
     bool NODELETE isList() const;
     virtual bool isDescriptionList() const = 0;
     bool isFileUploadButton() const;
+    // True for a native select.
+    bool isSelectElement() const { return elementName() == ElementName::HTML_select; }
     // Returns true for objects whose role implies interactivity. For example, when a screen
     // reader announces "link", it doesn't need to announce "clickable" or "pressable" — that
     // is implicit in the concept of a link.
@@ -602,7 +604,6 @@ public:
     virtual bool isColumnHeader() const { return false; }
     virtual bool isRowHeader() const { return false; }
     bool isTableCellInSameRowGroup(AXCoreObject&);
-    bool isTableCellInSameColGroup(AXCoreObject*);
     std::optional<AXID> rowGroupAncestorID() const;
     virtual String cellScope() const { return { }; }
     // Returns the start location and row span of the cell.
@@ -650,6 +651,7 @@ public:
     bool isSwitch() const { return role() == AccessibilityRole::Switch; }
     bool isToggleButton() const { return role() == AccessibilityRole::ToggleButton; }
     bool NODELETE isTextControl() const;
+    static bool isTextControl(AccessibilityRole);
     virtual bool isEditableWebArea() const = 0;
     virtual bool isNonNativeTextControl() const = 0;
     bool isTabList() const { return role() == AccessibilityRole::TabList; }
@@ -762,6 +764,7 @@ public:
 
     unsigned blockquoteLevel() const;
     unsigned headingLevel() const;
+    virtual unsigned computedHeadingLevel() const { return 0; }
     virtual AccessibilityButtonState checkboxOrRadioValue() const = 0;
     virtual String valueDescription() const = 0;
     virtual float valueForRange() const = 0;
@@ -842,6 +845,10 @@ public:
     String currentValue() const;
     virtual bool supportsKeyShortcuts() const = 0;
     virtual String keyShortcuts() const = 0;
+#if PLATFORM(COCOA)
+    // keyShortcuts(), with the modifier keys renamed to match the labels printed on Apple keyboards.
+    String keyShortcutsPlatformString() const;
+#endif
 
     virtual bool isModalNode() const = 0;
 
@@ -960,7 +967,19 @@ public:
     virtual bool hasTextRuns() = 0;
     virtual TextEmissionBehavior textEmissionBehavior() const = 0;
     bool emitsNewline() const;
-    virtual AXTextRunLineID listMarkerLineID() const = 0;
+    // True when TextIterator considers this object's node to be a replaced element (form controls,
+    // images, plugins, media, ...). The text-marker APIs represent these with a single U+FFFC
+    // object replacement character (only when the object is unignored, see
+    // AccessibilityObject::replacedNodeNeedsCharacter) rather than with newlines at their block
+    // boundaries, because TextIterator handles them in handleReplacedElement, not exitNode.
+    virtual bool isReplacedElementForTextEmission() const = 0;
+    // True when this object's node is inside a user-agent shadow tree, e.g. the inner text of a
+    // text field or the controls of a <video>. TextIterator walks the light DOM and so never emits
+    // this text, and neither do the text-marker walks over document text.
+    virtual bool isInUserAgentShadowTree() const = 0;
+    // True when this object's node is in the shadow tree of an <input> or <textarea>, as opposed to
+    // an ARIA text control.
+    virtual bool isInsideNativeTextControl() const = 0;
     virtual String listMarkerText() const = 0;
     virtual FontOrientation fontOrientation() const = 0;
 #endif
@@ -1057,6 +1076,10 @@ public:
     virtual CharacterRange selectedTextRange() const = 0;
     virtual int insertionPointLineNumber() const = 0;
 
+#if ENABLE(WRITING_TOOLS)
+    virtual bool writingToolsAvailable() const = 0;
+#endif // ENABLE(WRITING_TOOLS)
+
     virtual URL url() const = 0;
     virtual VisibleSelection selection() const = 0;
     virtual String selectedText() const = 0;
@@ -1081,6 +1104,8 @@ public:
     virtual String language() const = 0;
     String languageIncludingAncestors() const;
     virtual unsigned ariaLevel() const = 0;
+    // True only when the author explicitly set role="group" on this object.
+    virtual bool hasExplicitGroupRole() const = 0;
     // 1-based, to match the aria-level spec.
     unsigned hierarchicalLevel() const;
     virtual bool isInlineText() const = 0;
@@ -1178,6 +1203,12 @@ public:
         return std::nullopt;
     }
 
+    // Resolves this object to its stitch-group representative when it has been stitched away
+    // (i.e. removed from its parent's exposed children); otherwise returns this object. AT-facing
+    // APIs that hand a single object to the client should route through this so a stitched-away
+    // member is never exposed as an element that is absent from the tree.
+    RefPtr<AXCoreObject> stitchRepresentativeOrSelf();
+
     // When ENABLE(INCLUDE_IGNORED_IN_CORE_AX_TREE) is true, this returns IDs of ignored children.
     // When it is not, it returns IDs of unignored children. After ENABLE(INCLUDE_IGNORED_IN_CORE_AX_TREE)
     // is the default, we should rename this function to childrenIDsIncludingIgnored, as that is what all
@@ -1187,7 +1218,6 @@ public:
     RefPtr<AXCoreObject> nextInPreOrder(bool updateChildrenIfNeeded, AXCoreObject* stayWithin, bool includeCrossFrame);
     AXCoreObject* nextSiblingIncludingIgnored(bool updateChildrenIfNeeded) const;
     AXCoreObject* nextSiblingIncludingIgnored(bool updateChildrenIfNeeded, bool includeCrossFrame) const;
-    AXCoreObject* nextUnignoredSibling(bool updateChildrenIfNeeded, AXCoreObject* unignoredParent = nullptr) const;
     AXCoreObject* nextSiblingIncludingIgnoredOrParent() const;
     std::optional<AXID> idOfNextSiblingIncludingIgnoredOrParent() const
     {

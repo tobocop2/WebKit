@@ -88,6 +88,7 @@ MacroAssemblerCodeRef<JSEntryPtrTag> evalEntryThunk();
 MacroAssemblerCodeRef<JSEntryPtrTag> programEntryThunk();
 MacroAssemblerCodeRef<JSEntryPtrTag> moduleProgramEntryThunk();
 MacroAssemblerCodeRef<JSEntryPtrTag> defaultCallThunk();
+MacroAssemblerCodeRef<JSEntryPtrTag> unlinkedCallThunk();
 MacroAssemblerCodeRef<JSEntryPtrTag> getHostCallReturnValueThunk();
 MacroAssemblerCodeRef<JSEntryPtrTag> genericReturnPointThunk(OpcodeSize);
 MacroAssemblerCodeRef<JSEntryPtrTag> fuzzerReturnEarlyFromLoopHintThunk();
@@ -101,6 +102,7 @@ MacroAssemblerCodeRef<ExceptionHandlerPtrTag> handleCatchThunk(OpcodeSize);
 
 #if ENABLE(JIT_CAGE)
 MacroAssemblerCodeRef<NativeToJITGatePtrTag> jitCagePtrThunk();
+MacroAssemblerCodeRef<NativeToJITGatePtrTag> jitCageProbeThunk();
 #endif
 
 #if CPU(ARM64E)

@@ -81,7 +81,8 @@ SVGSVGElement& LegacyRenderSVGRoot::svgSVGElement() const
 
 bool LegacyRenderSVGRoot::hasIntrinsicAspectRatio() const
 {
-    return preferredAspectRatioAsSize().aspectRatioDouble();
+    // Dividing the two components would give NaN for an absent ratio, and NaN converts to true.
+    return !preferredAspectRatioAsSize().isEmpty();
 }
 
 FloatSize LegacyRenderSVGRoot::computeIntrinsicSize() const
@@ -436,7 +437,7 @@ LayoutRect LegacyRenderSVGRoot::localClippedOverflowRect(RepaintRectCalculation 
     return enclosingIntRect(repaintRect);
 }
 
-LayoutRect LegacyRenderSVGRoot::clippedOverflowRect(const RenderLayerModelObject* repaintContainer, VisibleRectContext context) const
+LayoutRect LegacyRenderSVGRoot::clippedOverflowRect(const RenderLayerModelObject* repaintContainer, const VisibleRectContext& context) const
 {
     if (isInsideEntirelyHiddenLayer())
         return { };
@@ -457,7 +458,7 @@ auto LegacyRenderSVGRoot::rectsForRepaintingAfterLayout(const RenderLayerModelOb
     return RenderReplaced::computeRects(rects, repaintContainer, visibleRectContextForRepaint());
 }
 
-std::optional<FloatRect> LegacyRenderSVGRoot::computeFloatVisibleRectInContainer(const FloatRect& rect, const RenderLayerModelObject* container, VisibleRectContext context) const
+std::optional<FloatRect> LegacyRenderSVGRoot::computeFloatVisibleRectInContainer(const FloatRect& rect, const RenderLayerModelObject* container, const VisibleRectContext& context, VisibleRectState state) const
 {
     // Apply our local transforms (except for x/y translation) and then call
     // RenderBox's method to handle all the normal CSS Box model bits
@@ -480,7 +481,7 @@ std::optional<FloatRect> LegacyRenderSVGRoot::computeFloatVisibleRectInContainer
     }
 
     auto rects = RepaintRects { LayoutRect(enclosingIntRect(adjustedRect)) };
-    auto rectsInContainer = RenderReplaced::computeVisibleRectsInContainer(rects, container, context);
+    auto rectsInContainer = RenderReplaced::computeVisibleRectsInContainer(rects, container, context, state);
     if (!rectsInContainer)
         return std::nullopt;
 
@@ -530,6 +531,9 @@ FloatRect LegacyRenderSVGRoot::strokeBoundingBox() const
 FloatRect LegacyRenderSVGRoot::repaintRectInLocalCoordinates(RepaintRectCalculation repaintRectCalculation) const
 {
     if (hasNonScalingStrokeDescendant()) {
+        if (m_localToBorderBoxTransform.isIdentityOrTranslation())
+            return m_repaintBoundingBox;
+
         auto boundingBoxes = SVGRenderSupport::computeContainerBoundingBoxes(*this, repaintRectCalculation);
         FloatRect repaintBoundingBox = boundingBoxes.repaintBoundingBox;
         SVGRenderSupport::intersectRepaintRectWithResources(*this, repaintBoundingBox, repaintRectCalculation);

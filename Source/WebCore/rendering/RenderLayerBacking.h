@@ -169,6 +169,12 @@ public:
         return std::nullopt;
     }
 
+    bool hasAnyScrollingNodeID() const
+    {
+        return m_scrollingNodeID || m_frameHostingNodeID || m_pluginHostingNodeID
+            || m_viewportConstrainedNodeID || m_positioningNodeID || m_ancestorClippingStack;
+    }
+
     void setScrollingNodeIDForRole(ScrollingNodeID, ScrollCoordinationRole);
 
     bool hasMaskLayer() const { return m_maskLayer; }
@@ -198,13 +204,11 @@ public:
     // Notification from the renderer that its content changed.
     void contentChanged(ContentChangeType, const std::optional<FloatRect>&);
 
-    // Interface to start, finish, suspend and resume animations
+    // Interface to start and finish animations.
     bool startAnimation(double timeOffset, const GraphicsLayerAnimation&, const BlendingKeyframes&);
     void animationPaused(double timeOffset, const String& name);
     void animationFinished(const String& name);
     void transformRelatedPropertyDidChange();
-    void suspendAnimations(MonotonicTime = MonotonicTime());
-    void resumeAnimations();
 
 #if ENABLE(THREADED_ANIMATIONS)
     const AcceleratedEffectStack* NODELETE acceleratedEffectStack() const;
@@ -300,7 +304,12 @@ public:
 #endif
 
     WEBCORE_EXPORT LayoutRect contentsBox() const;
-    
+
+    // Like contentsBox(), but for video, never applies the object-view-box crop-bypass or the
+    // object-fit: cover overflow — used as the fullscreen/PiP transition-anchor rect, which must
+    // reflect the video's true on-screen inline box, not compositing-only crop geometry.
+    WEBCORE_EXPORT LayoutRect inlineVideoContentsBox() const;
+
     // For informative purposes only.
     WEBCORE_EXPORT CompositingLayerType compositingLayerType() const;
     
@@ -379,7 +388,9 @@ private:
 #if ENABLE(MODEL_PROCESS)
     bool updateContentsContainmentLayer();
 #endif
-    bool updateMaskingLayer(bool hasMask, bool hasClipPath);
+    bool updateMaskingLayer(bool hasMask, bool hasClipPath, bool hasCornerShapeMask);
+    bool needsCornerShapeMask() const;
+    void updateReflectionLayer();
     bool updateTransformFlatteningLayer(const RenderLayer* compositingAncestor);
 #if USE(SYSTEM_PREVIEW) && ENABLE(MODEL_PROCESS)
     bool updateSystemPreviewBadgeLayer(bool needsLayer);

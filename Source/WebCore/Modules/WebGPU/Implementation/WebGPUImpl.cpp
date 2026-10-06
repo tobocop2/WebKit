@@ -30,7 +30,6 @@
 
 #include "WebGPUAdapterImpl.h"
 #include "WebGPUCompositorIntegrationImpl.h"
-#include "WebGPUDowncastConvertToBackingContext.h"
 #include "WebGPUPresentationContextDescriptor.h"
 #include "WebGPUPresentationContextImpl.h"
 #include <WebCore/GraphicsContext.h>
@@ -100,7 +99,7 @@ RefPtr<PresentationContext> GPUImpl::createPresentationContext(const Presentatio
     });
 
     WGPUSurfaceDescriptor surfaceDescriptor {
-        .label = nullptr,
+        .label = { },
         .cocoaDescriptor = WGPUSurfaceDescriptorCocoaCustomSurface {
             .compositorIntegrationRegister = registerCallbacksBlock.get(),
         }

@@ -44,6 +44,7 @@ GPUProcess/graphics/RemoteSnapshotRecorder.cpp
 GPUProcess/graphics/ScopedRenderingResourcesRequest.cpp
 GPUProcess/graphics/ScopedWebGLRenderingResourcesRequest.cpp
 GPUProcess/graphics/ShareablePixelBuffer.cpp
+GPUProcess/graphics/SharedFont.cpp
 GPUProcess/graphics/Model/ModelObjectHeap.cpp
 GPUProcess/graphics/Model/RemoteMesh.cpp
 GPUProcess/graphics/WebGPU/RemoteAdapter.cpp
@@ -104,7 +105,6 @@ ModelProcess/ModelProcessModelPlayerManagerProxy.cpp
 
 NetworkProcess/BackgroundFetchLoad.cpp @cost:4
 NetworkProcess/DatabaseUtilities.cpp @cost:3
-NetworkProcess/EarlyHintsResourceLoader.cpp @cost:6
 NetworkProcess/NetworkActivityTracker.cpp
 NetworkProcess/NetworkBroadcastChannelRegistry.cpp @cost:4
 NetworkProcess/NetworkCORSPreflightChecker.cpp @cost:4
@@ -124,8 +124,8 @@ NetworkProcess/NetworkResourceLoader.cpp @cost:9
 NetworkProcess/NetworkSchemeRegistry.cpp
 NetworkProcess/NetworkSession.cpp @cost:9
 NetworkProcess/NetworkSocketChannel.cpp
-NetworkProcess/PingLoad.cpp @cost:4
 NetworkProcess/PreconnectTask.cpp @cost:3
+NetworkProcess/QualifiedServerTrustFetch.cpp @cost:3
 
 NetworkProcess/Authentication/AuthenticationManager.cpp @cost:7
 
@@ -198,6 +198,7 @@ NetworkProcess/cache/AsyncRevalidation.cpp
 NetworkProcess/cache/NetworkCache.cpp @cost:4
 NetworkProcess/cache/NetworkCacheBlobStorage.cpp
 NetworkProcess/cache/NetworkCacheCoders.cpp
+NetworkProcess/cache/NetworkCacheCompressionDictionaryEntry.cpp
 NetworkProcess/cache/NetworkCacheData.cpp
 NetworkProcess/cache/NetworkCacheEntry.cpp @cost:3
 NetworkProcess/cache/NetworkCacheFileSystem.cpp
@@ -206,6 +207,7 @@ NetworkProcess/cache/NetworkCacheSpeculativeLoad.cpp @cost:3
 NetworkProcess/cache/NetworkCacheSpeculativeLoadManager.cpp @cost:4
 NetworkProcess/cache/NetworkCacheStorage.cpp
 NetworkProcess/cache/NetworkCacheSubresourcesEntry.cpp
+NetworkProcess/cache/NetworkCacheValidation.cpp
 NetworkProcess/cache/PrefetchCache.cpp
 
 NetworkProcess/webrtc/NetworkMDNSRegister.cpp @cost:4
@@ -215,6 +217,7 @@ NetworkProcess/webtransport/NetworkTransportSession.cpp
 NetworkProcess/webtransport/NetworkTransportStream.cpp
 
 Platform/IPC/DaemonCoders.cpp
+Platform/IPC/FormDataReference.cpp
 
 Shared/ActivityAssertion.cpp
 Shared/AuxiliaryProcess.cpp
@@ -233,6 +236,7 @@ Shared/IPCTesterReceiver.cpp
 Shared/JavaScriptEvaluationResult.cpp
 Shared/JSHandleInfo.cpp
 Shared/KeyEventInterpretationContext.cpp
+Shared/NetworkStorageSession.cpp
 Shared/PersistencyUtils.cpp
 Shared/PrintInfo.cpp
 Shared/ProcessTerminationReason.cpp
@@ -425,7 +429,6 @@ UIProcess/ProvisionalFrameProxy.cpp
 UIProcess/ProvisionalPageProxy.cpp
 UIProcess/RemotePageDrawingAreaProxy.cpp
 UIProcess/RemotePageFullscreenManagerProxy.cpp
-UIProcess/RemotePageMediaSessionManagerProxy.cpp
 UIProcess/RemotePagePlaybackSessionManagerProxy.cpp
 UIProcess/RemotePageProxy.cpp
 UIProcess/RemotePageScreenOrientationManagerProxy.cpp
@@ -433,6 +436,8 @@ UIProcess/RemotePageVideoPresentationManagerProxy.cpp
 UIProcess/RemotePageWebAuthenticatorCoordinatorProxy.cpp
 UIProcess/RemotePageWebDeviceOrientationUpdateProviderProxy.cpp
 UIProcess/ResponsivenessTimer.cpp
+UIProcess/SecurityFlagsController.cpp
+UIProcess/SessionHistoryTraversalQueue.cpp
 UIProcess/SpeechRecognitionRemoteRealtimeMediaSource.cpp
 UIProcess/SpeechRecognitionRemoteRealtimeMediaSourceManager.cpp
 UIProcess/SpeechRecognitionServer.cpp
@@ -486,6 +491,7 @@ UIProcess/WebProcessProxy.cpp @cost:8
 UIProcess/WebScreenOrientationManagerProxy.cpp
 UIProcess/WebURLSchemeHandler.cpp
 UIProcess/WebURLSchemeTask.cpp @cost:3
+UIProcess/WellKnownResourceFetcher.cpp
 
 UIProcess/API/APIAttachment.cpp
 UIProcess/API/APIContentRuleList.cpp
@@ -504,7 +510,6 @@ UIProcess/API/APIHTTPCookieStore.cpp
 UIProcess/API/APIHitTestResult.cpp
 UIProcess/API/APIInspectorConfiguration.cpp
 UIProcess/API/APIInspectorExtension.cpp
-UIProcess/API/APIJSBuffer.cpp
 UIProcess/API/APIJSHandle.cpp
 UIProcess/API/APINavigation.cpp
 UIProcess/API/APINavigationData.cpp
@@ -589,6 +594,7 @@ UIProcess/Authentication/WebProtectionSpace.cpp
 
 UIProcess/Automation/BidiBrowserAgent.cpp @no-unify-when(bundle<=8)
 UIProcess/Automation/BidiBrowsingContextAgent.cpp @no-unify-when(bundle<=8)
+UIProcess/Automation/BidiDigitalCredentialsAgent.cpp @no-unify-when(bundle<=8)
 UIProcess/Automation/BidiPermissionsAgent.cpp @no-unify-when(bundle<=8)
 UIProcess/Automation/BidiScriptAgent.cpp @no-unify-when(bundle<=8)
 UIProcess/Automation/BidiSessionAgent.cpp @no-unify-when(bundle<=8)
@@ -612,6 +618,7 @@ UIProcess/Extensions/WebExtensionDeclarativeNetRequestSQLiteStore.cpp
 UIProcess/Extensions/WebExtensionMatchPattern.cpp
 UIProcess/Extensions/WebExtensionStorageSQLiteStore.cpp
 
+UIProcess/Extensions/API/WebExtensionContextAPIAlarms.cpp
 UIProcess/Extensions/API/WebExtensionContextAPIDeclarativeNetRequest.cpp
 UIProcess/Extensions/API/WebExtensionContextAPIStorage.cpp @cost:3
 
@@ -628,6 +635,7 @@ UIProcess/Model/ModelProcessProxy.cpp
 
 UIProcess/Inspector/FrameInspectorTargetProxy.cpp
 UIProcess/Inspector/InspectorTargetProxy.cpp @cost:3
+UIProcess/Inspector/InspectorCookieStoreHelpers.cpp
 UIProcess/Inspector/PageInspectorTargetProxy.cpp @cost:3
 UIProcess/Inspector/RemoteWebInspectorUIProxy.cpp
 UIProcess/Inspector/WasmDebuggerDebuggable.cpp
@@ -639,6 +647,7 @@ UIProcess/Inspector/WebPageDebuggable.cpp
 UIProcess/Inspector/WebPageInspectorController.cpp
 
 UIProcess/Inspector/Agents/InspectorBrowserAgent.cpp
+UIProcess/Inspector/Agents/InspectorStorageAgent.cpp
 UIProcess/Inspector/Agents/ProxyingNetworkAgent.cpp
 UIProcess/Inspector/Agents/ProxyingPageAgent.cpp
 
@@ -669,11 +678,14 @@ UIProcess/WebAuthentication/Mock/MockHidService.cpp
 
 UIProcess/WebAuthentication/AuthenticatorTransportService.cpp
 UIProcess/WebAuthentication/Authenticator.cpp
+UIProcess/WebAuthentication/RelatedOriginsValidator.cpp
 UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy.cpp
 UIProcess/WebAuthentication/WebAuthenticationRequestData.cpp
 
 UIProcess/WebsiteData/EnhancedSecuritySitesHolder.cpp
 UIProcess/WebsiteData/EnhancedSecuritySitesPersistence.cpp
+UIProcess/WebsiteData/IsolatedSitePersistence.cpp
+UIProcess/WebsiteData/IsolatedSiteStore.cpp
 UIProcess/WebsiteData/WebDeviceOrientationAndMotionAccessController.cpp
 UIProcess/WebsiteData/WebsiteDataRecord.cpp
 UIProcess/WebsiteData/WebsiteDataStore.cpp @cost:5
@@ -701,6 +713,12 @@ WebProcess/EncryptedMedia/MediaKeySystemPermissionRequestManager.cpp
 
 WebProcess/Extensions/WebExtensionContextProxy.cpp
 WebProcess/Extensions/WebExtensionControllerProxy.cpp
+
+WebProcess/Extensions/API/WebExtensionAPIAlarms.cpp
+WebProcess/Extensions/API/WebExtensionAPIRuntime.cpp
+WebProcess/Extensions/API/WebExtensionAPINamespace.cpp
+WebProcess/Extensions/API/WebExtensionAPITest.cpp
+WebProcess/Extensions/API/WebExtensionAPIWebPageNamespace.cpp
 
 WebProcess/FileAPI/BlobRegistryProxy.cpp
 
@@ -967,7 +985,6 @@ WebProcess/XR/PlatformXRSystemProxy.cpp
 AudioVideoRendererRemoteMessageReceiverMessageReceiver.cpp
 IPCConnectionTesterMessageReceiver.cpp
 IPCStreamTesterMessageReceiver.cpp
-IPCStreamTesterProxyMessageReceiver.cpp
 IPCTesterMessageReceiver.cpp
 IPCTesterReceiverMessageReceiver.cpp
 ModelProcessModelPlayerManagerProxyMessageReceiver.cpp
@@ -1025,6 +1042,7 @@ ServiceWorkerDownloadTaskMessageReceiver.cpp
 WebBroadcastChannelRegistryMessageReceiver.cpp
 WebFrameMessageReceiver.cpp
 WebFrameProxyMessageReceiver.cpp @cost:10
+WebFrameProxyFromNetworkProcessMessageReceiver.cpp @cost:10
 WebLockRegistryProxyMessageReceiver.cpp @cost:10
 WebPermissionControllerMessageReceiver.cpp
 WebPermissionControllerProxyMessageReceiver.cpp @cost:10

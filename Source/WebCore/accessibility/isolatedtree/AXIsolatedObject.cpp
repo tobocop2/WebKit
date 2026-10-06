@@ -180,7 +180,6 @@ bool isDefaultValue(AXProperty property, AXPropertyValueVariant& value)
         [](std::unique_ptr<AXTextRuns>& typedValue) { return !typedValue || !typedValue->size(); },
         [](RetainPtr<CTFontRef>& typedValue) { return !typedValue; },
         [](FontOrientation typedValue) { return typedValue == FontOrientation::Horizontal; },
-        [](AXTextRunLineID typedValue) { return !typedValue; },
         [](WallTime& time) { return !time; },
         [](ElementName& name) { return name == ElementName::Unknown; },
         [](DateComponentsType& typedValue) { return typedValue == DateComponentsType::Invalid; },
@@ -874,7 +873,7 @@ RefPtr<AXIsolatedObject> AXIsolatedObject::approximateHitTest(const IntPoint& po
             // RemoteFrames don't have this problem since they have a wrapper that points to the remote accessibility
             // object, and the frameworks recursively hit test in the bridged process.
             // This also helps guard against potential frame wrapper issues, like the one noted in
-            // AXIsolatedTree::applyPendingChangesLocked.
+            // AXIsolatedTree::applyCommittedChanges.
             if (RefPtr crossFrameChild = child->crossFrameChildObject()) {
                 if (RefPtr hitChild = crossFrameChild->approximateHitTest(point))
                     return hitChild;
@@ -1786,9 +1785,10 @@ FloatRect AXIsolatedObject::convertFrameToSpace(const FloatRect& rect, Accessibi
         // screenPosition tracks the document origin, which moves with scroll.
         // The viewport is fixed on screen, so subtract the scroll and content
         // inset offsets that contentsToView baked into screenPosition.
+        // The y coordinate is negated due to the bottom-left origin on macOS.
         if (isScrollArea() && !parent()) {
             auto viewOriginScrollPosition = screenTransform.mapPoint(FloatPoint(tree().frameViewOriginScrollPosition()));
-            screenPosition.move(-roundToInt(viewOriginScrollPosition.x()), -roundToInt(viewOriginScrollPosition.y()));
+            screenPosition.move(roundToInt(viewOriginScrollPosition.x()), -roundToInt(viewOriginScrollPosition.y()));
         }
 
         // Screen coordinates use bottom-left origin (on macOS).
@@ -1910,15 +1910,23 @@ int AXIsolatedObject::insertionPointLineNumber() const
         return 0;
 
     auto selectedMarkerRange = selectedTextMarkerRange();
-    if (selectedMarkerRange.start().isNull() || !selectedMarkerRange.isCollapsed()) {
+    if (!selectedMarkerRange.isCollapsed()) {
         // If the selection is not collapsed, we don't know whether the insertion point is at the start or the end, so return -1.
         return -1;
     }
 
     if (isTextControl()) {
+        if (selectedMarkerRange.start().isNull()) {
+            // A control with no text has nothing for a marker to point at, and a single line for the
+            // caret to be on.
+            return AXTextMarker { *this, 0 }.toTextRunMarker(idOfNextSiblingIncludingIgnoredOrParent()).isValid() ? -1 : 0;
+        }
         RefPtr selectionObject = selectedMarkerRange.start().isolatedObject();
-        if (selectionObject && isAncestorOfObject(*selectionObject))
-            return selectedMarkerRange.start().lineIndex();
+        if (selectionObject && isAncestorOfObject(*selectionObject)) {
+            // Count lines from this control, not from the selection's own editable ancestor, which is a
+            // nested control when one contains the selection (e.g. a <textarea> inside a contenteditable).
+            return selectedMarkerRange.start().lineIndex(objectID());
+        }
     }
     return -1;
 }
@@ -2287,6 +2295,36 @@ bool AXIsolatedObject::isFrameGeometryInitialized() const
 }
 
 #endif // ENABLE_ACCESSIBILITY_LOCAL_FRAME
+
+AXIsolatedObject* AXIsolatedObject::focusedUIElementInAnyLocalFrame() const
+{
+#if ENABLE_ACCESSIBILITY_LOCAL_FRAME
+    // Each frame's isolated tree tracks focus independently in its own focusedNodeID. Follow the
+    // focus down through local-frame boundaries: when a tree's focused node proxies a child local
+    // frame (an AXLocalFrame, for which crossFrameChildObject() is non-null), the real focus lives
+    // inside that child frame, so descend into the child tree's focused node. Returning the deepest
+    // focused node yields the actual focused element (e.g. a text field inside an iframe). This
+    // mirrors the cross-frame walk in AccessibilityObject::focusedUIElementInAnyLocalFrame().
+    RefPtr<AXIsolatedTree> focusTree = &tree();
+    RefPtr focus = focusTree->focusedNode();
+    while (focus) {
+        RefPtr crossFrameChild = focus->crossFrameChildObject();
+        if (!crossFrameChild)
+            break;
+        RefPtr childTree = &crossFrameChild->tree();
+        RefPtr childFocus = childTree->focusedNode();
+        if (!childFocus)
+            break;
+        focusTree = WTF::move(childTree);
+        focus = WTF::move(childFocus);
+    }
+    // focusTree now holds the deepest focused node; return it via objectForID (a raw, non-lifetime-bound
+    // accessor, as parentObject() uses) so we neither leak an uncounted raw pointer nor need unsafeGet().
+    return focusTree->objectForID(focusTree->focusedNodeID());
+#else
+    return tree().objectForID(tree().focusedNodeID());
+#endif
+}
 
 Element* AXIsolatedObject::element() const
 {

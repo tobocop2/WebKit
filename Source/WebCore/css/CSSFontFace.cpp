@@ -40,6 +40,7 @@
 #include "CachedFont.h"
 #include "ContextDestructionObserverInlines.h"
 #include "Document.h"
+#include "FloatConversion.h"
 #include "Font.h"
 #include "FontCache.h"
 #include "FontDescription.h"
@@ -48,6 +49,7 @@
 #include "SVGFontFaceElement.h"
 #include "Settings.h"
 #include "SharedBuffer.h"
+#include "StyleFontMetricsOverride.h"
 #include "StyleKeyword+Mappings.h"
 #include "StylePrimitiveNumericTypes+Conversions.h"
 #include "StylePrimitiveNumericTypes+DeprecatedCSSValueConversion.h"
@@ -62,8 +64,10 @@ DEFINE_ALLOCATOR_WITH_HEAP_IDENTIFIER(CSSFontFace);
 
 static void iterateClients(WeakHashSet<CSSFontFaceClient>& clients, NOESCAPE const Function<void(CSSFontFaceClient&)>& callback)
 {
-    for (auto& client : copyToVectorOf<Ref<CSSFontFaceClient>>(clients))
-        callback(client);
+    for (auto& client : copyToVectorOf<Ref<CSSFontFaceClient>>(clients)) {
+        if (clients.contains(client))
+            callback(client);
+    }
 }
 
 void CSSFontFace::appendSources(CSSFontFace& fontFace, CSSValueList& srcList, ScriptExecutionContext* context, bool isInitiatingElementInUserAgentShadowTree)
@@ -356,6 +360,60 @@ void CSSFontFace::setDisplay(CSSValue& loadingBehaviorValue)
     });
 }
 
+void CSSFontFace::setAscentOverride(CSSValue& value)
+{
+    protect(mutableProperties())->setProperty(CSSPropertyAscentOverride, value);
+
+    FontMetricsOverride ascentOverride;
+    if (auto percentage = Style::deprecatedToStyleFromCSSValue<Style::FontMetricsOverride>(value)->tryValue())
+        ascentOverride = { percentage->value / 100 };
+
+    if (m_metricsOverrides.ascentOverride == ascentOverride)
+        return;
+
+    m_metricsOverrides.ascentOverride = ascentOverride;
+
+    iterateClients(m_clients, [&](CSSFontFaceClient& client) {
+        client.fontPropertyChanged(*this);
+    });
+}
+
+void CSSFontFace::setDescentOverride(CSSValue& value)
+{
+    protect(mutableProperties())->setProperty(CSSPropertyDescentOverride, value);
+
+    FontMetricsOverride descentOverride;
+    if (auto percentage = Style::deprecatedToStyleFromCSSValue<Style::FontMetricsOverride>(value)->tryValue())
+        descentOverride = { percentage->value / 100 };
+
+    if (m_metricsOverrides.descentOverride == descentOverride)
+        return;
+
+    m_metricsOverrides.descentOverride = descentOverride;
+
+    iterateClients(m_clients, [&](CSSFontFaceClient& client) {
+        client.fontPropertyChanged(*this);
+    });
+}
+
+void CSSFontFace::setLineGapOverride(CSSValue& value)
+{
+    protect(mutableProperties())->setProperty(CSSPropertyLineGapOverride, value);
+
+    FontMetricsOverride lineGapOverride;
+    if (auto percentage = Style::deprecatedToStyleFromCSSValue<Style::FontMetricsOverride>(value)->tryValue())
+        lineGapOverride = { percentage->value / 100 };
+
+    if (m_metricsOverrides.lineGapOverride == lineGapOverride)
+        return;
+
+    m_metricsOverrides.lineGapOverride = lineGapOverride;
+
+    iterateClients(m_clients, [&](CSSFontFaceClient& client) {
+        client.fontPropertyChanged(*this);
+    });
+}
+
 AtomString CSSFontFace::family() const
 {
     RefPtr value = dynamicDowncast<CSSFontFamilyNameValue>(properties().getPropertyCSSValue(CSSPropertyFontFamily));
@@ -392,6 +450,21 @@ String CSSFontFace::featureSettings() const
 String CSSFontFace::sizeAdjust() const
 {
     return properties().getPropertyValue(CSSPropertySizeAdjust);
+}
+
+String CSSFontFace::ascentOverride() const
+{
+    return properties().getPropertyValue(CSSPropertyAscentOverride);
+}
+
+String CSSFontFace::descentOverride() const
+{
+    return properties().getPropertyValue(CSSPropertyDescentOverride);
+}
+
+String CSSFontFace::lineGapOverride() const
+{
+    return properties().getPropertyValue(CSSPropertyLineGapOverride);
 }
 
 String CSSFontFace::display() const
@@ -578,11 +651,11 @@ void CSSFontFace::setStatus(Status newStatus)
         break;
     }
 
-    iterateClients(m_clients, [&](CSSFontFaceClient& client) {
-        client.fontStateChanged(*this, m_status, newStatus);
-    });
+    auto oldStatus = std::exchange(m_status, newStatus);
 
-    m_status = newStatus;
+    iterateClients(m_clients, [&](CSSFontFaceClient& client) {
+        client.fontStateChanged(*this, oldStatus, newStatus);
+    });
 
     Seconds blockPeriodTimeout;
     Seconds swapPeriodTimeout;
@@ -736,7 +809,7 @@ RefPtr<Font> CSSFontFace::font(const FontDescription& fontDescription, bool synt
             return Font::create(protect(FontCache::forCurrentThread())->lastResortFallbackFont(fontDescription)->platformData(), Font::Origin::Local, Font::IsInterstitial::Yes, visibility);
         }
         case CSSFontFaceSource::Status::Success: {
-            FontCreationContext fontCreationContext { m_featureSettings, m_fontSelectionCapabilities, fontPaletteValues, fontFeatureValues, m_sizeAdjust };
+            FontCreationContext fontCreationContext { m_featureSettings, m_fontSelectionCapabilities, fontPaletteValues, fontFeatureValues, m_sizeAdjust, m_metricsOverrides };
             if (auto result = source->font(fontDescription, syntheticBold, syntheticItalic, fontCreationContext))
                 return result;
             break;

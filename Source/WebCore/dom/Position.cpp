@@ -88,26 +88,28 @@ static bool hasInlineRun(RenderObject& renderer)
     return false;
 }
 
-static Node* nextRenderedEditable(SUPPRESS_UNCHECKED_LOCAL Node* node)
+static RefPtr<Node> nextRenderedEditable(SUPPRESS_UNCHECKED_LOCAL Node* node)
 {
-    while ((node = nextLeafNode(protect(node)))) {
-        CheckedPtr renderer = node->renderer();
-        if (!renderer || !node->hasEditableStyle())
+    RefPtr currentNode = node;
+    while ((currentNode = nextLeafNode(currentNode))) {
+        CheckedPtr renderer = currentNode->renderer();
+        if (!renderer || !currentNode->hasEditableStyle())
             continue;
         if (hasInlineRun(*renderer))
-            return node;
+            return currentNode;
     }
     return nullptr;
 }
 
-static Node* previousRenderedEditable(SUPPRESS_UNCHECKED_LOCAL Node* node)
+static RefPtr<Node> previousRenderedEditable(SUPPRESS_UNCHECKED_LOCAL Node* node)
 {
-    while ((node = previousLeafNode(protect(node)))) {
-        CheckedPtr renderer = node->renderer();
-        if (!renderer || !node->hasEditableStyle())
+    RefPtr currentNode = node;
+    while ((currentNode = previousLeafNode(currentNode))) {
+        CheckedPtr renderer = currentNode->renderer();
+        if (!renderer || !currentNode->hasEditableStyle())
             continue;
         if (hasInlineRun(*renderer))
-            return node;
+            return currentNode;
     }
     return nullptr;
 }
@@ -636,12 +638,13 @@ static bool endsOfNodeAreVisuallyDistinctPositions(Node* node)
     return !Position::hasRenderedNonAnonymousDescendantsWithHeight(downcast<RenderElement>(*node->renderer()));
 }
 
-static Node* enclosingVisualBoundary(SUPPRESS_UNCHECKED_LOCAL Node* node)
+static RefPtr<Node> enclosingVisualBoundary(SUPPRESS_UNCHECKED_LOCAL Node* node)
 {
-    while (node && !endsOfNodeAreVisuallyDistinctPositions(protect(node)))
-        node = node->parentNode();
+    RefPtr currentNode = node;
+    while (currentNode && !endsOfNodeAreVisuallyDistinctPositions(currentNode))
+        currentNode = currentNode->parentNode();
 
-    return node;
+    return currentNode;
 }
 
 // The first-letter and remaining text are separate renderers but share one DOM
@@ -950,7 +953,7 @@ bool Position::hasRenderedNonAnonymousDescendantsWithHeight(const RenderElement&
             continue;
         }
         if (CheckedPtr renderInline = dynamicDowncast<RenderInline>(*descendant)) {
-            if ((renderInline->isFirstLetter() || isEmptyInline(*renderInline)) && boundingBoxLogicalHeight(renderInline->linesBoundingBox()))
+            if ((renderInline->isFirstLetter() || isEmptyInline(*renderInline)) && boundingBoxLogicalHeight(renderInline->borderBoxRectInContainer()))
                 return true;
             continue;
         }
@@ -1001,7 +1004,7 @@ RefPtr<Node> Position::rootUserSelectAllForNode(Node* node)
 }
 
 // This function should be kept in sync with PositionIterator::isCandidate().
-bool Position::isCandidate() const
+bool Position::isCandidate(AllowUserSelectNone allowUserSelectNone) const
 {
     if (isNull())
         return false;
@@ -1021,13 +1024,13 @@ bool Position::isCandidate() const
 
     if (is<RenderText>(*renderer)) {
         auto [resolvedText, resolvedOffset] = resolvedTextRendererAndOffset();
-        return !nodeIsUserSelectNone(node.get()) && resolvedText && resolvedText->containsCaretOffset(resolvedOffset);
+        return (allowUserSelectNone == AllowUserSelectNone::Yes || !nodeIsUserSelectNone(node.get())) && resolvedText && resolvedText->containsCaretOffset(resolvedOffset);
     }
 
     if (positionBeforeOrAfterNodeIsCandidate(*node)) {
         return ((atFirstEditingPositionForNode() && m_anchorType == PositionIsBeforeAnchor)
             || (atLastEditingPositionForNode() && m_anchorType == PositionIsAfterAnchor))
-            && !nodeIsUserSelectNone(node->parentNode());
+            && (allowUserSelectNone == AllowUserSelectNone::Yes || !nodeIsUserSelectNone(node->parentNode()));
     }
 
     if (is<HTMLHtmlElement>(*m_anchorNode))
@@ -1037,14 +1040,14 @@ bool Position::isCandidate() const
         if (isAnyOf<RenderBlockFlow, RenderGrid, RenderFlexibleBox>(*block)) {
             if (block->logicalHeight() || is<HTMLBodyElement>(*m_anchorNode) || protect(m_anchorNode)->isRootEditableElement()) {
                 if (!Position::hasRenderedNonAnonymousDescendantsWithHeight(*block))
-                    return atFirstEditingPositionForNode() && !Position::nodeIsUserSelectNone(node.get());
-                return protect(m_anchorNode)->hasEditableStyle() && !Position::nodeIsUserSelectNone(node.get()) && atEditingBoundary();
+                    return atFirstEditingPositionForNode() && (allowUserSelectNone == AllowUserSelectNone::Yes  || !Position::nodeIsUserSelectNone(node.get()));
+                return protect(m_anchorNode)->hasEditableStyle() && (allowUserSelectNone == AllowUserSelectNone::Yes || !Position::nodeIsUserSelectNone(node.get())) && atEditingBoundary();
             }
             return false;
         }
     }
 
-    return protect(m_anchorNode)->hasEditableStyle() && !Position::nodeIsUserSelectNone(node.get()) && atEditingBoundary();
+    return protect(m_anchorNode)->hasEditableStyle() && (allowUserSelectNone == AllowUserSelectNone::Yes || !Position::nodeIsUserSelectNone(node.get())) && atEditingBoundary();
 }
 
 bool Position::isRenderedCharacter() const

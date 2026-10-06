@@ -113,6 +113,7 @@ WI.loaded = function()
         WI.targetManager = new WI.TargetManager,
         WI.networkManager = new WI.NetworkManager,
         WI.domStorageManager = new WI.DOMStorageManager,
+        WI.storageManager = new WI.StorageManager,
         WI.indexedDBManager = new WI.IndexedDBManager,
         WI.domManager = new WI.DOMManager,
         WI.cssManager = new WI.CSSManager,
@@ -143,6 +144,7 @@ WI.loaded = function()
     WI.networkManager.addEventListener(WI.NetworkManager.Event.MainFrameDidChange, WI._mainFrameDidChange, WI);
     WI.networkManager.addEventListener(WI.NetworkManager.Event.FrameWasAdded, WI._frameWasAdded, WI);
     WI.browserManager.enable();
+    WI.storageManager.enable();
 
     WI.Frame.addEventListener(WI.Frame.Event.MainResourceDidChange, WI._mainResourceDidChange, WI);
 
@@ -1482,9 +1484,6 @@ WI.showSourceCodeForFrame = function(frameIdentifier, options = {})
 
 WI.showSourceCode = function(sourceCode, options = {})
 {
-    const positionToReveal = options.positionToReveal;
-
-    console.assert(!positionToReveal || positionToReveal instanceof WI.SourceCodePosition, positionToReveal);
     var representedObject = sourceCode;
 
     if (representedObject instanceof WI.Script) {
@@ -1492,7 +1491,24 @@ WI.showSourceCode = function(sourceCode, options = {})
         representedObject = representedObject.resource || representedObject;
     }
 
-    var cookie = positionToReveal ? {lineNumber: positionToReveal.lineNumber, columnNumber: positionToReveal.columnNumber} : {};
+    let cookie = {};
+
+    let positionToReveal = options.positionToReveal;
+    if (positionToReveal) {
+        console.assert(positionToReveal instanceof WI.SourceCodePosition, positionToReveal);
+        cookie.lineNumber = positionToReveal.lineNumber;
+        cookie.columnNumber = positionToReveal.columnNumber;
+    }
+
+    let textRangeToSelect = options.textRangeToSelect;
+    if (textRangeToSelect) {
+        console.assert(textRangeToSelect instanceof WI.TextRange, textRangeToSelect);
+        cookie.startLine = textRangeToSelect.startLine;
+        cookie.startColumn = textRangeToSelect.startColumn;
+        cookie.endLine = textRangeToSelect.endLine;
+        cookie.endColumn = textRangeToSelect.endColumn;
+    }
+
     WI.showRepresentedObject(representedObject, cookie, options);
 };
 
@@ -1929,26 +1945,6 @@ WI._contextMenuRequested = function(event)
         proposedContextMenu.appendItem(WI.unlocalizedString("Reload Web Inspector"), () => {
             InspectorFrontendHost.reopen();
         });
-
-        let protocolSubMenu = proposedContextMenu.appendSubMenuItem(WI.unlocalizedString("Protocol Debugging"), null, false);
-        let isCapturingTraffic = InspectorBackend.activeTracer instanceof WI.CapturingProtocolTracer;
-
-        protocolSubMenu.appendCheckboxItem(WI.unlocalizedString("Capture Trace"), () => {
-            if (isCapturingTraffic)
-                InspectorBackend.activeTracer = null;
-            else
-                InspectorBackend.activeTracer = new WI.CapturingProtocolTracer;
-        }, isCapturingTraffic);
-
-        let trace = InspectorBackend.activeTracer?.trace;
-        if (trace && WI.FileUtilities.canSave(trace.saveMode)) {
-            protocolSubMenu.appendSeparator();
-
-            protocolSubMenu.appendItem(WI.unlocalizedString("Export Trace\u2026"), () => {
-                const forceSaveAs = true;
-                WI.FileUtilities.save(trace.saveMode, trace.saveData, forceSaveAs);
-            }, !isCapturingTraffic);
-        }
     } else {
         const onlyExisting = true;
         proposedContextMenu = WI.ContextMenu.createFromEvent(event, onlyExisting);
@@ -2688,6 +2684,7 @@ WI._resourceCachingDisabledSettingChanged = function(event)
 WI._clearResourceDataOnNavigateSettingChanged = function(event)
 {
     for (let target of WI.targets) {
+        // COMPATIBILITY (macOS 26.4, iOS 26.4): Network.setClearResourceDataOnNavigate did not exist yet.
         if (target.hasCommand("Network.setClearResourceDataOnNavigate"))
             target.NetworkAgent.setClearResourceDataOnNavigate(WI.settings.clearNetworkOnNavigate.value);
     }
@@ -2899,7 +2896,7 @@ WI.linkifyURLAsNode = function(url, linkText, className)
 WI.linkifyStringAsFragmentWithCustomLinkifier = function(string, linkifier)
 {
     var container = document.createDocumentFragment();
-    var linkStringRegEx = /(?:[a-zA-Z][a-zA-Z0-9+.-]{2,}:\/\/|www\.)[\w$\-_+*'=\|\/\\(){}[\]%@&#~,:;.!?]{2,}[\w$\-_+*=\|\/\\({%@&#~]/;
+    let linkStringRegEx = /(?:[a-zA-Z][a-zA-Z0-9+.-]{2,}:\/\/|www\.)[\w$\-_+*'=|/\\(){}[\]%@&#~,:;.!?]{2,}[\w$\-_+*=|/\\({%@&#~]/;
     var lineColumnRegEx = /:(\d+)(:(\d+))?$/;
 
     while (string) {
@@ -3213,6 +3210,14 @@ Object.defineProperty(WI, "targets",
 WI.assumingMainTarget = function()
 {
     return WI.mainTarget;
+};
+
+// Site Isolation runs cross-origin iframes in separate WebContent processes, each surfaced to the
+// frontend as its own WI.FrameTarget (rather than a WI.Frame in the page tree). The presence of any
+// FrameTarget is therefore the signal that Site Isolation is active for this inspection.
+WI.isSiteIsolationEnabled = function()
+{
+    return WI.targets.some((target) => target instanceof WI.FrameTarget);
 };
 
 WI.reset = async function()

@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2015-2021 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -44,6 +45,7 @@ namespace DFGIntegerRangeOptimizationPhaseInternal {
 static constexpr bool verbose = false;
 }
 const unsigned giveUpThreshold = 50;
+constexpr size_t relationshipListInlineCapacity = 8;
 
 int64_t NODELETE clampedSumImpl() { return 0; }
 
@@ -54,12 +56,12 @@ int64_t NODELETE clampedSumImpl(int left, Args... args)
 }
 
 template<typename... Args>
-int clampedSum(Args... args)
+int NODELETE clampedSum(Args... args)
 {
     int64_t result = clampedSumImpl(args...);
-    return static_cast<int>(std::min(
+    return static_cast<int>(WTF::min(
         static_cast<int64_t>(std::numeric_limits<int>::max()),
-        std::max(
+        WTF::max(
             static_cast<int64_t>(std::numeric_limits<int>::min()),
             result)));
 }
@@ -221,7 +223,7 @@ public:
             && m_right == other.m_right;
     }
 
-    bool isEquivalentTo(const Relationship& other) const
+    bool NODELETE isEquivalentTo(const Relationship& other) const
     {
         if (m_left != other.m_left || m_kind != other.m_kind)
             return false;
@@ -446,7 +448,7 @@ public:
     // In some cases, it will do something conservative. It's always safe for this to return
     // *this, or to return other. It'll do that sometimes, mainly to accelerate convergence for
     // things that we don't think are important enough to slow down the analysis.
-    Relationship filter(const Relationship& other) const
+    Relationship NODELETE filter(const Relationship& other) const
     {
         // We are only interested in merging relationships over the same nodes.
         ASSERT(sameNodesAs(other));
@@ -520,7 +522,7 @@ public:
         if (m_kind == LessThan) {
             if (other.m_kind == LessThan) {
                 return Relationship(
-                    m_left, m_right, LessThan, std::min(m_offset, other.m_offset));
+                    m_left, m_right, LessThan, WTF::min(m_offset, other.m_offset));
             }
             
             ASSERT(other.m_kind == GreaterThan);
@@ -543,7 +545,7 @@ public:
     // return this or it may return something else, but whatever it returns, it will have the same nodes as
     // this. This is not automatically done by filter() because it currently only makes sense to call this
     // during a very particular part of setOneSide().
-    Relationship filterConstant(const Relationship& other) const
+    Relationship NODELETE filterConstant(const Relationship& other) const
     {
         ASSERT(m_left == other.m_left);
         ASSERT(m_right->isInt32Constant());
@@ -587,7 +589,7 @@ public:
         return Relationship();
     }
     
-    int minValueOfLeft() const
+    int NODELETE minValueOfLeft() const
     {
         if (m_left->isInt32Constant())
             return m_left->asInt32();
@@ -605,7 +607,7 @@ public:
         return clampedSum(minRightValue, m_offset);
     }
     
-    int maxValueOfLeft() const
+    int NODELETE maxValueOfLeft() const
     {
         if (m_left->isInt32Constant())
             return m_left->asInt32();
@@ -658,7 +660,7 @@ public:
     }
     
 private:
-    Relationship mergeImpl(const Relationship& other) const
+    Relationship NODELETE mergeImpl(const Relationship& other) const
     {
         ASSERT(sameNodesAs(other));
         ASSERT(m_kind != GreaterThan);
@@ -719,12 +721,12 @@ private:
                 // -1, 0, or 1.
                 
                 // First figure out what offset we'd like to use.
-                int bestOffset = std::max(m_offset, other.m_offset);
+                int bestOffset = WTF::max(m_offset, other.m_offset);
                 
                 // We have something like @a < @b + 2. We can't represent this under the
                 // -1,0,1 rule.
                 if (isGeneralOffset(bestOffset))
-                    return Relationship(m_left, m_right, LessThan, std::max(bestOffset, -1));
+                    return Relationship(m_left, m_right, LessThan, WTF::max(bestOffset, -1));
                 
                 return Relationship();
             }
@@ -748,11 +750,11 @@ private:
             if (sumOverflows<int32_t>(other.m_offset, 1))
                 return Relationship();
 
-            int bestOffset = std::max(m_offset, other.m_offset + 1);
+            int bestOffset = WTF::max(m_offset, other.m_offset + 1);
             
             // We have something like @a < @b + 2. We can't do it.
             if (isGeneralOffset(bestOffset))
-                return Relationship(m_left, m_right, LessThan, std::max(bestOffset, -1));
+                return Relationship(m_left, m_right, LessThan, WTF::max(bestOffset, -1));
 
             return Relationship();
         }
@@ -774,7 +776,7 @@ private:
         Relationship lessThan;
         Relationship greaterThan;
         
-        int lessThanEqOffset = std::max(m_offset, other.m_offset);
+        int lessThanEqOffset = WTF::max(m_offset, other.m_offset);
         if (lessThanEqOffset >= -2 && lessThanEqOffset <= 0) {
             lessThan = Relationship(
                 m_left, other.m_right, LessThan, lessThanEqOffset + 1);
@@ -782,7 +784,7 @@ private:
             ASSERT(isGeneralOffset(lessThan.offset()));
         }
         
-        int greaterThanEqOffset = std::min(m_offset, other.m_offset);
+        int greaterThanEqOffset = WTF::min(m_offset, other.m_offset);
         if (greaterThanEqOffset >= 0 && greaterThanEqOffset <= 2) {
             greaterThan = Relationship(
                 m_left, other.m_right, GreaterThan, greaterThanEqOffset - 1);
@@ -1019,24 +1021,63 @@ public:
     {
     }
 
-    std::optional<std::tuple<int32_t, int32_t>> rangeFor(Node* node)
+    struct RangeBound {
+        int32_t value;
+        Node* proofLeft { nullptr };
+        Node* proofRight { nullptr };
+    };
+
+    std::optional<std::tuple<RangeBound, RangeBound>> NODELETE rangeFor(Node* node)
     {
         if (node->isInt32Constant()) {
             int32_t value = node->asInt32();
-            return std::tuple { value, value };
+            return std::tuple { RangeBound { value }, RangeBound { value } };
         }
 
         auto iter = m_relationships.find(node);
         if (iter == m_relationships.end())
             return std::nullopt;
 
-        int32_t minValue = std::numeric_limits<int32_t>::min();
-        int32_t maxValue = std::numeric_limits<int32_t>::max();
-        for (Relationship relationship : iter->value) {
-            minValue = std::max(minValue, relationship.minValueOfLeft());
-            maxValue = std::min(maxValue, relationship.maxValueOfLeft());
+        RangeBound minBound { std::numeric_limits<int32_t>::min() };
+        RangeBound maxBound { std::numeric_limits<int32_t>::max() };
+        for (const Relationship& relationship : iter->value) {
+            int32_t candidateMin = relationship.minValueOfLeft();
+            if (candidateMin > minBound.value) {
+                minBound.value = candidateMin;
+                minBound.proofLeft = relationship.left().node();
+                minBound.proofRight = relationship.right().node();
+            }
+            int32_t candidateMax = relationship.maxValueOfLeft();
+            if (candidateMax < maxBound.value) {
+                maxBound.value = candidateMax;
+                maxBound.proofLeft = relationship.left().node();
+                maxBound.proofRight = relationship.right().node();
+            }
         }
-        return std::tuple { minValue, maxValue };
+        return std::tuple { minBound, maxBound };
+    }
+
+    // Pin the upstream nodes referenced by the proof relationships behind one
+    // or more range bounds. Call before flipping a checked op to
+    // Arith::Unchecked. Prevents later phases (DCE, etc.) from removing the
+    // producers IRO consulted.
+    //
+    // FIXME: NodeMustGenerate is sticky. If the IRO-unmarked consumer later
+    // dies, its pinned dependency stays alive uselessly. Switch to
+    // reference-counted effect edges (from the unmarked node to each pinned
+    // producer, counted by DCE) so the pin self-cleans when the consumer is removed.
+    template<typename... Bounds>
+    void pinRangeBounds(const Bounds&... bounds)
+    {
+        (pinRangeBoundProof(bounds), ...);
+    }
+
+    void pinRangeBoundProof(const RangeBound& bound)
+    {
+        if (Node* right = bound.proofRight; right && !right->isConstant())
+            right->mergeFlags(NodeMustGenerate);
+        if (Node* left = bound.proofLeft; left && !left->isConstant())
+            left->mergeFlags(NodeMustGenerate);
     }
 
     // Be careful: do not use this to infer a relationship that will not be pruned later,
@@ -1149,7 +1190,8 @@ public:
         bool changed = true;
         while (changed) {
             ++m_iterations;
-            if (m_iterations >= giveUpThreshold) {
+
+            if (outOfWorkBudget() || m_iterations >= giveUpThreshold) {
                 // This case is not necessarily wrong but it can be a sign that this phase
                 // does not converge. The value giveUpThreshold was chosen emperically based on
                 // current tests and real world JS.
@@ -1162,6 +1204,9 @@ public:
 
             changed = false;
             for (unsigned postOrderIndex = postOrder.size(); postOrderIndex--;) {
+                if (outOfWorkBudget()) [[unlikely]]
+                    return false;
+
                 BasicBlock* block = postOrder[postOrderIndex];
                 DFG_ASSERT(
                     m_graph, nullptr,
@@ -1268,19 +1313,16 @@ public:
 
                     if (relationshipForTrue.size() || relationshipForFalse.size()) {
                         RelationshipMap forTrue = m_relationships;
-                        RelationshipMap forFalse = m_relationships;
-
                         for (auto relationship : relationshipForTrue) {
                             dataLogLnIf(DFGIntegerRangeOptimizationPhaseInternal::verbose, "Dealing with true: ", relationship);
                             setRelationship(forTrue, relationship);
                         }
+                        changed |= mergeTo(forTrue, branchData->taken.block);
                         for (auto relationship : relationshipForFalse) {
                             dataLogLnIf(DFGIntegerRangeOptimizationPhaseInternal::verbose, "Dealing with false: ", relationship);
-                            setRelationship(forFalse, relationship);
+                            setRelationship(m_relationships, relationship);
                         }
-
-                        changed |= mergeTo(forTrue, branchData->taken.block);
-                        changed |= mergeTo(forFalse, branchData->notTaken.block);
+                        changed |= mergeTo(m_relationships, branchData->notTaken.block);
                         alreadyMerged = true;
                     }
                 }
@@ -1311,7 +1353,9 @@ public:
                     auto range = rangeFor(node->child1().node());
                     if (!range)
                         break;
-                    auto [minValue, maxValue] = range.value();
+                    auto [minBound, maxBound] = range.value();
+                    int32_t minValue = minBound.value;
+                    int32_t maxValue = maxBound.value;
 
                     executeNode(block->at(nodeIndex));
 
@@ -1323,12 +1367,15 @@ public:
                     bool absIsUnchecked = !shouldCheckOverflow(node->arithMode());
                     if (maxValue < 0 || (absIsUnchecked && maxValue <= 0)) {
                         node->convertToArithNegate();
-                        if (absIsUnchecked || minValue > std::numeric_limits<int>::min())
+                        if (absIsUnchecked || minValue > std::numeric_limits<int>::min()) {
+                            pinRangeBounds(minBound, maxBound);
                             node->setArithMode(Arith::Unchecked);
+                        }
                         changed = true;
                         continue;
                     }
                     if (minValue > std::numeric_limits<int>::min()) {
+                        pinRangeBounds(minBound);
                         node->setArithMode(Arith::Unchecked);
                         changed = true;
                         continue;
@@ -1345,12 +1392,16 @@ public:
                     auto leftRange = rangeFor(node->child1().node());
                     if (!leftRange)
                         break;
-                    auto [leftMinValue, leftMaxValue] = leftRange.value();
+                    auto [leftMin, leftMax] = leftRange.value();
+                    int32_t leftMinValue = leftMin.value;
+                    int32_t leftMaxValue = leftMax.value;
 
                     auto rightRange = rangeFor(node->child2().node());
                     if (!rightRange)
                         break;
-                    auto [rightMinValue, rightMaxValue] = rightRange.value();
+                    auto [rightMin, rightMax] = rightRange.value();
+                    int32_t rightMinValue = rightMin.value;
+                    int32_t rightMaxValue = rightMax.value;
 
                     dataLogLnIf(DFGIntegerRangeOptimizationPhaseInternal::verbose, "    leftMinValue = ", leftMinValue, ", leftMaxValue = ", leftMaxValue, ", rightMinValue = ", rightMinValue, ", rightMaxValue = ", rightMaxValue);
 
@@ -1368,6 +1419,7 @@ public:
 
                     dataLogLnIf(DFGIntegerRangeOptimizationPhaseInternal::verbose, "    It's in bounds.");
 
+                    pinRangeBounds(leftMin, leftMax, rightMin, rightMax);
                     executeNode(block->at(nodeIndex));
                     node->setArithMode(Arith::Unchecked);
                     changed = true;
@@ -1383,12 +1435,16 @@ public:
                     auto leftRange = rangeFor(node->child1().node());
                     if (!leftRange)
                         break;
-                    auto [leftMinValue, leftMaxValue] = leftRange.value();
+                    auto [leftMin, leftMax] = leftRange.value();
+                    int32_t leftMinValue = leftMin.value;
+                    int32_t leftMaxValue = leftMax.value;
 
                     auto rightRange = rangeFor(node->child2().node());
                     if (!rightRange)
                         break;
-                    auto [rightMinValue, rightMaxValue] = rightRange.value();
+                    auto [rightMin, rightMax] = rightRange.value();
+                    int32_t rightMinValue = rightMin.value;
+                    int32_t rightMaxValue = rightMax.value;
 
                     dataLogLnIf(DFGIntegerRangeOptimizationPhaseInternal::verbose, "    leftMinValue = ", leftMinValue, ", leftMaxValue = ", leftMaxValue, ", rightMinValue = ", rightMinValue, ", rightMaxValue = ", rightMaxValue);
 
@@ -1406,6 +1462,7 @@ public:
 
                     dataLogLnIf(DFGIntegerRangeOptimizationPhaseInternal::verbose, "    It's in bounds.");
 
+                    pinRangeBounds(leftMin, leftMax, rightMin, rightMax);
                     executeNode(block->at(nodeIndex));
                     node->setArithMode(Arith::Unchecked);
                     changed = true;
@@ -1421,12 +1478,16 @@ public:
                     auto leftRange = rangeFor(node->child1().node());
                     if (!leftRange)
                         break;
-                    auto [leftMinValue, leftMaxValue] = leftRange.value();
+                    auto [leftMin, leftMax] = leftRange.value();
+                    int32_t leftMinValue = leftMin.value;
+                    int32_t leftMaxValue = leftMax.value;
 
                     auto rightRange = rangeFor(node->child2().node());
                     if (!rightRange)
                         break;
-                    auto [rightMinValue, rightMaxValue] = rightRange.value();
+                    auto [rightMin, rightMax] = rightRange.value();
+                    int32_t rightMinValue = rightMin.value;
+                    int32_t rightMaxValue = rightMax.value;
 
                     dataLogLnIf(DFGIntegerRangeOptimizationPhaseInternal::verbose, "    leftMinValue = ", leftMinValue, ", leftMaxValue = ", leftMaxValue, ", rightMinValue = ", rightMinValue, ", rightMaxValue = ", rightMaxValue);
 
@@ -1446,14 +1507,17 @@ public:
 
                     executeNode(block->at(nodeIndex));
                     if (node->arithMode() == Arith::CheckOverflow) {
+                        pinRangeBounds(leftMin, leftMax, rightMin, rightMax);
                         node->setArithMode(Arith::Unchecked);
                         changed = true;
                     } else {
                         // If both sign are the same, negative zero never appears.
                         if (leftMinValue >= 0 && rightMinValue >= 0) {
+                            pinRangeBounds(leftMin, leftMax, rightMin, rightMax);
                             node->setArithMode(Arith::Unchecked);
                             changed = true;
                         } else if (leftMaxValue < 0 && rightMaxValue < 0) {
+                            pinRangeBounds(leftMin, leftMax, rightMin, rightMax);
                             node->setArithMode(Arith::Unchecked);
                             changed = true;
                         }
@@ -1533,6 +1597,12 @@ public:
     }
 
 private:
+    bool outOfWorkBudget() const
+    {
+        unsigned budget = Options::maxIntegerRangeOptimizationWork();
+        return budget && m_work >= budget;
+    }
+
     void executeNode(Node* node)
     {
         switch (node->op()) {
@@ -1594,7 +1664,7 @@ private:
             
             auto iter = m_relationships.find(node->child1().node());
             if (iter != m_relationships.end()) {
-                Vector<Relationship> toAdd;
+                Vector<Relationship, relationshipListInlineCapacity> toAdd;
                 for (Relationship relationship : iter->value) {
                     // We have:
                     //     add: ArithAdd(@x, C)
@@ -1865,7 +1935,7 @@ private:
         
         auto iter = m_relationships.find(oldNode);
         if (iter != m_relationships.end()) {
-            Vector<Relationship> toAdd;
+            Vector<Relationship, relationshipListInlineCapacity> toAdd;
             for (Relationship relationship : iter->value) {
                 Relationship newRelationship = relationship;
                 // Avoid creating any kind of self-relationship.
@@ -1903,6 +1973,8 @@ private:
         auto result = relationshipMap.add(
             relationship.left(), Vector<Relationship>());
         Vector<Relationship>& relationships = result.iterator->value;
+
+        m_work += relationships.size();
 
         if (relationship.right()->isInt32Constant()) {
             // We want to do some work to refine relationships over constants. This is necessary because
@@ -1973,7 +2045,7 @@ private:
             }
         }
 
-        Vector<Relationship> toAdd;
+        Vector<Relationship, relationshipListInlineCapacity> toAdd;
         bool found = false;
         for (Relationship& otherRelationship : relationships) {
             if (otherRelationship.sameNodesAs(relationship)) {
@@ -2014,8 +2086,11 @@ private:
             }
         }
 
-        if (timeToLive && relationship.kind() != Relationship::Equal) {
-            for (Relationship& possibleEquality : relationshipMap.get(relationship.right())) {
+        auto possibleEqualities = timeToLive && relationship.kind() != Relationship::Equal
+            ? relationshipMap.find(relationship.right())
+            : relationshipMap.end();
+        if (possibleEqualities != relationshipMap.end()) {
+            for (Relationship& possibleEquality : possibleEqualities->value) {
                 if (possibleEquality.kind() != Relationship::Equal
                     || possibleEquality.offset() == std::numeric_limits<int>::min()
                     || possibleEquality.right() == relationship.left())
@@ -2038,7 +2113,8 @@ private:
             }
         }
 
-        if (!found)
+        unsigned maxRelationships = Options::maxIntegerRangeOptimizationRelationshipsPerNode();
+        if (!found && (!maxRelationships || relationships.size() < maxRelationships))
             relationships.append(relationship);
         
         for (Relationship anotherRelationship : toAdd) {
@@ -2079,7 +2155,7 @@ private:
                 }
                 
                 std::sort(values.begin(), values.end());
-                m_relationshipsAtHead[target].add(entry.key, values);
+                m_relationshipsAtHead[target].add(entry.key, WTF::move(values));
             }
             return true;
         }
@@ -2090,7 +2166,7 @@ private:
         // assigned would only happen if we have not processed the node's predecessor. We
         // shouldn't process blocks until we have processed the block's predecessor because we
         // are using reverse postorder.
-        Vector<NodeFlowProjection> toRemove;
+        Vector<NodeFlowProjection, relationshipListInlineCapacity> toRemove;
         bool changed = false;
         for (auto& entry : m_relationshipsAtHead[target]) {
             auto iter = relationshipMap.find(entry.key);
@@ -2100,13 +2176,14 @@ private:
                 continue;
             }
 
-            Vector<Relationship> constantRelationshipsAtHead;
+            Vector<Relationship, relationshipListInlineCapacity> constantRelationshipsAtHead;
             for (Relationship& relationshipAtHead : entry.value) {
                 if (relationshipAtHead.right()->isInt32Constant())
                     constantRelationshipsAtHead.append(relationshipAtHead);
             }
 
-            Vector<Relationship> mergedRelationships;
+            Vector<Relationship, relationshipListInlineCapacity> mergedRelationships;
+            m_work += static_cast<uint64_t>(entry.value.size()) * iter->value.size();
             for (Relationship targetRelationship : entry.value) {
                 for (Relationship sourceRelationship : iter->value) {
                     dataLogLnIf(DFGIntegerRangeOptimizationPhaseInternal::verbose, "  Merging ", targetRelationship, " and ", sourceRelationship, ":");
@@ -2205,6 +2282,8 @@ private:
     InsertionSet m_insertionSet;
 
     unsigned m_iterations { 0 };
+
+    uint64_t m_work { 0 };
 };
     
 } // anonymous namespace

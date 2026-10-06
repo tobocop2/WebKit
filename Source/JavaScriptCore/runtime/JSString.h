@@ -162,8 +162,14 @@ private:
         return TypeInfoBlob::typeInfoBlob(NonArray, defaultTypeInfo().type(), defaultTypeInfo().inlineTypeFlags());
     }
 
+    static constexpr int32_t typeInfoBlobForAtomness(bool isAtom)
+    {
+        auto flags = static_cast<TypeInfo::InlineTypeFlags>(defaultTypeInfo().inlineTypeFlags() | (isAtom ? TypeInfoPerCellBit : 0));
+        return TypeInfoBlob::typeInfoBlob(NonArray, defaultTypeInfo().type(), flags);
+    }
+
     JSString(VM& vm, Ref<StringImpl>&& value)
-        : JSCell(CreatingWellDefinedBuiltinCell, vm.stringStructure.get()->id(), defaultTypeInfoBlob())
+        : JSCell(CreatingWellDefinedBuiltinCell, vm.stringStructure.get()->id(), typeInfoBlobForAtomness(value->isAtom()))
     {
         new (&uninitializedValueInternal()) String(WTF::move(value));
     }
@@ -288,6 +294,30 @@ public:
     inline void value(jsstring_iterator* iterator) const;
 #endif
 
+    // Set only when this string is known to hold an AtomStringImpl. A clear bit proves nothing, since
+    // AtomStringImpl::add can atomize a StringImpl that several JSStrings already share, so never
+    // conclude from it that a string is not an atom. A reader that sees the bit set must not go on to
+    // load the StringImpl: it has no ordering against the impl store, which is the whole reason value
+    // profiling consults the bit.
+    ALWAYS_INLINE bool isDefinitelyAtom() const { return perCellBit(); }
+
+    void markAsAtom() const
+    {
+        ASSERT(!isCompilationThread() && !Thread::mayBeGCThread());
+        ASSERT(!isRope() && getValueImpl()->isAtom());
+        const_cast<JSString*>(this)->setPerCellBit(true);
+    }
+
+    AtomStringImpl* existingAtomOrNull() const
+    {
+        StringImpl* impl = valueInternal().impl();
+        if (!impl->isAtom())
+            return nullptr;
+        // Record for profiling.
+        markAsAtom();
+        return static_cast<AtomStringImpl*>(impl);
+    }
+
     ALWAYS_INLINE JSString* tryReplaceOneChar(JSGlobalObject*, char16_t, JSString* replacement);
     inline std::optional<size_t> tryFindOneChar(JSGlobalObject*, char16_t character, unsigned& startPosition) const;
     inline std::optional<size_t> tryFindLastOneChar(JSGlobalObject*, char16_t character, unsigned& startPosition) const;
@@ -330,6 +360,7 @@ private:
     friend JSString* tryJSSubstringImpl(VM&, JSString*, unsigned, unsigned);
     friend JSString* jsSubstringOfResolved(VM&, GCDeferralContext*, JSString*, unsigned, unsigned);
     friend JSString* jsOwnedString(VM&, const String&);
+    friend class DecoderStringTable;
     friend JSString* jsAtomString(JSGlobalObject*, VM&, JSString*);
     friend JSString* jsAtomString(JSGlobalObject*, VM&, JSString*, JSString*);
     friend JSString* jsAtomString(JSGlobalObject*, VM&, JSString*, JSString*, JSString*);
@@ -353,6 +384,7 @@ public:
     }
 
     // We use lower 3bits of fiber0 for flags. These bits are usable due to alignment, and it is OK even in 32bit architecture.
+    static constexpr unsigned s_maxInternalRopeLength = 3;
     static constexpr uintptr_t is8BitInPointer = static_cast<uintptr_t>(StringImpl::flagIs8Bit());
     static constexpr uintptr_t isSubstringInPointer = 0x2;
     static_assert(is8BitInPointer == 0b100);
@@ -366,11 +398,7 @@ public:
         static constexpr uintptr_t addressMask = (1ULL << OS_CONSTANT(EFFECTIVE_ADDRESS_WIDTH)) - 1;
         JSString* fiber1() const
         {
-#if CPU(LITTLE_ENDIAN)
             return std::bit_cast<JSString*>(WTF::unalignedLoad<uintptr_t>(&m_fiber1Lower) & addressMask);
-#else
-            return std::bit_cast<JSString*>(static_cast<uintptr_t>(m_fiber1Lower) | (static_cast<uintptr_t>(m_fiber1Upper) << 32));
-#endif
         }
 
         void initializeFiber1(JSString* fiber)
@@ -382,11 +410,7 @@ public:
 
         JSString* fiber2() const
         {
-#if CPU(LITTLE_ENDIAN)
             return std::bit_cast<JSString*>(WTF::unalignedLoad<uintptr_t>(&m_fiber1Upper) >> 16);
-#else
-            return std::bit_cast<JSString*>(static_cast<uintptr_t>(m_fiber2Lower) | (static_cast<uintptr_t>(m_fiber2Upper) << 16));
-#endif
         }
         void initializeFiber2(JSString* fiber)
         {
@@ -468,11 +492,12 @@ public:
 
         bool append(JSString* jsString)
         {
+            static_assert(3 == JSRopeString::s_maxInternalRopeLength);
             if (this->hasOverflowed()) [[unlikely]]
                 return false;
             if (!jsString->length())
                 return true;
-            if (m_strings.size() == JSRopeString::s_maxInternalRopeLength)
+            if (m_index == JSRopeString::s_maxInternalRopeLength)
                 expand();
 
             static_assert(JSString::MaxLength == std::numeric_limits<int32_t>::max());
@@ -482,7 +507,7 @@ public:
                 return false;
             }
             ASSERT(static_cast<unsigned>(sum) <= MaxLength);
-            m_strings.append(jsString);
+            m_strings[m_index++] = jsString;
             m_length = static_cast<unsigned>(sum);
             return true;
         }
@@ -491,22 +516,23 @@ public:
         {
             RELEASE_ASSERT(!this->hasOverflowed());
             JSString* result = nullptr;
-            switch (m_strings.size()) {
+            static_assert(3 == JSRopeString::s_maxInternalRopeLength);
+            switch (m_index) {
             case 0: {
                 ASSERT(!m_length);
                 result = jsEmptyString(m_vm);
                 break;
             }
             case 1: {
-                result = asString(m_strings.at(0));
+                result = m_strings[0];
                 break;
             }
             case 2: {
-                result = JSRopeString::create(m_vm, asString(m_strings.at(0)), asString(m_strings.at(1)));
+                result = JSRopeString::create(m_vm, m_strings[0], m_strings[1]);
                 break;
             }
             case 3: {
-                result = JSRopeString::create(m_vm, asString(m_strings.at(0)), asString(m_strings.at(1)), asString(m_strings.at(2)));
+                result = JSRopeString::create(m_vm, m_strings[0], m_strings[1], m_strings[2]);
                 break;
             }
             default:
@@ -514,7 +540,7 @@ public:
                 break;
             }
             ASSERT(result->length() == m_length);
-            m_strings.clear();
+            m_index = 0;
             m_length = 0;
             return result;
         }
@@ -529,7 +555,8 @@ public:
         void expand();
 
         VM& m_vm;
-        MarkedArgumentBuffer m_strings;
+        std::array<JSString*, JSRopeString::s_maxInternalRopeLength> m_strings { };
+        unsigned m_index { 0 };
         unsigned m_length { 0 };
     };
 
@@ -631,8 +658,6 @@ public:
     static constexpr ptrdiff_t offsetOfFiber1Lower() { return OBJECT_OFFSETOF(JSRopeString, m_compactFibers) + CompactFibers::offsetOfFiber1Lower(); }
     static constexpr ptrdiff_t offsetOfFiber2Lower() { return OBJECT_OFFSETOF(JSRopeString, m_compactFibers) + CompactFibers::offsetOfFiber2Lower(); }
 #endif
-
-    static constexpr unsigned s_maxInternalRopeLength = 3;
 
     // If nullOrExecForOOM is null, resolveRope() will be do nothing in the event of an OOM error.
     // The rope value will remain a null string in that case.
@@ -878,9 +903,12 @@ ALWAYS_INLINE void JSString::swapToAtomString(VM& vm, RefPtr<AtomStringImpl>&& a
     // Heap::clearConcurrentRetainedDataIfPossible clears the vector entirely when no JS is executing
     // and no JIT compilations are in progress.
     ASSERT(!isCompilationThread() && !Thread::mayBeGCThread());
+    ASSERT(atom && atom->isAtom());
     String target(WTF::move(atom));
     WTF::storeStoreFence(); // Ensure AtomStringImpl's string is fully initialized when it is exposed to concurrent threads.
     valueInternal().swap(target);
+    WTF::storeStoreFence(); // Publish the impl before the per-cell bit that advertises it.
+    markAsAtom();
     vm.heap.appendPossiblyAccessedStringFromConcurrentThreadsOrGCOwnedDataScope(this, WTF::move(target));
 }
 
@@ -891,16 +919,16 @@ ALWAYS_INLINE Identifier JSString::toIdentifier(JSGlobalObject* globalObject) co
     if (isRope())
         return static_cast<const JSRopeString*>(this)->toIdentifier(globalObject);
     VM& vm = getVM(globalObject);
-    if (valueInternal().impl()->isAtom())
-        return Identifier::fromString(vm, Ref { *static_cast<AtomStringImpl*>(valueInternal().impl()) });
+    if (SUPPRESS_UNCOUNTED_LOCAL AtomStringImpl* atom = existingAtomOrNull())
+        return Identifier::fromString(vm, Ref { *atom });
     if (vm.lastAtomizedIdentifierStringImpl.ptr() != valueInternal().impl()) {
         vm.lastAtomizedIdentifierStringImpl = *valueInternal().impl();
         vm.lastAtomizedIdentifierAtomStringImpl = AtomStringImpl::add(valueInternal().impl()).releaseNonNull();
+        // It is possible that AtomStringImpl::add converts existing valueInternal()'s StringImpl to AtomicStringImpl,
+        // thus we need to recheck atomicity status here.
+        if (!existingAtomOrNull())
+            swapToAtomString(vm, RefPtr { vm.lastAtomizedIdentifierAtomStringImpl.ptr() });
     }
-    // It is possible that AtomStringImpl::add converts existing valueInternal()'s StringImpl to AtomicStringImpl,
-    // thus we need to recheck atomicity status here.
-    if (!valueInternal().impl()->isAtom())
-        swapToAtomString(vm, RefPtr { vm.lastAtomizedIdentifierAtomStringImpl.ptr() });
     return Identifier::fromString(vm, Ref { vm.lastAtomizedIdentifierAtomStringImpl });
 }
 
@@ -910,8 +938,8 @@ ALWAYS_INLINE GCOwnedDataScope<AtomStringImpl*> JSString::toAtomString(JSGlobalO
         getVM(globalObject).verifyCanGC();
     if (isRope())
         return { this, static_cast<const JSRopeString*>(this)->resolveRopeToAtomString(globalObject) };
-    if (valueInternal().impl()->isAtom())
-        return { this, static_cast<AtomStringImpl*>(valueInternal().impl()) };
+    if (SUPPRESS_UNCOUNTED_LOCAL AtomStringImpl* atom = existingAtomOrNull())
+        return { this, atom };
     AtomString atom(valueInternal());
     swapToAtomString(getVM(globalObject), atom.releaseImpl());
     return { this, static_cast<AtomStringImpl*>(valueInternal().impl()) };
@@ -923,8 +951,8 @@ ALWAYS_INLINE GCOwnedDataScope<AtomStringImpl*> JSString::toExistingAtomString(J
         getVM(globalObject).verifyCanGC();
     if (isRope())
         return static_cast<const JSRopeString*>(this)->resolveRopeToExistingAtomString(globalObject);
-    if (valueInternal().impl()->isAtom())
-        return { this, static_cast<AtomStringImpl*>(valueInternal().impl()) };
+    if (SUPPRESS_UNCOUNTED_LOCAL AtomStringImpl* atom = existingAtomOrNull())
+        return { this, atom };
     if (auto atom = AtomStringImpl::lookUp(valueInternal().impl())) {
         swapToAtomString(getVM(globalObject), WTF::move(atom));
         return { this, static_cast<AtomStringImpl*>(valueInternal().impl()) };
@@ -980,6 +1008,13 @@ inline JSString* JSString::getIndex(JSGlobalObject* globalObject, unsigned i)
     auto view = this->view(globalObject);
     RETURN_IF_EXCEPTION(scope, nullptr);
     return jsSingleCharacterString(vm, view[i]);
+}
+
+// (1) Cost of making JSString    : sizeof(JSString) (for new string) + sizeof(StringImpl header) + totalLength
+// (2) Cost of making JSRopeString: sizeof(JSRopeString) + newFiberCount * sizeof(JSString) (for fibers not already wrapped in a JSString)
+ALWAYS_INLINE bool shouldMakeRope(size_t totalLength, unsigned newFiberCount)
+{
+    return StringImpl::headerSize<Latin1Character>() + totalLength >= sizeof(JSRopeString) + (newFiberCount - 1) * sizeof(JSString);
 }
 
 inline JSString* jsString(VM& vm, const String& s)

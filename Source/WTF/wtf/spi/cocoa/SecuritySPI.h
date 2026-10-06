@@ -115,13 +115,16 @@ SecTaskRef SecTaskCreateFromSelf(CFAllocatorRef);
 CFStringRef SecTaskCopySigningIdentifier(SecTaskRef, CFErrorRef *);
 CFTypeRef SecTaskCopyValueForEntitlement(SecTaskRef, CFStringRef entitlement, CFErrorRef*);
 uint32_t SecTaskGetCodeSignStatus(SecTaskRef);
-SecIdentityRef SecIdentityCreate(CFAllocatorRef, SecCertificateRef, SecKeyRef);
 SecAccessControlRef SecAccessControlCreateFromData(CFAllocatorRef, CFDataRef, CFErrorRef*);
 CFDataRef SecAccessControlCopyData(SecAccessControlRef);
 
 CFDataRef SecKeyCopySubjectPublicKeyInfo(SecKeyRef);
 
 OSStatus SecCodeValidateFileResource(SecStaticCodeRef, CFStringRef, CFDataRef, SecCSFlags);
+
+#ifdef SEC_TRUST_HAS_QWAC_BINDING_VERIFY
+CF_RETURNS_RETAINED SecTrustRef SecQWACTLSBindingVerify(CFDataRef, SecTrustRef, CFErrorRef* CF_RETURNS_RETAINED);
+#endif
 
 WTF_EXTERN_C_END
 

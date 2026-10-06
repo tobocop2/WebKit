@@ -71,17 +71,16 @@ void SVGMarkerElement::attributeChanged(const QualifiedName& name, const AtomStr
 {
     auto parseError = SVGParsingError::None;
     switch (name.nodeName()) {
-    case AttributeNames::markerUnitsAttr: {
-        auto propertyValue = SVGPropertyTraits<SVGMarkerUnitsType>::fromString(*this, newValue);
-        if (propertyValue != SVGMarkerUnitsType::Unknown)
-            Ref { m_markerUnits }->setBaseValInternal<SVGMarkerUnitsType>(propertyValue);
-        return;
-    }
+    case AttributeNames::markerUnitsAttr:
+        protect(m_markerUnits)->parseBaseVal<SVGMarkerUnitsType>(*this, newValue);
+        break;
     case AttributeNames::orientAttr: {
+        // orient drives two properties, so it cannot use parseBaseVal().
+        // https://w3c.github.io/svgwg/svg2-draft/types.html#InvalidValues
         auto pair = SVGPropertyTraits<std::pair<SVGAngleValue, SVGMarkerOrientType>>::fromString(*this, newValue);
-        m_orientAngle->setBaseValInternal(pair.first);
-        Ref { m_orientType }->setBaseValInternal(pair.second);
-        return;
+        protect(m_orientAngle)->setBaseValInternal(pair.first);
+        protect(m_orientType)->setBaseValInternal(pair.second == SVGMarkerOrientUnknown ? SVGMarkerOrientAngle : pair.second);
+        break;
     }
     case AttributeNames::refXAttr:
         Ref { m_refX }->setBaseValInternal(SVGLengthValue::construct(SVGLengthMode::Width, newValue, parseError));
@@ -165,7 +164,7 @@ void SVGMarkerElement::setOrientToAuto()
 
 void SVGMarkerElement::setOrientToAngle(const SVGAngle& angle)
 {
-    protect(m_orientAngle)->baseVal()->newValueSpecifiedUnits(angle.unitType(), angle.valueInSpecifiedUnits());
+    protect(protect(m_orientAngle)->baseVal())->newValueSpecifiedUnits(angle.unitType(), angle.valueInSpecifiedUnits());
     invalidateMarkerResource();
 }
 

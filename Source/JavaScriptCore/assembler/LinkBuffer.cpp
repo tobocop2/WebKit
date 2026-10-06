@@ -123,7 +123,7 @@ void LinkBuffer::logJITCodeForJITDump(CodeRef<LinkBufferPtrTag>& codeRef, ASCIIL
         dumpSimpleName(out, simpleName);
         break;
     }
-    auto finalName = out.toCString();
+    auto finalName = out.toUTF8CString();
 
     if (Options::useGdbJITInfo()) [[unlikely]]
         GdbJIT::log(finalName, codeRef);
@@ -155,7 +155,7 @@ LinkBuffer::CodeRef<LinkBufferPtrTag> LinkBuffer::finalizeCodeWithDisassemblyImp
         constexpr auto prefix = "thunk: "_s;
         std::span<char> buffer;
         size_t length = stringLength + prefix.length() + 1;
-        CString label = CString::newUninitialized(length, buffer);
+        auto label = ASCIICString::newUninitialized(length, buffer);
         memcpySpan(buffer, prefix.span8());
         vsnprintf(buffer.subspan(prefix.length()).data(), stringLength + 1, format, argList);
         out.printf("%s", buffer.data());
@@ -235,8 +235,11 @@ public:
         if (m_bufferProvided)
             return;
 
-        auto& threadSpecific = threadSpecificBranchCompactionLinkBuffer();
-        threadSpecific->takeBufferIfLarger(*this);
+        size_t cacheLimit = Options::maximumCachedAssemblerBufferSize();
+        if (!cacheLimit || m_size <= cacheLimit) {
+            auto& threadSpecific = threadSpecificBranchCompactionLinkBuffer();
+            threadSpecific->takeBufferIfLarger(*this);
+        }
 
         if (m_data)
             BranchCompactionLinkBufferMalloc::free(m_data);
@@ -489,8 +492,6 @@ void LinkBuffer::linkCode(MacroAssembler& macroAssembler, JITCompilationEffort e
     RELEASE_ASSERT(roundUpToMultipleOf<Assembler::instructionSize>(code) == code);
 #endif
     performJITMemcpy<jitMemcpyRepatch>(code, buffer.data(), buffer.codeSize());
-#elif CPU(ARM_THUMB2)
-    copyCompactAndLinkCode<uint16_t>(macroAssembler, effort);
 #elif CPU(ARM64)
     copyCompactAndLinkCode<uint32_t>(macroAssembler, effort);
 #endif // !ENABLE(BRANCH_COMPACTION)
@@ -577,7 +578,8 @@ void LinkBuffer::performFinalization()
     
     s_profileCummulativeLinkedSizes[static_cast<unsigned>(m_profile)] += m_size;
     s_profileCummulativeLinkedCounts[static_cast<unsigned>(m_profile)]++;
-    MacroAssembler::cacheFlush(code(), m_size);
+    if (m_cacheFlushOnFinalize == CacheFlushOnFinalize::Yes)
+        MacroAssembler::cacheFlush(code(), m_size);
 }
 
 #if DUMP_LINK_STATISTICS
@@ -602,28 +604,6 @@ void LinkBuffer::dumpLinkStatistics(void* code, size_t initializeSize, size_t fi
 #if DUMP_CODE
 void LinkBuffer::dumpCode(void* code, size_t size)
 {
-#if CPU(ARM_THUMB2)
-    // Dump the generated code in an asm file format that can be assembled and then disassembled
-    // for debugging purposes. For example, save this output as jit.s:
-    //   gcc -arch armv7 -c jit.s
-    //   otool -tv jit.o
-    static unsigned codeCount = 0;
-    unsigned short* tcode = static_cast<unsigned short*>(code);
-    size_t tsize = size / sizeof(short);
-    char nameBuf[128];
-    snprintf(nameBuf, sizeof(nameBuf), "_jsc_jit%u", codeCount++);
-    dataLogF("\t.syntax unified\n"
-            "\t.section\t__TEXT,__text,regular,pure_instructions\n"
-            "\t.globl\t%s\n"
-            "\t.align 2\n"
-            "\t.code 16\n"
-            "\t.thumb_func\t%s\n"
-            "# %p\n"
-            "%s:\n", nameBuf, nameBuf, code, nameBuf);
-        
-    for (unsigned i = 0; i < tsize; i++)
-        dataLogF("\t.short\t0x%x\n", tcode[i]);
-#endif
 }
 #endif
 

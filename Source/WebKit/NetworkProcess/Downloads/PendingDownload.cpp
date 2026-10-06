@@ -53,8 +53,6 @@ PendingDownload::PendingDownload(IPC::Connection* parentProcessConnection, Netwo
     , m_fromDownloadAttribute(fromDownloadAttribute)
     , m_webProcessID(webProcessID)
 {
-    relaxAdoptionRequirement();
-
 #if ENABLE(CONTENT_FILTERING)
 #if HAVE(BROWSERENGINEKIT_WEBCONTENTFILTER) && !HAVE(WEBCONTENTRESTRICTIONS_PATH_SPI)
     WebParentalControlsURLFilter::setSharedParentalControlsURLFilterIfNecessary();
@@ -98,6 +96,7 @@ PendingDownload::PendingDownload(IPC::Connection* parentProcessConnection, Ref<N
     : m_networkLoad(WTF::move(networkLoad))
     , m_downloadID(downloadID)
     , m_parentProcessConnection(parentProcessConnection)
+    , m_fromDownloadAttribute(FromDownloadAttribute::No)
 {
     m_isAllowedToAskUserForCredentials = m_networkLoad->isAllowedToAskUserForCredentials();
 

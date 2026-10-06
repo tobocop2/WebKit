@@ -39,6 +39,7 @@
 #include <JavaScriptCore/TypedArrayInlines.h>
 #include <skia/core/SkData.h>
 #include <skia/core/SkImage.h>
+#include <wtf/glib/GMallocString.h>
 
 #if USE(GBM)
 #include <drm_fourcc.h>
@@ -143,9 +144,10 @@ VideoFrameGStreamer::Info VideoFrameGStreamer::infoFromCaps(const GRefPtr<GstCap
     return { videoInfo, { } };
 }
 
-RefPtr<VideoFrame> VideoFrame::createFromPixelBuffer(Ref<PixelBuffer>&& pixelBuffer, PlatformVideoColorSpace&& colorSpace)
+RefPtr<VideoFrame> VideoFrame::createFromPixelBuffer(Ref<PixelBuffer>&& pixelBuffer, PlatformVideoColorSpace&&)
 {
-    return VideoFrameGStreamer::createFromPixelBuffer(WTF::move(pixelBuffer), { }, 1, { }, WTF::move(colorSpace));
+    // Setting the colorSpace on the caps leads to VP8 full-cycle webcodecs test failures, so don't do that for the time being.
+    return VideoFrameGStreamer::createFromPixelBuffer(WTF::move(pixelBuffer), { }, 1, { }, { });
 }
 
 static RefPtr<ImageGStreamer> convertSampleToImage(const GRefPtr<GstSample>& sample, const GstVideoInfo& videoInfo)
@@ -167,6 +169,9 @@ static RefPtr<ImageGStreamer> convertSampleToImage(const GRefPtr<GstSample>& sam
 
 RefPtr<VideoFrame> VideoFrame::fromNativeImage(NativeImage& image)
 {
+    if (!ensureGStreamerInitialized()) [[unlikely]]
+        return nullptr;
+
     ensureVideoFrameDebugCategoryInitialized();
     GST_CAT_DEBUG(GST_CAT_PERFORMANCE, "Creating VideoFrame from native image");
 
@@ -370,7 +375,7 @@ Ref<VideoFrameGStreamer> VideoFrameGStreamer::create(GRefPtr<GstSample>&& sample
 {
     CreateOptions newOptions = options;
     auto caps = gst_sample_get_caps(sample.get());
-    if (!colorSpace.primaries && doCapsHaveType(caps, GST_VIDEO_CAPS_TYPE_PREFIX))
+    if (!colorSpace.isValid() && doCapsHaveType(caps, GST_VIDEO_CAPS_TYPE_PREFIX))
         colorSpace = videoColorSpaceFromCaps(caps);
 
     if (options.presentationTime.isInvalid())
@@ -405,6 +410,9 @@ RefPtr<VideoFrameGStreamer> VideoFrameGStreamer::createFromPixelBuffer(Ref<Pixel
 
     GstVideoFormat format;
     switch (pixelBuffer->format().pixelFormat) {
+    case PixelFormat::RGBX8:
+        format = GST_VIDEO_FORMAT_RGBx;
+        break;
     case PixelFormat::RGBA8:
         format = GST_VIDEO_FORMAT_RGBA;
         break;
@@ -437,6 +445,14 @@ RefPtr<VideoFrameGStreamer> VideoFrameGStreamer::createFromPixelBuffer(Ref<Pixel
     if (frameRate)
         gst_caps_set_simple(caps.get(), "framerate", GST_TYPE_FRACTION, frameRateNumerator, frameRateDenominator, nullptr);
 
+    GMallocString colorimetry;
+    if (colorSpace.isValid()) {
+        auto gstColorimetry = colorimetryFromColorSpace(colorSpace);
+        colorimetry = GMallocString::unsafeAdoptFromUTF8(gst_video_colorimetry_to_string(&gstColorimetry));
+    }
+    if (!colorimetry.isEmpty())
+        gst_caps_set_simple(caps.get(), "colorimetry", G_TYPE_STRING, colorimetry.utf8(), nullptr);
+
     GRefPtr<GstSample> sample;
     Info info;
 
@@ -454,6 +470,8 @@ RefPtr<VideoFrameGStreamer> VideoFrameGStreamer::createFromPixelBuffer(Ref<Pixel
             "height", G_TYPE_INT, height, nullptr));
         if (frameRate)
             gst_caps_set_simple(outputCaps.get(), "framerate", GST_TYPE_FRACTION, frameRateNumerator, frameRateDenominator, nullptr);
+        if (!colorimetry.isEmpty())
+            gst_caps_set_simple(outputCaps.get(), "colorimetry", G_TYPE_STRING, colorimetry.utf8(), nullptr);
 
         GRefPtr inputSample = adoptGRef(gst_sample_new(buffer.get(), caps.get(), nullptr, nullptr));
         sample = GStreamerVideoFrameConverter::singleton().convert(inputSample, outputCaps);
@@ -463,7 +481,6 @@ RefPtr<VideoFrameGStreamer> VideoFrameGStreamer::createFromPixelBuffer(Ref<Pixel
         info = infoFromCaps(outputCaps);
         GRefPtr buffer = gst_sample_get_buffer(sample.get());
         auto outputBuffer = webkitGstBufferSetVideoFrameMetadata(WTF::move(buffer), options.timeMetadata, options.rotation, options.isMirrored, options.contentHint);
-        gst_buffer_add_video_meta(outputBuffer.get(), GST_VIDEO_FRAME_FLAG_NONE, format, width, height);
         setBufferFields(outputBuffer.get(), options.presentationTime, frameRate);
         sample = adoptGRef(gst_sample_make_writable(sample.leakRef()));
         gst_sample_set_buffer(sample.get(), outputBuffer.get());
@@ -496,7 +513,7 @@ VideoFrameGStreamer::VideoFrameGStreamer(GRefPtr<GstSample>&& sample, const Crea
     if (!GST_IS_BUFFER(gst_sample_get_buffer(m_sample.get())))
         return;
 
-    setMetadataAndContentHint(options.timeMetadata, options.contentHint);
+    setMetadata(options.timeMetadata, options.contentHint, options.colorSpace);
 }
 
 VideoFrameGStreamer::VideoFrameGStreamer(const GRefPtr<GstSample>& sample, const CreateOptions& options, PlatformVideoColorSpace&& colorSpace)
@@ -547,11 +564,11 @@ void VideoFrameGStreamer::setPresentationTime(const MediaTime& presentationTime)
     GST_BUFFER_PTS(buffer) = GST_BUFFER_DTS(buffer) = toGstClockTime(presentationTime);
 }
 
-void VideoFrameGStreamer::setMetadataAndContentHint(std::optional<VideoFrameTimeMetadata> metadata, VideoFrameContentHint hint)
+void VideoFrameGStreamer::setMetadata(std::optional<VideoFrameTimeMetadata> metadata, VideoFrameContentHint hint, std::optional<PlatformVideoColorSpace> colorSpace)
 {
     GRefPtr buffer = gst_sample_get_buffer(m_sample.get());
     RELEASE_ASSERT(buffer);
-    auto modifiedBuffer = webkitGstBufferSetVideoFrameMetadata(WTF::move(buffer), metadata, rotation(), isMirrored(), hint);
+    auto modifiedBuffer = webkitGstBufferSetVideoFrameMetadata(WTF::move(buffer), metadata, rotation(), isMirrored(), hint, colorSpace);
     m_sample = adoptGRef(gst_sample_make_writable(m_sample.leakRef()));
     gst_sample_set_buffer(m_sample.get(), modifiedBuffer.get());
 }
@@ -717,7 +734,7 @@ GRefPtr<GstSample> VideoFrameGStreamer::resizedSample(const IntSize& destination
     return convert(static_cast<GstVideoFormat>(pixelFormat()), destinationSize);
 }
 
-GRefPtr<GstSample> VideoFrameGStreamer::convert(GstVideoFormat format, const IntSize& destinationSize)
+GRefPtr<GstSample> VideoFrameGStreamer::convert(GstVideoFormat format, const IntSize& destinationSize, std::optional<PlatformVideoColorSpace> colorSpace)
 {
     auto* caps = gst_sample_get_caps(m_sample.get());
     const auto* structure = gst_caps_get_structure(caps, 0);
@@ -732,9 +749,15 @@ GRefPtr<GstSample> VideoFrameGStreamer::convert(GstVideoFormat format, const Int
     auto formatName = CStringView::unsafeFromUTF8(gst_video_format_to_string(format));
     GRefPtr outputCaps = adoptGRef(gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, formatName.utf8(), "width", G_TYPE_INT, width, "height", G_TYPE_INT, height, "framerate", GST_TYPE_FRACTION, frameRateNumerator, frameRateDenominator, nullptr));
 
-    if (gst_caps_is_equal(caps, outputCaps.get()))
-        return GRefPtr<GstSample>(m_sample);
+    if (colorSpace) {
+        auto gstColorimetry = colorimetryFromColorSpace(*colorSpace);
+        auto colorimetry = GMallocString::unsafeAdoptFromUTF8(gst_video_colorimetry_to_string(&gstColorimetry));
+        if (!colorimetry.isEmpty())
+            gst_caps_set_simple(outputCaps.get(), "colorimetry", G_TYPE_STRING, colorimetry.utf8(), nullptr);
+    }
 
+    if (gst_caps_is_equal(caps, outputCaps.get()))
+        return m_sample;
     return GStreamerVideoFrameConverter::singleton().convert(m_sample, outputCaps);
 }
 
@@ -795,7 +818,8 @@ void VideoFrameGStreamer::setMemoryTypeFromCaps()
     m_memoryType = MemoryType::System;
 }
 
-#if USE(GBM) && GST_CHECK_VERSION(1, 24, 0)
+#if USE(GBM)
+#if GST_CHECK_VERSION(1, 24, 0)
 RefPtr<DMABufBuffer> VideoFrameGStreamer::getDMABuf()
 {
     if (m_memoryType != MemoryType::DMABuf)
@@ -870,10 +894,88 @@ RefPtr<DMABufBuffer> VideoFrameGStreamer::getDMABuf()
 }
 #endif
 
+Ref<DMABufBuffer> VideoFrameGStreamer::dmabufForQualcommDecoder(const IntSize& size) const
+{
+    // The buffers produced by the Qualcomm decoder contain a single GstMemory which stores the
+    // GBM FD pointing to the decoded frame. The frame format is YUV (NV12). As this is stored
+    // in a single memory the existing DMABuf/YUV layer buffers cannot be used for rendering. So
+    // we rely on the EXT_YUV_target OpenGL ES extension to convert it to a RGB texture for
+    // rendering.
+    auto* buffer = gst_sample_get_buffer(m_sample.get());
+    auto* memory = gst_buffer_peek_memory(buffer, 0);
+    ASSERT(gst_is_fd_memory(memory));
+
+    int fd = gst_fd_memory_get_fd(memory);
+
+    Vector<UnixFileDescriptor> fds;
+    fds.append(UnixFileDescriptor(fd, UnixFileDescriptor::Borrow));
+    fds.append(UnixFileDescriptor(fd, UnixFileDescriptor::Borrow));
+    Vector<uint32_t> offsets;
+    offsets.append(0);
+    Vector<uint32_t> strides;
+
+    // Use stride and plane offsets from GstVideoMeta if available. The Qualcomm decoder
+    // populates these from the C2HandleGBM with the exact values for the allocated GBM buffer,
+    // including the correct UV plane offset (which accounts for slice height alignment).
+    // Providing explicit plane 1 attributes avoids the EGL driver needing to consult the
+    // GBM metadata buffer (meta_buffer_fd) to locate the UV plane, which it cannot access
+    // when importing via EGL_LINUX_DMA_BUF_EXT, causing intermittent green frames.
+    if (const auto* videoMeta = gst_buffer_get_video_meta(buffer); videoMeta && videoMeta->n_planes >= 2) {
+        WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN; // GLib port
+        strides.append(videoMeta->stride[0]);
+        offsets.append(videoMeta->offset[1]);
+        strides.append(videoMeta->stride[1]);
+        WTF_ALLOW_UNSAFE_BUFFER_USAGE_END; // GLib port
+    } else {
+        uint32_t stride = WTF::roundUpToMultipleOf(128, size.width());
+        strides.append(stride);
+        offsets.append(stride * size.height());
+        strides.append(stride);
+    }
+
+    auto dmabufFormat = this->dmaBufFormat();
+    RELEASE_ASSERT(dmabufFormat);
+
+    // Specify DRM_FORMAT_MOD_LINEAR to tell the driver the buffer uses a linear layout.
+    // Without this, the Qualcomm Adreno driver tries to query the GBM metadata buffer
+    // to determine the buffer format (linear vs UBWC/compressed), which fails because
+    // meta_buffer_fd is unavailable through the standard DMA-BUF import path.
+    uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
+    uint32_t fourcc = dmabufFormat->first;
+
+    Ref dmabuf = DMABufBuffer::create({ size, fourcc, WTF::move(fds), WTF::move(offsets), WTF::move(strides), modifier });
+
+    // The driver converts YUV to RGB while sampling, so it needs the frame colorimetry.
+    const auto& videoInfo = info();
+    const auto& colorimetry = GST_VIDEO_INFO_COLORIMETRY(&videoInfo);
+    std::optional<DMABufBuffer::ColorSpace> colorSpace = DMABufBuffer::ColorSpace::Bt601;
+    if (gst_video_colorimetry_matches(&colorimetry, GST_VIDEO_COLORIMETRY_BT709))
+        colorSpace = DMABufBuffer::ColorSpace::Bt709;
+    else if (gst_video_colorimetry_matches(&colorimetry, GST_VIDEO_COLORIMETRY_BT2020) || gst_video_colorimetry_matches(&colorimetry, GST_VIDEO_COLORIMETRY_BT2100_PQ))
+        colorSpace = DMABufBuffer::ColorSpace::Bt2020;
+    else if (gst_video_colorimetry_matches(&colorimetry, GST_VIDEO_COLORIMETRY_SMPTE240M))
+        colorSpace = std::nullopt;
+
+    if (colorSpace) {
+        dmabuf->setColorSpace(*colorSpace);
+
+        auto sampleRange = colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255 ? DMABufBuffer::SampleRange::Full : DMABufBuffer::SampleRange::Narrow;
+        dmabuf->setSampleRange(sampleRange);
+    }
+
+    return dmabuf;
+}
+#endif
+
 VideoFrameContentHint VideoFrameGStreamer::contentHint() const
 {
     auto buffer = gst_sample_get_buffer(m_sample.get());
     return webkitGstBufferGetContentHint(buffer);
+}
+
+PlatformVideoColorSpace VideoFrameGStreamer::nativeColorSpace() const
+{
+    return webkitGstBufferGetNativeColorSpace(gst_sample_get_buffer(m_sample.get()));
 }
 
 bool VideoFrameGStreamer::isEncoded() const

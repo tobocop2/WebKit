@@ -99,7 +99,7 @@ JSFormatter = class JSFormatter
     _appendNewline(node, force)
     {
         if (!force && node.type !== "TemplateElement") {
-            while (node = node.parent) {
+            while ((node = node.parent)) {
                 if (node.type === "TemplateLiteral")
                     return;
             }
@@ -215,9 +215,11 @@ JSFormatter = class JSFormatter
 
     _isRangeWhitespace(from, to)
     {
-        let substring = this._sourceText.substring(from, to);
-        for (let i = 0; i < substring.length; ++i) {
-            if (!JSFormatter.isWhitespace(substring.charCodeAt(i)))
+        if (from > to)
+            [from, to] = [to, from];
+
+        for (let i = from; i < to; ++i) {
+            if (!JSFormatter.isWhitespace(this._sourceText.charCodeAt(i)))
                 return false;
         }
 

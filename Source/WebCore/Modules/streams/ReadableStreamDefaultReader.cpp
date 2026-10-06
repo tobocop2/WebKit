@@ -104,7 +104,7 @@ void ReadableStreamDefaultReader::read(JSDOMGlobalObject& globalObject, Ref<Read
         auto value = internalReader->readForBindings(globalObject);
         if (!value)
             return;
-        auto* promise = downcast<JSC::JSPromise>(value);
+        auto* promise = dynamicDowncast<JSC::JSPromise>(value);
         if (!promise)
             return;
 
@@ -121,7 +121,7 @@ void ReadableStreamDefaultReader::read(JSDOMGlobalObject& globalObject, Ref<Read
             Ref vm = globalObject->vm();
             auto scope = DECLARE_THROW_SCOPE(vm);
             auto resultOrException = convertDictionary<ReadableStreamReadResult>(*globalObject, promiseResult);
-            ASSERT(!resultOrException.hasException(scope));
+            ASSERT(!resultOrException.hasException(scope) || vm->hasPendingTerminationException());
             if (resultOrException.hasException(scope)) {
                 TRY_CLEAR_EXCEPTION(scope, void());
                 return;

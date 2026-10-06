@@ -57,6 +57,7 @@ DECLARE_ALLOCATOR_WITH_HEAP_IDENTIFIER(AccessCase);
 #define JSC_FOR_EACH_ACCESS_TYPE(macro) \
     macro(Load) \
     macro(LoadMegamorphic) \
+    macro(LoadMegamorphicGetter) \
     macro(Transition) \
     macro(StoreMegamorphic) \
     macro(Delete) \
@@ -389,7 +390,7 @@ private:
     void forEachDependentCell(VM&, const Functor&) const;
 
     DECLARE_VISIT_AGGREGATE_WITH_MODIFIER(const);
-    bool visitWeak(VM&) const;
+    bool isStillLive(VM&) const;
     template<typename Visitor> void propagateTransitions(Visitor&) const;
 
     AccessType m_type;

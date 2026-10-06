@@ -31,6 +31,9 @@
 #include "YarrFlags.h"
 #include "YarrUnicodeProperties.h"
 #include <array>
+#include <limits>
+#include <atomic>
+#include <wtf/BitSet.h>
 #include <wtf/CheckedArithmetic.h>
 #include <wtf/HashMap.h>
 #include <wtf/OptionSet.h>
@@ -43,6 +46,12 @@ namespace JSC { namespace Yarr {
 
 struct YarrPattern;
 struct PatternDisjunction;
+
+// Superset of the Latin-1 bytes that can begin a match (a clear bit guarantees no match begins
+// there), or nullopt when no sound filter exists. The filter position is selected from the flags:
+// sticky filters at lastIndex; a non-global non-sticky pattern filters at position 0 (only when
+// ^-anchored and not multiline); any other pattern has no filter. Safe to call on a compiler thread.
+std::optional<WTF::BitSet<256>> computeFirstCharacterBitmap(StringView, OptionSet<Flags>);
 
 enum class CompileMode : uint8_t {
     Legacy,
@@ -463,6 +472,8 @@ struct PatternTerm {
     void dump(PrintStream&, YarrPattern*, unsigned);
 };
 
+using PatternTermList = Vector<PatternTerm, 4, CrashOnOverflow, 8>;
+
 struct PatternAlternative {
     WTF_MAKE_TZONE_ALLOCATED(PatternAlternative);
 public:
@@ -531,7 +542,7 @@ public:
 
     void dump(PrintStream&, YarrPattern*, unsigned);
 
-    Vector<PatternTerm> m_terms;
+    PatternTermList m_terms;
     PatternDisjunction* m_parent;
     unsigned m_minimumSize;
     unsigned m_firstSubpatternId;
@@ -570,8 +581,8 @@ public:
 
 // You probably don't want to be calling these functions directly
 // (please to be calling newlineCharacterClass() et al on your
-// friendly neighborhood YarrPattern instance to get nicely
-// cached copies).
+// friendly neighborhood YarrPattern instance to get the shared
+// instances).
 
 std::unique_ptr<CharacterClass> anycharCreate();
 std::unique_ptr<CharacterClass> newlineCreate();
@@ -583,6 +594,11 @@ std::unique_ptr<CharacterClass> nondigitsCreate();
 std::unique_ptr<CharacterClass> nonspacesCreate();
 std::unique_ptr<CharacterClass> nonwordcharCreate();
 std::unique_ptr<CharacterClass> nonwordUnicodeIgnoreCaseCharCreate();
+
+enum class SharedCharacterClass : uint8_t { AnyChar, Newline, Digits, Spaces, WordChar, WordUnicodeIgnoreCaseChar, NonDigits, NonSpaces, NonWordChar, NonWordUnicodeIgnoreCaseChar };
+// Immutable, created once per process on first use from any thread, never destroyed.
+CharacterClass* sharedCharacterClass(SharedCharacterClass);
+CharacterClass* ensureSharedCharacterClass(std::atomic<CharacterClass*>&, std::unique_ptr<CharacterClass> (*create)());
 
 struct TermChain {
     TermChain(PatternTerm term)
@@ -602,6 +618,7 @@ struct YarrPattern {
         m_numSubpatterns = 0;
         m_initialStartValueFrameLocation = 0;
         m_numDuplicateNamedCaptureGroups = 0;
+        m_maxParenContextFrameSize = 0;
 
         m_containsBackreferences = false;
         m_containsBOL = false;
@@ -610,18 +627,6 @@ struct YarrPattern {
         m_hasCopiedParenSubexpressions = false;
         m_hasNamedCaptureGroups = false;
         m_saveInitialStartValue = false;
-
-        anycharCached = nullptr;
-        newlineCached = nullptr;
-        digitsCached = nullptr;
-        spacesCached = nullptr;
-        wordcharCached = nullptr;
-        wordUnicodeIgnoreCaseCharCached = nullptr;
-        nondigitsCached = nullptr;
-        nonspacesCached = nullptr;
-        nonwordcharCached = nullptr;
-        nonwordUnicodeIgnoreCasecharCached = nullptr;
-        unicodePropertiesCached.clear();
 
         m_disjunctions.clear();
         m_userCharacterClasses.clear();
@@ -635,101 +640,22 @@ struct YarrPattern {
         return m_containsUnsignedLengthPattern;
     }
 
-    CharacterClass* anyCharacterClass()
-    {
-        if (!anycharCached) {
-            m_userCharacterClasses.append(anycharCreate());
-            anycharCached = m_userCharacterClasses.last().get();
-        }
-        return anycharCached;
-    }
-    CharacterClass* newlineCharacterClass()
-    {
-        if (!newlineCached) {
-            m_userCharacterClasses.append(newlineCreate());
-            newlineCached = m_userCharacterClasses.last().get();
-        }
-        return newlineCached;
-    }
-    CharacterClass* digitsCharacterClass()
-    {
-        if (!digitsCached) {
-            m_userCharacterClasses.append(digitsCreate());
-            digitsCached = m_userCharacterClasses.last().get();
-        }
-        return digitsCached;
-    }
-    CharacterClass* spacesCharacterClass()
-    {
-        if (!spacesCached) {
-            m_userCharacterClasses.append(spacesCreate());
-            spacesCached = m_userCharacterClasses.last().get();
-        }
-        return spacesCached;
-    }
-    CharacterClass* wordcharCharacterClass()
-    {
-        if (!wordcharCached) {
-            m_userCharacterClasses.append(wordcharCreate());
-            wordcharCached = m_userCharacterClasses.last().get();
-        }
-        return wordcharCached;
-    }
-    CharacterClass* wordUnicodeIgnoreCaseCharCharacterClass()
-    {
-        if (!wordUnicodeIgnoreCaseCharCached) {
-            m_userCharacterClasses.append(wordUnicodeIgnoreCaseCharCreate());
-            wordUnicodeIgnoreCaseCharCached = m_userCharacterClasses.last().get();
-        }
-        return wordUnicodeIgnoreCaseCharCached;
-    }
-    CharacterClass* nondigitsCharacterClass()
-    {
-        if (!nondigitsCached) {
-            m_userCharacterClasses.append(nondigitsCreate());
-            nondigitsCached = m_userCharacterClasses.last().get();
-        }
-        return nondigitsCached;
-    }
-    CharacterClass* nonspacesCharacterClass()
-    {
-        if (!nonspacesCached) {
-            m_userCharacterClasses.append(nonspacesCreate());
-            nonspacesCached = m_userCharacterClasses.last().get();
-        }
-        return nonspacesCached;
-    }
-    CharacterClass* nonwordcharCharacterClass()
-    {
-        if (!nonwordcharCached) {
-            m_userCharacterClasses.append(nonwordcharCreate());
-            nonwordcharCached = m_userCharacterClasses.last().get();
-        }
-        return nonwordcharCached;
-    }
-    CharacterClass* nonwordUnicodeIgnoreCaseCharCharacterClass()
-    {
-        if (!nonwordUnicodeIgnoreCasecharCached) {
-            m_userCharacterClasses.append(nonwordUnicodeIgnoreCaseCharCreate());
-            nonwordUnicodeIgnoreCasecharCached = m_userCharacterClasses.last().get();
-        }
-        return nonwordUnicodeIgnoreCasecharCached;
-    }
-    CharacterClass* unicodeCharacterClassFor(BuiltInCharacterClassID unicodeClassID)
-    {
-        ASSERT(unicodeClassID >= BuiltInCharacterClassID::BaseUnicodePropertyID);
+    CharacterClass* anyCharacterClass() { return sharedCharacterClass(SharedCharacterClass::AnyChar); }
+    // The DotStarEnclosure's two frame slots (YarrStackSpaceForDotStarEnclosure): the offset the
+    // match started from, and the end of the newline-free span known to follow it.
+    unsigned initialStartFrameLocation() const { return m_initialStartValueFrameLocation; }
+    unsigned noNewlineBeforeFrameLocation() const { return m_initialStartValueFrameLocation + 1; }
 
-        unsigned classID = static_cast<unsigned>(unicodeClassID);
-
-        if (unicodePropertiesCached.find(classID) == unicodePropertiesCached.end()) {
-            m_userCharacterClasses.append(createUnicodeCharacterClassFor(unicodeClassID));
-            CharacterClass* result = m_userCharacterClasses.last().get();
-            unicodePropertiesCached.add(classID, result);
-            return result;
-        }
-
-        return unicodePropertiesCached.get(classID);
-    }
+    CharacterClass* newlineCharacterClass() { return sharedCharacterClass(SharedCharacterClass::Newline); }
+    CharacterClass* digitsCharacterClass() { return sharedCharacterClass(SharedCharacterClass::Digits); }
+    CharacterClass* spacesCharacterClass() { return sharedCharacterClass(SharedCharacterClass::Spaces); }
+    CharacterClass* wordcharCharacterClass() { return sharedCharacterClass(SharedCharacterClass::WordChar); }
+    CharacterClass* wordUnicodeIgnoreCaseCharCharacterClass() { return sharedCharacterClass(SharedCharacterClass::WordUnicodeIgnoreCaseChar); }
+    CharacterClass* nondigitsCharacterClass() { return sharedCharacterClass(SharedCharacterClass::NonDigits); }
+    CharacterClass* nonspacesCharacterClass() { return sharedCharacterClass(SharedCharacterClass::NonSpaces); }
+    CharacterClass* nonwordcharCharacterClass() { return sharedCharacterClass(SharedCharacterClass::NonWordChar); }
+    CharacterClass* nonwordUnicodeIgnoreCaseCharCharacterClass() { return sharedCharacterClass(SharedCharacterClass::NonWordUnicodeIgnoreCaseChar); }
+    CharacterClass* unicodeCharacterClassFor(BuiltInCharacterClassID unicodeClassID) { return sharedUnicodeCharacterClassFor(unicodeClassID); }
 
     unsigned offsetVectorBaseForNamedCaptures() const
     {
@@ -762,6 +688,8 @@ struct YarrPattern {
     bool dotAll() const { return m_flags.contains(Flags::DotAll); }
 
     bool hasDuplicateNamedCaptureGroups() const { return !!m_numDuplicateNamedCaptureGroups; }
+    static constexpr unsigned endAnchoredFixedSizeNotSet = std::numeric_limits<unsigned>::max();
+    bool hasEndAnchoredFixedSize() const { return m_endAnchoredFixedSize != endAnchoredFixedSizeNotSet; }
 
     CompileMode compileMode() const
     {
@@ -785,9 +713,13 @@ struct YarrPattern {
     ExecutionMode m_executionMode { ExecutionMode::IncludeSubpatterns };
     OptionSet<Flags> m_flags;
     SpecificPattern m_specificPattern { SpecificPattern::None };
+    unsigned m_endAnchoredFixedSize { endAnchoredFixedSizeNotSet };
     unsigned m_numSubpatterns { 0 };
     unsigned m_initialStartValueFrameLocation { 0 };
     unsigned m_numDuplicateNamedCaptureGroups { 0 };
+    // Maximum interior frame size (m_callFrameSize - (base+4)) of any repeating
+    // ParenthesesSubpattern term.
+    unsigned m_maxParenContextFrameSize { 0 };
     PatternDisjunction* m_body;
     Vector<std::unique_ptr<PatternDisjunction>, 4> m_disjunctions;
     Vector<std::unique_ptr<CharacterClass>> m_userCharacterClasses;
@@ -804,18 +736,6 @@ struct YarrPattern {
 
 private:
     ErrorCode compile(StringView patternString);
-
-    CharacterClass* anycharCached { nullptr };
-    CharacterClass* newlineCached { nullptr };
-    CharacterClass* digitsCached { nullptr };
-    CharacterClass* spacesCached { nullptr };
-    CharacterClass* wordcharCached { nullptr };
-    CharacterClass* wordUnicodeIgnoreCaseCharCached { nullptr };
-    CharacterClass* nondigitsCached { nullptr };
-    CharacterClass* nonspacesCached { nullptr };
-    CharacterClass* nonwordcharCached { nullptr };
-    CharacterClass* nonwordUnicodeIgnoreCasecharCached { nullptr };
-    UncheckedKeyHashMap<unsigned, CharacterClass*> unicodePropertiesCached;
 };
 
     void indentForNestingLevel(PrintStream&, unsigned);
@@ -842,10 +762,15 @@ private:
         uintptr_t begin; // Not really needed for greedy quantifiers.
         uintptr_t matchAmount; // Not really needed for fixed quantifiers.
         uintptr_t backReferenceSize; // Used by greedy quantifiers to backtrack.
+        // A backward (lookbehind) backreference's span lies left of the cursor;
+        // this holds that span's left edge across the compare walk (the JIT's
+        // forward form gets the equivalent from the moving frontier for free).
+        uintptr_t backwardSpanEdge;
 
         static unsigned beginIndex() { return offsetof(BackTrackInfoBackReference, begin) / sizeof(uintptr_t); }
         static unsigned matchAmountIndex() { return offsetof(BackTrackInfoBackReference, matchAmount) / sizeof(uintptr_t); }
         static unsigned backReferenceSizeIndex() { return offsetof(BackTrackInfoBackReference, backReferenceSize) / sizeof(uintptr_t); }
+        static unsigned backwardSpanEdgeIndex() { return offsetof(BackTrackInfoBackReference, backwardSpanEdge) / sizeof(uintptr_t); }
     };
 
     struct BackTrackInfoAlternative {
@@ -863,15 +788,22 @@ private:
     struct BackTrackInfoParenthesesOnce {
         uintptr_t begin;
         uintptr_t returnAddress;
+        // Address of the code that continues a first-character dispatch chain
+        // when the alternative just entered fails (see the dispatched-alternatives
+        // path in YarrJIT).
+        uintptr_t chainResume;
 
         static unsigned beginIndex() { return offsetof(BackTrackInfoParenthesesOnce, begin) / sizeof(uintptr_t); }
         static unsigned returnAddressIndex() { return offsetof(BackTrackInfoParenthesesOnce, returnAddress) / sizeof(uintptr_t); }
+        static unsigned chainResumeIndex() { return offsetof(BackTrackInfoParenthesesOnce, chainResume) / sizeof(uintptr_t); }
     };
 
     struct BackTrackInfoParenthesesTerminal {
         uintptr_t begin;
+        uintptr_t entryPosition;
 
         static unsigned beginIndex() { return offsetof(BackTrackInfoParenthesesTerminal, begin) / sizeof(uintptr_t); }
+        static unsigned entryPositionIndex() { return offsetof(BackTrackInfoParenthesesTerminal, entryPosition) / sizeof(uintptr_t); }
     };
 
     struct BackTrackInfoParentheses {

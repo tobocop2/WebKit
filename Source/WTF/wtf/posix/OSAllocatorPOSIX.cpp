@@ -162,6 +162,13 @@ void* OSAllocator::tryReserveUncommitted(size_t bytes, Usage usage, void* addres
     if (result)
         while (madvise(result, bytes, MADV_DONTFORK) == -1 && errno == EAGAIN) { }
 #endif
+#ifdef MADV_NOHUGEPAGE
+    // JSC-owned reservations opt out of THP per VMA (not PR_SET_THP_DISABLE, which
+    // exec'd children inherit): under `enabled=always` a 4K touch would otherwise
+    // fault 2MB into these mostly-uncommitted regions.
+    if (result)
+        while (madvise(result, bytes, MADV_NOHUGEPAGE) == -1 && errno == EAGAIN) { }
+#endif
 #else // not OS(LINUX) || OS(HAIKU)
     void* result = tryReserveAndCommit(bytes, usage, address, writable, executable, jitCageEnabled, numGuardPagesToAddOnEachEnd);
 #if HAVE(MADV_FREE_REUSE)
@@ -187,7 +194,7 @@ void* OSAllocator::tryReserveUncommittedAligned(size_t bytes, size_t alignment, 
 {
     ASSERT(hasOneBitSet(alignment) && alignment >= pageSize());
 
-#if PLATFORM(MAC) || USE(APPLE_INTERNAL_SDK) || BUN_MACOSX
+#if PLATFORM(MAC) || USE(APPLE_INTERNAL_SDK) || defined(BUN_MACOSX)
     ASSERT_UNUSED(numGuardPagesToAddOnEachEnd, !numGuardPagesToAddOnEachEnd);
     ASSERT_UNUSED(jitCageEnabled, !jitCageEnabled); // Not supported for mach API.
     vm_prot_t protections = VM_PROT_READ;
@@ -351,7 +358,7 @@ bool OSAllocator::tryProtect(void* address, size_t bytes, bool readable, bool wr
 void OSAllocator::protect(void* address, size_t bytes, bool readable, bool writable)
 {
     if (bool result = tryProtect(address, bytes, readable, writable); !result) [[unlikely]] {
-        dataLogLn("mprotect failed: ", safeStrerror(errno).data());
+        dataLogLn("mprotect failed: ", safeStrerror(errno));
         RELEASE_ASSERT_NOT_REACHED();
     }
 }

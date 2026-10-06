@@ -128,6 +128,7 @@ private:
     JSObjectRef selectionCaretViewRect(id<UICoordinateSpace>) const;
     JSObjectRef selectionRangeViewRects() const override;
     JSObjectRef inputViewBounds() const override;
+    JSObjectRef inputViewBoundsInWebView() const override;
     JSRetainPtr<JSStringRef> scrollingTreeAsText() const override;
     JSRetainPtr<JSStringRef> uiViewTreeAsText() const override;
     JSRetainPtr<JSStringRef> uiViewTreeAsTextForViewWithLayerID(unsigned long long) const override;
@@ -179,6 +180,7 @@ private:
     void setDidShowKeyboardCallback(JSValueRef) override;
     void setDidHideKeyboardCallback(JSValueRef) override;
     void setWillStartInputSessionCallback(JSValueRef) override;
+    void setDidStartInputSessionCallback(JSValueRef) override;
     void setWillPresentPopoverCallback(JSValueRef) override;
     void setDidDismissPopoverCallback(JSValueRef) override;
     void setDidPresentViewControllerCallback(JSValueRef) override;

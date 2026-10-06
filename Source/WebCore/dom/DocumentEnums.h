@@ -76,4 +76,15 @@ enum class CanTriggerCrossDocumentViewTransition : bool {
     Yes
 };
 
+enum class DidInvalidateStyle : bool {
+    No,
+    Yes
+};
+
+enum class AcceptChildOperation : uint8_t {
+    Replace,
+    ReplaceAll,
+    InsertOrAdd
+};
+
 } // namespace WebCore

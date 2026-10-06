@@ -83,6 +83,9 @@ static std::optional<InlineItemRange> NODELETE partialRangeForDamage(const Inlin
 
 static bool NODELETE isEmptyInlineContent(const InlineItemList& inlineItemList)
 {
+    if (inlineItemList.isEmpty())
+        return true;
+
     // Very common, pseudo before/after empty content.
     if (inlineItemList.size() != 1)
         return false;
@@ -114,7 +117,8 @@ std::unique_ptr<InlineLayoutResult> InlineFormattingContext::layout(const Constr
         return { };
     }
 
-    if (!root().hasInFlowChild() && !root().hasOutOfFlowChild()) {
+    auto hasExcludedMarker = !layoutState().excludedMarkerLayoutBounds().isEmpty();
+    if (!root().hasInFlowChild() && !root().hasOutOfFlowChild() && !hasExcludedMarker) {
         // Float only content does not support partial layout.
         ASSERT(!InlineInvalidation::mayOnlyNeedPartialLayout(lineDamage));
         layoutFloatContentOnly(constraints);
@@ -123,6 +127,13 @@ std::unique_ptr<InlineLayoutResult> InlineFormattingContext::layout(const Constr
 
     auto& inlineItems = inlineContentCache().inlineItems();
     auto& inlineItemList = inlineItems.content();
+    if (inlineItemList.isEmpty() && hasExcludedMarker) {
+        auto layoutResult = makeUniqueRef<InlineLayoutResult>();
+        createDisplayContentForEmptyInlineContent(constraints, inlineItemList, layoutResult.get());
+        layoutResult->range = InlineLayoutResult::Range::Full;
+        return layoutResult.moveToUniquePtr();
+    }
+
     auto needsLayoutRange = [&]() -> InlineItemRange {
         if (!InlineInvalidation::mayOnlyNeedPartialLayout(lineDamage))
             return { { }, { inlineItemList.size(), { } } };
@@ -354,7 +365,7 @@ UniqueRef<InlineLayoutResult> InlineFormattingContext::lineLayout(AbstractLineBu
             break;
         }
 
-        previousLine = PreviousLine { lineIndex, lineLayoutResult.contentGeometry.trailingOverflowingContentWidth, lineLayoutResult.endsWithLineBreak(), lineLayoutResult.hasContentfulInFlowContent(), lineLayoutResult.directionality.inlineBaseDirection, WTF::move(lineLayoutResult.floatContent.suspendedFloats) };
+        previousLine = PreviousLine { lineIndex, lineLayoutResult.contentGeometry.trailingOverflowingContentWidth, lineLayoutResult.endsWithLineBreak() || lineLayoutResult.isBlockContent(), lineLayoutResult.hasContentfulInFlowContent(), lineLayoutResult.directionality.inlineBaseDirection, WTF::move(lineLayoutResult.floatContent.suspendedFloats) };
         previousLineEnd = lineContentEnd;
         lineLogicalTop = formattingUtils().logicalTopForNextLine(lineLayoutResult, lineLogicalRect, floatingContext);
     }
@@ -457,7 +468,8 @@ InlineRect InlineFormattingContext::createDisplayContentForInlineContent(const L
     // When a block line is clamped, its content gets clamped and not this line itself.
     if (!lineLayoutResult.isBlockContent()) {
         auto isLegacyLineClamp = lineClamp && lineClamp->isLegacy;
-        auto truncationPolicy = InlineFormattingUtils::lineEndingTruncationPolicy(root().style(), numberOfLinesWithInlineContent, numberOfVisibleLinesAllowed, lineLayoutResult.hasContentfulInFlowContent());
+        CheckedRef styleForTruncation = root().isAnonymous() ? IntegrationUtils::firstNonAnonymousAncestorStyle(root()) : root().style();
+        auto truncationPolicy = InlineFormattingUtils::lineEndingTruncationPolicy(styleForTruncation, numberOfLinesWithInlineContent, numberOfVisibleLinesAllowed, lineLayoutResult.hasContentfulInFlowContent());
         ellipsis = InlineDisplayLineBuilder::applyEllipsisIfNeeded(truncationPolicy, displayLine, boxes.mutableSpan(), isLegacyLineClamp);
         if (ellipsis) {
             displayLine.setHasEllipsis();
@@ -533,8 +545,10 @@ bool InlineFormattingContext::createDisplayContentForLineFromCachedContent(const
         return false;
     }
 
-    lineContent.lineGeometry.logicalTopLeft = { constraints.horizontal().logicalLeft, constraints.logicalTop() };
+    auto logicalTopLeft = InlineLayoutPoint { constraints.horizontal().logicalLeft, constraints.logicalTop() };
+    lineContent.lineGeometry.logicalTopLeft = logicalTopLeft;
     lineContent.lineGeometry.logicalWidth = constraints.horizontal().logicalWidth;
+    lineContent.lineGeometry.initialLogicalTopLeft = logicalTopLeft;
     lineContent.contentGeometry.logicalLeft = InlineFormattingUtils::horizontalAlignmentOffset(root().style(), lineContent.contentGeometry.logicalWidth, lineContent.lineGeometry.logicalWidth, lineContent.hangingContent.logicalWidth, true);
 
     auto canUseSimplifiedDisplayContentBuild = mayUseSimplifiedDisplayContentBuild && lineContent.hasContentfulInFlowContent();
@@ -617,6 +631,11 @@ void InlineFormattingContext::rebuildInlineItemListIfNeeded(InlineDamage* lineDa
         if (auto startPosition = lineDamage->layoutStartPosition()) {
             if (lineDamage->reasons().contains(InlineDamage::Reason::Pagination)) {
                 // FIXME: We don't support partial rebuild with certain types of content. Let's just re-collect inline items.
+                return { };
+            }
+            if (inlineContentCache.inlineItems().hasWhiteSpaceTrim()) {
+                // white-space-trim discards collapsible white space based on cross-box adjacency that a
+                // partial rebuild starting mid-content cannot resolve. Re-collect all inline items.
                 return { };
             }
             return startPosition->inlineItemPosition;

@@ -28,6 +28,8 @@
 #include "TestController.h"
 
 #include "PlatformWebView.h"
+#include "TestCommand.h"
+#include "WPTFunctions.h"
 #include <WebKit/WKTextCheckerGLib.h>
 #include <WebKit/WKViewPrivate.h>
 #include <gtk/gtk.h>
@@ -149,17 +151,29 @@ bool TestController::platformResetStateToConsistentValues(const TestOptions&)
     return true;
 }
 
-TestFeatures TestController::platformSpecificFeatureDefaultsForTest(const TestCommand&) const
+static bool shouldEnableAsyncOverflowScrolling(const std::string& pathOrURL)
 {
-    return { };
+    return isWebPlatformTestURL({ { }, String::fromUTF8(pathOrURL.c_str()) });
+}
+
+TestFeatures TestController::platformSpecificFeatureDefaultsForTest(const TestCommand& command) const
+{
+    TestFeatures features;
+    if (shouldEnableAsyncOverflowScrolling(command.pathOrURL))
+        features.boolWebPreferenceFeatures.insert({ "AsyncOverflowScrollingEnabled", true });
+    return features;
 }
 
 WKRetainPtr<WKStringRef> TestController::takeViewPortSnapshot()
 {
     sk_sp<SkImage> image(mainWebView()->windowSnapshotImage());
+    if (!image)
+        return nullptr;
+
     auto data = SkPngEncoder::Encode(nullptr, image.get(), { });
+    RELEASE_ASSERT(data);
     auto uri = makeString("data:image/png;base64,"_s, base64Encoded(std::span { static_cast<const uint8_t*>(data->data()), data->size() }));
-    return adoptWK(WKStringCreateWithUTF8CString(uri.utf8().data()));
+    return adoptWK(WKStringCreateWithUTF8CString(uri.utf8().legacyCStringPointer()));
 }
 
 } // namespace WTR

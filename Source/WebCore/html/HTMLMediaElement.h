@@ -34,6 +34,7 @@
 #include <WebCore/AudioTrackClient.h>
 #include <WebCore/AutoplayEvent.h>
 #include <WebCore/CaptionUserPreferences.h>
+#include <WebCore/FindOptions.h>
 #include <WebCore/HTMLElement.h>
 #include <WebCore/HTMLMediaElementEnums.h>
 #include <WebCore/HTMLMediaElementIdentifier.h>
@@ -45,6 +46,7 @@
 #include <WebCore/MediaUniqueIdentifier.h>
 #include <WebCore/MessageTargetForTesting.h>
 #include <WebCore/PlatformDynamicRangeLimit.h>
+#include <WebCore/TextTrack.h>
 #include <WebCore/TextTrackClient.h>
 #include <WebCore/URLKeepingBlobAlive.h>
 #include <WebCore/VideoTrackClient.h>
@@ -159,6 +161,12 @@ public:
 
     virtual void captionTracksChanged() { }
     virtual void captionsEnabledChanged() { }
+
+    virtual void seekableRangesChanged() { }
+
+#if ENABLE(VIDEO_PRESENTATION_MODE)
+    virtual void hasObjectViewBoxChanged(bool) { }
+#endif
 };
 
 class HTMLMediaElement
@@ -237,7 +245,10 @@ public:
     using PlayPromiseVector = Vector<DOMPromiseDeferred<void>>;
     void rejectPendingPlayPromises(PlayPromiseVector&&, Ref<DOMException>&&);
     void resolvePendingPlayPromises(PlayPromiseVector&&);
-    void scheduleNotifyAboutPlaying();
+    enum class ShouldResolvePlayPromises : bool { No, Yes };
+    void scheduleNotifyAboutPlaying(bool deferWhileSeeking = true, ShouldResolvePlayPromises = ShouldResolvePlayPromises::Yes);
+    void maybeFirePendingPlaying();
+    void handlePlaybackPositionChanged();
     void notifyAboutPlaying(PlayPromiseVector&&);
     void durationChanged();
     
@@ -391,6 +402,7 @@ public:
     bool shouldForceControlsDisplay() const;
 
     ExceptionOr<Ref<TextTrack>> addTextTrack(const AtomString& kind, const AtomString& label, const AtomString& language);
+    ExceptionOr<void> removeTextTrack(TextTrack&);
 
     AudioTrackList& ensureAudioTracks();
     TextTrackList& ensureTextTracks();
@@ -406,13 +418,17 @@ public:
     void addVideoTrack(Ref<VideoTrack>&&);
     void removeAudioTrack(AudioTrack&);
     void removeAudioTrack(TrackID);
-    void removeTextTrack(TextTrack&, bool scheduleEvent = true);
-    void removeTextTrack(TrackID, bool scheduleEvent = true);
+    enum class ScheduleEvent : bool { No, Yes };
+    bool removeTextTrack(TextTrack&, ScheduleEvent);
+    void removeTextTrack(TrackID, ScheduleEvent = ScheduleEvent::Yes);
     void removeVideoTrack(VideoTrack&);
     void removeVideoTrack(TrackID);
     void forgetResourceSpecificTracks();
     void closeCaptionTracksChanged();
     void notifyMediaPlayerOfTextTrackChanges();
+
+    Vector<MediaTime> findCueMatches(const String& target, FindOptions);
+    void clearFindCaptionTrack();
 
     virtual void didAddTextTrack(HTMLTrackElement&);
     virtual void didRemoveTextTrack(HTMLTrackElement&);
@@ -433,6 +449,10 @@ public:
     void configureTextTracks();
     void configureTextTrackGroup(const TrackGroup&);
     void configureMetadataTextTrackGroup(const TrackGroup&);
+
+    void updateFindCaptionTrack();
+    bool hasShowingFindSearchableTextTrackExcept(const TextTrack*) const;
+    RefPtr<TextTrack> bestFindCaptionTrack() const;
 
     void setSelectedTextTrack(TextTrack*);
 
@@ -523,6 +543,7 @@ public:
 
     using MediaPlayerEnums::VideoFullscreenMode;
     VideoFullscreenMode fullscreenMode() const { return m_videoFullscreenMode; }
+    bool isChangingVideoFullscreenMode() const { return m_changingVideoFullscreenMode; }
 
     WEBCORE_EXPORT void enterFullscreen(VideoFullscreenMode);
     WEBCORE_EXPORT void setPlayerIdentifierForVideoElement();
@@ -697,7 +718,8 @@ public:
 
     bool hasSource() const { return hasCurrentSrc() || srcObject(); }
 
-    WEBCORE_EXPORT void requestHostingContext(Function<void(HostingContext)>&&);
+    using HostingContextPromise = MediaPlayer::HostingContextPromise;
+    WEBCORE_EXPORT Ref<HostingContextPromise> requestHostingContext();
     WEBCORE_EXPORT WebCore::HostingContext layerHostingContext();
     WEBCORE_EXPORT WebCore::FloatSize naturalSize();
     WEBCORE_EXPORT WebCore::FloatSize NODELETE videoLayerSize() const;
@@ -729,6 +751,10 @@ public:
 
     void audioSessionCategoryChanged(AudioSessionCategory, AudioSessionMode, RouteSharingPolicy);
 
+#if ENABLE(VIDEO_PRESENTATION_MODE)
+    void hasObjectViewBoxChanged(bool);
+#endif
+
     // CheckedPtr interface
     uint32_t checkedPtrCount() const { return CanMakeCheckedPtr<Node>::checkedPtrCount(); }
     uint32_t checkedPtrCountWithoutThreadCheck() const { return CanMakeCheckedPtr<Node>::checkedPtrCountWithoutThreadCheck(); }
@@ -748,6 +774,8 @@ public:
 
     void mediaSessionCaptionTracksChanged();
     void mediaSessionCaptionsEnabledChanged();
+
+    void seekableRangesChanged();
 
 protected:
     HTMLMediaElement(const QualifiedName&, Document&, bool createdByParser);
@@ -784,8 +812,7 @@ protected:
     bool showPosterFlag() const { return m_showPoster; }
     void setShowPosterFlag(bool);
 
-    void setChangingVideoFullscreenMode(bool value) { m_changingVideoFullscreenMode = value; }
-    bool isChangingVideoFullscreenMode() const { return m_changingVideoFullscreenMode; }
+    void setChangingVideoFullscreenMode(bool);
 
     void mediaPlayerEngineUpdated() override;
     void visibilityStateChanged() final;
@@ -794,7 +821,6 @@ protected:
     void mediaPlayerTimeChanged() final;
     void mediaPlayerVolumeChanged() final;
     void mediaPlayerMuteChanged() final;
-    void mediaPlayerSeeked(const MediaTime&) final;
     void mediaPlayerDurationChanged() final;
     void mediaPlayerRateChanged() final;
     void mediaPlayerPlaybackStateChanged() final;
@@ -816,9 +842,12 @@ protected:
     SoundStageSize soundStageSize() const { return m_soundStageSize; }
     void setSoundStageSize(SoundStageSize);
 
+    void scheduleUpdateAcceleratedRenderingState();
+
 protected:
     // ActiveDOMObject
     void stop() override;
+    void suspend(ReasonForSuspension) override;
 
 private:
     friend class Internals;
@@ -838,7 +867,6 @@ private:
     void willStopBeingFullscreenElement() override;
 
     // ActiveDOMObject.
-    void suspend(ReasonForSuspension) override;
     void resume() override;
     bool virtualHasPendingActivity() const override;
 
@@ -926,6 +954,7 @@ private:
     const std::optional<Vector<FourCC>>& allowedMediaCaptionFormatTypes() const final;
 
     void mediaPlayerBufferedTimeRangesChanged() final;
+    void mediaPlayerSeekableTimeRangesChanged() final;
 
     bool mediaPlayerShouldDisableHDR() const final { return shouldDisableHDR(); }
 
@@ -962,7 +991,8 @@ private:
     void loadResource(const URL&, const ContentType&);
     void scheduleNextSourceChild();
     void loadNextSourceChild();
-    void userCancelledLoad();
+    enum class ShouldDestroyMediaPlayer : bool { No, Yes };
+    void userCancelledLoad(ShouldDestroyMediaPlayer = ShouldDestroyMediaPlayer::Yes);
     void clearMediaPlayer();
     bool havePotentialSourceChild();
     void noneSupported();
@@ -999,10 +1029,11 @@ private:
 
     // These "internal" functions do not check user gesture restrictions.
     void playInternal();
-    void pauseInternal();
+    void pauseInternal(bool dispatchPauseEvent = true);
     void completePlayInternal();
 
-    void prepareForLoad();
+    enum class IsExplicitLoad : bool { No, Yes };
+    void prepareForLoad(IsExplicitLoad = IsExplicitLoad::No);
     void allowVideoRendering();
 
     bool processingMediaPlayerCallback() const { return m_processingMediaPlayerCallback > 0; }
@@ -1020,7 +1051,7 @@ private:
     bool pausedForUserInteraction() const;
     bool couldPlayIfEnoughData() const;
     void dispatchPlayPauseEventsIfNeedsQuirks();
-    Expected<void, MediaPlaybackDenialExplanation> canTransitionFromAutoplayToPlay() const;
+    std::expected<void, MediaPlaybackDenialExplanation> canTransitionFromAutoplayToPlay() const;
 
     void setAutoplayEventPlaybackState(AutoplayEventPlaybackState);
     void userDidInterfereWithAutoplay();
@@ -1043,6 +1074,7 @@ private:
 
     void prepareMediaFragmentURI();
     void applyMediaFragmentURI();
+    void selectTracksForFragment();
 
     void changeNetworkStateFromLoadingToIdle();
 
@@ -1209,16 +1241,20 @@ private:
     TaskCancellationGroup m_updatePlayStateTaskCancellationGroup;
     TaskCancellationGroup m_resumeTaskCancellationGroup;
     TaskCancellationGroup m_seekTaskCancellationGroup;
+    const Ref<NativePromiseRequest> m_seekRequest;
     TaskCancellationGroup m_playbackControlsManagerBehaviorRestrictionsTaskCancellationGroup;
     TaskCancellationGroup m_bufferedTimeRangesChangedTaskCancellationGroup;
     TaskCancellationGroup m_resourceSelectionTaskCancellationGroup;
     TaskCancellationGroup m_updateShouldAutoplayTaskCancellationGroup;
+    TaskCancellationGroup m_updateAcceleratedRenderingStateTaskCancellationGroup;
     RefPtr<TimeRanges> m_playedTimeRanges;
     TaskCancellationGroup m_asyncEventsCancellationGroup;
     TaskCancellationGroup m_periodicTimeupdateCancellationGroup;
     TaskCancellationGroup m_volumeRevertTaskCancellationGroup;
 
+    const Ref<NativePromiseRequest> m_beginPlaybackRequest;
     PlayPromiseVector m_pendingPlayPromises;
+    bool m_playPromiseSettlementGuaranteed { false };
 
     double m_requestedPlaybackRate { 1 };
     double m_reportedPlaybackRate { 1 };
@@ -1299,6 +1335,7 @@ private:
 
     MediaTime m_fragmentStartTime;
     MediaTime m_fragmentEndTime;
+    Vector<String> m_fragmentTrackIdentifiers;
 
     using PendingActionFlags = unsigned;
     PendingActionFlags m_pendingActionFlags { 0 };
@@ -1327,8 +1364,8 @@ private:
     bool m_seeking : 1;
     bool m_buffering : 1;
     bool m_stalled : 1;
-    bool m_seekRequested : 1;
     bool m_wasPlayingBeforeSeeking : 1;
+    bool m_pendingNotifyAboutPlaying : 1;
 
     // data has not been loaded since sending a "stalled" event
     bool m_sentStalledEvent : 1;
@@ -1387,6 +1424,9 @@ private:
 
     struct CueData;
     std::unique_ptr<CueData> m_cueData;
+
+    RefPtr<TextTrack> m_findCaptionTrack;
+    std::optional<TextTrack::Mode> m_findCaptionTrackPreviousMode;
 
     int m_ignoreTrackDisplayUpdate { 0 };
 

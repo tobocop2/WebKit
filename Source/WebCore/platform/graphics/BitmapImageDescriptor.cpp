@@ -168,9 +168,9 @@ RepetitionCount BitmapImageDescriptor::repetitionCount() const
     return imageMetadata(m_repetitionCount, static_cast<RepetitionCount>(RepetitionCountNone), CachedFlag::RepetitionCount, &ImageDecoder::repetitionCount);
 }
 
-DestinationColorSpace BitmapImageDescriptor::colorSpace() const
+ColorSpace BitmapImageDescriptor::colorSpace() const
 {
-    return primaryNativeImageMetadata(m_colorSpace, DestinationColorSpace::SRGB(), CachedFlag::ColorSpace, &NativeImage::colorSpace);
+    return primaryNativeImageMetadata(m_colorSpace, ColorSpace::SRGB(), CachedFlag::ColorSpace, &NativeImage::colorSpace);
 }
 
 std::optional<Color> BitmapImageDescriptor::singlePixelSolidColor() const
@@ -282,7 +282,7 @@ SubsamplingLevel BitmapImageDescriptor::subsamplingLevelForScaleFactor(GraphicsC
 #if ENABLE(QUICKLOOK_FULLSCREEN)
 bool BitmapImageDescriptor::isPanorama() const
 {
-    if (auto decoder = m_source->decoderIfExists())
+    if (RefPtr decoder = m_source->decoderIfExists())
         return decoder->isPanorama();
     return false;
 }

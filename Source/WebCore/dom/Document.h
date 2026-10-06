@@ -3,7 +3,7 @@
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
  *           (C) 2001 Dirk Mueller (mueller@kde.org)
  *           (C) 2006 Alexey Proskuryakov (ap@webkit.org)
- * Copyright (C) 2004-2025 Apple Inc. All rights reserved.
+ * Copyright (C) 2004-2026 Apple Inc. All rights reserved.
  * Copyright (C) 2008, 2009 Torch Mobile Inc. All rights reserved. (http://www.torchmobile.com/)
  * Copyright (C) 2010 Nokia Corporation and/or its subsidiary(-ies)
  * Copyright (C) 2011 Google Inc. All rights reserved.
@@ -29,6 +29,7 @@
 
 #include <WebCore/AsyncNodeDeletionQueue.h>
 #include <WebCore/Color.h>
+#include <WebCore/ColorHash.h>
 #include <WebCore/ContainerNode.h>
 #include <WebCore/ContextDestructionObserver.h>
 #include <WebCore/DocumentClasses.h>
@@ -83,6 +84,7 @@
 namespace JSC {
 class CallFrame;
 class InputCursor;
+class JSObject;
 }
 
 namespace WTF {
@@ -98,6 +100,9 @@ class TextEncoding;
 namespace WebCore {
 
 class AXObjectCache;
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+class AXCustomColorModeController;
+#endif
 class AppHighlightStorage;
 class Attr;
 class CanvasBase;
@@ -116,7 +121,6 @@ class CanvasRenderingContext2D;
 class CaretPosition;
 class CharacterData;
 class Comment;
-class ConstantPropertyMap;
 class ContentVisibilityDocumentState;
 class CustomElementRegistry;
 class DOMImplementation;
@@ -189,7 +193,7 @@ class JSViewTransitionUpdateCallback;
 class LargestContentfulPaintData;
 class LayoutPoint;
 class LayoutRect;
-class LazyLoadImageObserver;
+class LazyLoadElementObserver;
 class LiveNodeList;
 class LocalFrame;
 class LocalFrameView;
@@ -316,10 +320,6 @@ struct EventTrackingRegions;
 struct SystemPreviewInfo;
 #endif
 
-#if ENABLE(VIDEO)
-class LazyLoadVideoObserver;
-#endif
-
 #if ENABLE(WEB_RTC)
 class RTCPeerConnection;
 #endif
@@ -362,10 +362,6 @@ enum class EventTrackingRegionsEventType : uint8_t;
 
 #if ENABLE(MEDIA_SESSION)
 enum class MediaSessionAction : uint8_t;
-#endif
-
-#if ENABLE(MODEL_ELEMENT)
-class LazyLoadModelObserver;
 #endif
 
 using IntDegrees = int32_t;
@@ -414,7 +410,7 @@ enum class HttpEquivPolicy : uint8_t {
     DisabledByContentDispositionAttachmentSandbox
 };
 
-enum class CustomElementNameValidationStatus {
+enum class CustomElementNameValidationStatus : uint8_t {
     Valid,
     FirstCharacterIsNotLowercaseASCIILetter,
     ContainsNoHyphen,
@@ -469,7 +465,7 @@ public:
     inline static Ref<Document> create(const Settings&, const URL&);
     static Ref<Document> createNonRenderedPlaceholder(LocalFrame&, const URL&);
     static Ref<Document> create(Document&);
-    static Ref<Document> createCloned(ClonedDocumentType, const Settings&, const URL&, const URL& baseURL, const URL& baseURLOverride, const Variant<String, URL>& documentURI, DocumentCompatibilityMode, Document& contextDocument, SecurityOriginPolicy*, const String& contentType, TextResourceDecoder*);
+    static Ref<Document> createCloned(ClonedDocumentType, const Settings&, const URL&, const URL& baseURL, const URL& baseURLOverride, const Variant<String, URL>& documentURI, DocumentCompatibilityMode, OptionSet<ParserContentPolicy>, Document& contextDocument, SecurityOriginPolicy*, const String& contentType, TextResourceDecoder*);
 
     virtual ~Document();
 
@@ -590,8 +586,9 @@ public:
     RefPtr<CustomElementRegistry> customElementRegistryForBindings();
     CustomElementRegistry* NODELETE effectiveGlobalCustomElementRegistry();
     static CustomElementNameValidationStatus validateCustomElementName(const AtomString&);
-    void setActiveCustomElementRegistry(CustomElementRegistry*);
-    CustomElementRegistry* activeCustomElementRegistry() { return m_activeCustomElementRegistry.get(); }
+    CustomElementRegistry* activeCustomElementConstructorRegistry(JSC::JSObject* constructor);
+    void addToActiveCustomElementConstructorMap(JSC::JSObject* constructor, CustomElementRegistry&);
+    void removeFromActiveCustomElementConstructorMap(JSC::JSObject* constructor);
 
     WEBCORE_EXPORT RefPtr<Range> caretRangeFromPoint(int x, int y, HitTestSource = HitTestSource::Script);
     std::optional<BoundaryPoint> caretPositionFromPoint(const LayoutPoint& clientPoint, HitTestSource);
@@ -690,7 +687,7 @@ public:
 #if ENABLE(MODEL_ELEMENT)
     bool isModelDocument() const { return m_documentClasses.contains(DocumentClass::Model); }
 #endif
-    bool isPDFDocument() const { return m_documentClasses.contains(DocumentClass::PDF); }
+    bool isPDFJSDocument() const { return m_documentClasses.contains(DocumentClass::PDFJS); }
 
     bool NODELETE hasSVGRootNode() const;
     virtual bool isFrameSet() const { return false; }
@@ -768,6 +765,8 @@ public:
 
     CompositeOperator compositeOperatorForBackgroundColor(const Color&, const RenderElement&) const;
 
+    bool backgroundColorIsPunchedOut(const Color&, const RenderElement&) const;
+
     WEBCORE_EXPORT Ref<Range> createRange();
 
     // The last bool parameter is for ObjC bindings.
@@ -827,6 +826,8 @@ public:
 
     inline const SettingsValues& settingsValues() const final; // Defined in DocumentSettingsValues.h.
 
+    const NetworkLoadPolicy& networkLoadPolicy() const final;
+
     void NODELETE suspendDeviceMotionAndOrientationUpdates();
     void NODELETE resumeDeviceMotionAndOrientationUpdates();
 
@@ -838,8 +839,15 @@ public:
     const Style::ComputedStyle& initialStyle() const LIFETIME_BOUND;
     void invalidateCachedInitialStyle();
 
-    bool renderTreeBeingDestroyed() const { return m_renderTreeBeingDestroyed; }
-    bool hasLivingRenderTree() const { return renderView() && !renderTreeBeingDestroyed(); }
+    enum class RenderTreeState : uint8_t {
+        NotBuilt,
+        Built,
+        BeingDestroyed,
+    };
+    RenderTreeState renderTreeState() const { return m_renderTreeState; }
+
+    WEBCORE_EXPORT bool canEverRender() const;
+
     void updateRenderTree(std::unique_ptr<Style::Update> styleUpdate);
 
     bool updateLayoutIfDimensionsOutOfDate(Element&, OptionSet<DimensionsCheck> = { DimensionsCheck::Width, DimensionsCheck::Height }, OptionSet<LayoutOptions> = { });
@@ -1019,6 +1027,7 @@ public:
     void flushAutofocusCandidates();
 
     void reveal();
+    bool hasBeenRevealed() const { return m_hasBeenRevealed; }
 
     void hoveredElementDidDetach(Element&);
     void elementInActiveChainDidDetach(Element&);
@@ -1068,7 +1077,6 @@ public:
     void nodeWillBeMoved(Node&);
     void parentlessNodeMovedToNewDocument(Node&);
 
-    enum class AcceptChildOperation : bool { Replace, InsertOrAdd };
     bool NODELETE canAcceptChild(const Node& newChild, const Node* refChild, AcceptChildOperation) const;
 
     void textInserted(Node&, unsigned offset, unsigned length);
@@ -1246,6 +1254,9 @@ public:
 
     WEBCORE_EXPORT bool isFullyActive() const;
 
+    // https://html.spec.whatwg.org/multipage/interaction.html#fully-active-descendant-of-a-top-level-traversable-with-user-attention
+    bool isFullyActiveAndHasUserAttention() const;
+
     // The full URL corresponding to the "site for cookies" in the Same-Site Cookies spec.,
     // <https://tools.ietf.org/html/draft-ietf-httpbis-cookie-same-site-00>. It is either
     // the URL of the top-level document or the null URL depending on whether the registrable
@@ -1311,6 +1322,7 @@ public:
 #if ENABLE(XSLT)
     void scheduleToApplyXSLTransforms();
     void applyPendingXSLTransformsNowIfScheduled();
+    void logXSLTDeprecationWarningIfNeeded();
     RefPtr<Document> transformSourceDocument() { return m_transformSourceDocument; }
     void setTransformSourceDocument(Document* document) { m_transformSourceDocument = document; }
 
@@ -1355,6 +1367,8 @@ public:
     void screenPropertiesDidChange(PlatformDisplayID);
 
     void finishedParsing();
+
+    void queueCompressionDictionaryLoad(Function<void()>&&);
 
     enum BackForwardCacheState : uint8_t { NotInBackForwardCache, AboutToEnterBackForwardCache, InBackForwardCache };
 
@@ -1407,6 +1421,9 @@ public:
 
     void updateAccessibilityObjectRegions();
     void updateEventRegions();
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+    void updateAXCustomColorModeTextBackdrops();
+#endif
 
     void NODELETE invalidateRenderingDependentRegions();
     void invalidateEventRegionsForFrame(HTMLFrameOwnerElement&);
@@ -1431,7 +1448,7 @@ public:
     bool loadEventFinished() const { return m_loadEventFinished; }
 
     bool isContextThread() const final;
-    bool isSecureContext() const final;
+    WEBCORE_EXPORT bool isSecureContext() const final;
     bool NODELETE crossOriginIsolated() const final;
     bool NODELETE originAgentCluster() const;
     String agentClusterID() const final;
@@ -1495,6 +1512,7 @@ public:
     void decrementLoadEventDelayCount();
     bool isDelayingLoadEvent() const { return m_loadEventDelayCount; }
     WEBCORE_EXPORT void checkCompleted();
+    WEBCORE_EXPORT void checkLoadComplete();
 
 #if ENABLE(IOS_TOUCH_EVENTS)
 // FIXME: Properly support using WKA in modules.
@@ -1538,8 +1556,13 @@ public:
 
     MonotonicTime lastHandledUserGestureTimestamp() const { return m_lastHandledUserGestureTimestamp; }
     bool hasHadUserInteraction() const { return static_cast<bool>(m_lastHandledUserGestureTimestamp); }
-    void updateLastHandledUserGestureTimestamp(MonotonicTime);
+    WEBCORE_EXPORT void updateLastHandledUserGestureTimestamp(MonotonicTime);
     bool processingUserGestureForMedia() const;
+
+    // Identifies which branch of processingUserGestureForMedia() authorizes media playback.
+    enum class MediaGestureReason : uint8_t { None, ActiveToken, TransientActivation, MediaFinishedGrace, InheritsFromDocumentSetting, InheritedUserGesturesQuirk };
+    MediaGestureReason mediaUserGestureReason() const;
+
     bool hasRecentUserInteractionForNavigationFromJS() const;
     void userActivatedMediaFinishedPlaying() { m_userActivatedMediaFinishedPlayingTimestamp = MonotonicTime::now(); }
 
@@ -1635,6 +1658,17 @@ public:
     Ref<DocumentFragment> documentFragmentForInnerOuterHTML();
 
     void didAssociateFormControl(Element&);
+
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+    AXCustomColorModeController* axCustomColorModeControllerIfExists() { return m_axCustomColorModeController.get(); }
+    const AXCustomColorModeController* axCustomColorModeControllerIfExists() const { return m_axCustomColorModeController.get(); }
+    AXCustomColorModeController& axCustomColorModeController();
+
+    bool isAXCustomColorModeActive() const;
+#endif
+
+    void adjustStyleColorOptionsIfNeeded(OptionSet<StyleColorOptions>&) const;
+
     bool hasDisabledFieldsetElement() const { return m_disabledFieldsetElementsCount; }
     void addDisabledFieldsetElement() { m_disabledFieldsetElementsCount++; }
     void removeDisabledFieldsetElement() { ASSERT(m_disabledFieldsetElementsCount); m_disabledFieldsetElementsCount--; }
@@ -1751,8 +1785,8 @@ public:
     unsigned numberOfIntersectionObservers() const { return m_localIntersectionObservers.size() + m_remoteIntersectionObservers.size(); }
 
     // Update ONLY remote intersection observers registered to this document.
-    // When the main frame updates its rendering, it sends an IPC message to request its child documents
-    // to update their remote observers, which ends up calling this.
+    // This is called when an ancestor frame in another process updates geometry that could affect
+    // IntersectionObservers in this document.
     WEBCORE_EXPORT void updateRemoteIntersectionObservers();
 
     // Update local and remote intersection observers that are registered to this document.
@@ -1828,8 +1862,6 @@ public:
     void attachToCachedFrame(CachedFrameBase&);
     void detachFromCachedFrame(CachedFrameBase&);
 
-    ConstantPropertyMap& constantProperties() const;
-
     void orientationChanged(IntDegrees orientation);
     OrientationNotifier& orientationNotifier();
 
@@ -1851,9 +1883,7 @@ public:
     // Per https://html.spec.whatwg.org/multipage/obsolete.html#dom-document-releaseevents, this method does nothing.
     void releaseEvents() { }
 
-#if ENABLE(TEXT_AUTOSIZING)
     TextAutoSizing& textAutoSizing();
-#endif
 
     Logger& logger();
     const Logger& logger() const { return const_cast<Document&>(*this).logger(); }
@@ -1870,6 +1900,7 @@ public:
     Vector<Ref<WebAnimation>> matchingAnimations(NOESCAPE const Function<bool(Element&)>&);
     AnimationTimelinesController* timelinesController() const { return m_timelinesController.get(); }
     WEBCORE_EXPORT AnimationTimelinesController& ensureTimelinesController();
+    WEBCORE_EXPORT bool hasProgressBasedScrollDrivenAnimation() const;
     StyleOriginatedTimelinesController* styleOriginatedTimelinesController() { return m_styleOriginatedTimelinesController.get(); }
     StyleOriginatedTimelinesController& ensureStyleOriginatedTimelinesController();
     void keyframesRuleDidChange(const String& name);
@@ -1880,17 +1911,35 @@ public:
     bool hasTopLayerElement() const { return !m_topLayerElements.isEmpty(); }
 
     const OrderedHashSet<Ref<HTMLElement>>& autoPopoverList() const LIFETIME_BOUND { return m_autoPopoverList; }
+    const OrderedHashSet<Ref<HTMLElement>>& hintPopoverList() const LIFETIME_BOUND { return m_hintPopoverList; }
 
     OrderedHashSet<Ref<HTMLDialogElement>>& openDialogsList() { return m_openDialogsList; }
 
     HTMLDialogElement* activeModalDialog() const;
     HTMLElement* NODELETE topmostAutoPopover() const;
+    HTMLElement* NODELETE topmostHintPopover() const;
+    HTMLElement* NODELETE nearestOpenHintAncestor(Element&) const;
     RefPtr<HTMLDialogElement> nearestClickedDialog(const PointerEvent&, Node&) const;
 
-    void hideAllPopoversUntil(HTMLElement*, FocusPreviousElement, FireEvents);
+    void hideAutoPopoversUntil(HTMLElement*, FocusPreviousElement, FireEvents);
+    void closeAllHintPopovers(FocusPreviousElement, FireEvents);
+    void closeHintPopoversUntil(const HTMLElement* endpoint, FocusPreviousElement, FireEvents);
+    void hidePopoversForTopLayerElement(Element&, FireEvents);
     void handlePopoverLightDismiss(const PointerEvent&, Node&);
     void handleDialogLightDismiss(const PointerEvent&, Node&);
-    bool needsPointerEventHandlingForPopoverOrDialog() const { return !m_autoPopoverList.isEmpty() || !m_openDialogsList.isEmpty(); }
+    bool needsPointerEventHandlingForPopoverOrDialog() const { return !m_autoPopoverList.isEmpty() || !m_hintPopoverList.isEmpty() || !m_openDialogsList.isEmpty(); }
+
+    // True while a popover show or hide algorithm is running (including during the beforetoggle
+    // event it dispatches). Showing a popover reentrantly during this window must throw.
+    bool isRunningPopoverShowOrHide() const { return m_popoverShowOrHideDepth; }
+    class PopoverShowOrHideScope {
+    public:
+        explicit PopoverShowOrHideScope(Document& document)
+            : m_document(document) { ++m_document->m_popoverShowOrHideDepth; }
+        ~PopoverShowOrHideScope() { ASSERT(m_document->m_popoverShowOrHideDepth); --m_document->m_popoverShowOrHideDepth; }
+    private:
+        const Ref<Document> m_document;
+    };
 
 #if ENABLE(ATTACHMENT_ELEMENT)
     void registerAttachmentIdentifier(const String&, const AttachmentAssociatedElement&);
@@ -1938,7 +1987,7 @@ public:
     void setPaintWorkletGlobalScopeForName(const String& name, Ref<PaintWorkletGlobalScope>&&);
 
     WEBCORE_EXPORT bool hitTest(const HitTestRequest&, HitTestResult&);
-    bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
+    WEBCORE_EXPORT bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
 #if ASSERT_ENABLED
     bool inHitTesting() const { return m_inHitTesting; }
 #endif
@@ -1980,13 +2029,7 @@ public:
 
     bool allowsContentJavaScript() const;
 
-    LazyLoadImageObserver& lazyLoadImageObserver();
-#if ENABLE(MODEL_ELEMENT)
-    LazyLoadModelObserver& lazyLoadModelObserver();
-#endif
-#if ENABLE(VIDEO)
-    LazyLoadVideoObserver& lazyLoadVideoObserver() LIFETIME_BOUND;
-#endif
+    LazyLoadElementObserver& lazyLoadElementObserver() LIFETIME_BOUND;
 
     ContentVisibilityDocumentState& contentVisibilityDocumentState();
 
@@ -2010,6 +2053,10 @@ public:
     void addCanvasNeedingPreparationForDisplayOrFlush(CanvasRenderingContext&);
     void removeCanvasNeedingPreparationForDisplayOrFlush(CanvasRenderingContext&);
 
+    void serviceCanvasPaintEvents();
+    void requestCanvasPaintEvent(HTMLCanvasElement&);
+    void cancelCanvasPaintEvent(HTMLCanvasElement&);
+
     bool contains(const Node& node) const { return this == &node.treeScope() && node.isConnected(); }
     bool contains(const Node* node) const { return node && contains(*node); }
 
@@ -2025,6 +2072,9 @@ public:
     WEBCORE_EXPORT bool NODELETE hasElementWithPendingUserAgentShadowTreeUpdate(Element&) const;
     void addElementWithPendingUserAgentShadowTreeUpdate(Element&);
     WEBCORE_EXPORT void removeElementWithPendingUserAgentShadowTreeUpdate(Element&);
+
+    bool usesHeadingOffsetAttribute() const { return m_usesHeadingOffsetAttribute; }
+    void setUsesHeadingOffsetAttribute() { m_usesHeadingOffsetAttribute = true; }
 
     std::optional<PAL::SessionID> sessionID() const final;
 
@@ -2048,7 +2098,7 @@ public:
 
     String mediaKeysStorageDirectory();
 
-    void invalidateDOMCookieCache();
+    WEBCORE_EXPORT void invalidateDOMCookieCache();
 
     void detachFromFrame();
     void NODELETE willBeDisconnectedFromFrame(Document&);
@@ -2084,7 +2134,7 @@ public:
     WEBCORE_EXPORT void ariaNotify(const String&);
     WEBCORE_EXPORT void ariaNotify(const String&, const AriaNotifyOptions&);
 
-    std::optional<TextPosition> currentParserSourcePosition() const;
+    WEBCORE_EXPORT std::optional<TextPosition> currentParserSourcePosition() const;
 
     bool shouldUseTouchEventRegions() const;
 
@@ -2098,6 +2148,10 @@ protected:
     void clearXMLVersion() { m_xmlVersion = String(); }
 
 private:
+    enum class PopoverListType : bool { Auto, Hint };
+    void addPopoverToList(PopoverListType, HTMLElement&);
+    void removePopoverFromList(PopoverListType, HTMLElement&);
+
     friend class DocumentParserYieldToken;
     friend class DocumentSyncData;
     friend class IgnoreDestructiveWriteCountIncrementer;
@@ -2105,6 +2159,8 @@ private:
     friend class Page;
     friend class ThrowOnDynamicMarkupInsertionCountIncrementer;
     friend class UnloadCountIncrementer;
+
+    void flushPendingCompressionDictionaryLoads();
 
     void updateTitleElement(Element& changingTitleElement);
     void willDetachPage() final;
@@ -2168,7 +2224,7 @@ private:
     WeakPtr<HTMLMetaElement, WeakPtrImplWithEventTargetData> determineActiveThemeColorMetaElement();
     void themeColorChanged();
 
-    void NODELETE invalidateAccessKeyCacheSlowCase();
+    void invalidateAccessKeyCacheSlowCase();
     void buildAccessKeyCache();
 
     void intersectionObserversInitialUpdateTimerFired();
@@ -2184,7 +2240,7 @@ private:
 
     void setVisualUpdatesAllowed(ReadyState);
 
-    enum class VisualUpdatesPreventedReason {
+    enum class VisualUpdatesPreventedReason : uint8_t {
         ReadyState     = 1 << 0,
         Suspension     = 1 << 1,
         RenderBlocking = 1 << 2,
@@ -2352,13 +2408,7 @@ private:
 
     WeakPtr<Element, WeakPtrImplWithEventTargetData> m_cssTarget;
 
-    std::unique_ptr<LazyLoadImageObserver> m_lazyLoadImageObserver;
-#if ENABLE(MODEL_ELEMENT)
-    std::unique_ptr<LazyLoadModelObserver> m_lazyLoadModelObserver;
-#endif
-#if ENABLE(VIDEO)
-    std::unique_ptr<LazyLoadVideoObserver> m_lazyLoadVideoObserver;
-#endif
+    std::unique_ptr<LazyLoadElementObserver> m_lazyLoadElementObserver;
 
     std::unique_ptr<ContentVisibilityDocumentState> m_contentVisibilityDocumentState;
 
@@ -2401,6 +2451,8 @@ private:
     // would be managed.
     WeakHashSet<CanvasRenderingContext> m_canvasContextsToPrepare;
 
+    WeakHashSet<HTMLCanvasElement, WeakPtrImplWithEventTargetData> m_canvasesNeedingPaintEvent;
+
     HashMap<String, Ref<HTMLCanvasElement>> m_cssCanvasElements;
 
     WeakHashSet<Element, WeakPtrImplWithEventTargetData> m_documentSuspensionCallbackElements;
@@ -2421,8 +2473,6 @@ private:
     bool m_deferResizeEventForVisibilityChange { false };
 
     std::optional<HashMap<String, WeakPtr<Element, WeakPtrImplWithEventTargetData>, ASCIICaseInsensitiveHash>> m_accessKeyCache;
-
-    std::unique_ptr<ConstantPropertyMap> m_constantPropertyMap;
 
     RenderPtr<RenderView> m_renderView;
     std::unique_ptr<Style::ComputedStyle> m_initialContainingBlockStyle;
@@ -2505,9 +2555,7 @@ private:
     Timer m_pendingTasksTimer;
     Vector<Task> m_pendingTasks;
 
-#if ENABLE(TEXT_AUTOSIZING)
     std::unique_ptr<TextAutoSizing> m_textAutoSizing;
-#endif
 
     const RefPtr<HighlightRegistry> m_highlightRegistry;
     const RefPtr<HighlightRegistry> m_fragmentHighlightRegistry;
@@ -2540,7 +2588,7 @@ private:
 
     WeakListHashSet<ShadowRoot, WeakPtrImplWithEventTargetData> m_inDocumentShadowRoots;
 
-    RefPtr<CustomElementRegistry> m_activeCustomElementRegistry;
+    HashMap<uintptr_t, RefPtr<CustomElementRegistry>> m_activeCustomElementConstructorMap;
 
 #if ENABLE(WIRELESS_PLAYBACK_TARGET)
     using TargetIdToClientMap = HashMap<PlaybackTargetClientContextIdentifier, WeakPtr<MediaPlaybackTargetClient>>;
@@ -2567,6 +2615,9 @@ private:
     Markable<WallTime> m_overrideLastModified;
 
     WeakHashSet<Element, WeakPtrImplWithEventTargetData> m_associatedFormControls;
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+    std::unique_ptr<AXCustomColorModeController> m_axCustomColorModeController;
+#endif
 
     const std::unique_ptr<OrientationNotifier> m_orientationNotifier;
     mutable RefPtr<Logger> m_logger;
@@ -2609,9 +2660,12 @@ private:
 
     OrderedHashSet<Ref<Element>> m_topLayerElements;
     OrderedHashSet<Ref<HTMLElement>> m_autoPopoverList;
+    OrderedHashSet<Ref<HTMLElement>> m_hintPopoverList;
     OrderedHashSet<Ref<HTMLDialogElement>> m_openDialogsList;
+    unsigned m_popoverShowOrHideDepth { 0 };
 
     WeakPtr<HTMLElement, WeakPtrImplWithEventTargetData> m_popoverPointerDownTarget;
+    WeakPtr<HTMLElement, WeakPtrImplWithEventTargetData> m_popoverHintPointerDownTarget;
     WeakPtr<HTMLDialogElement, WeakPtrImplWithEventTargetData> m_dialogPointerDownTarget;
 
 #if ENABLE(WEB_RTC)
@@ -2642,8 +2696,6 @@ private:
     WeakHashSet<ValidationMessage> m_validationMessagesToPosition;
 
     MediaProducerMediaStateFlags m_mediaState;
-
-    bool m_shouldNotFireMutationEvents = false;
 
     unsigned m_writeRecursionDepth { 0 };
     unsigned m_numberOfRejectedSyncXHRs { 0 };
@@ -2696,130 +2748,113 @@ private:
     OptionSet<ContentRelevancy> m_contentRelevancyUpdate;
 
     StandaloneStatus m_xmlStandalone { StandaloneStatus::Unspecified };
-    bool m_hasXMLDeclaration { false };
-
-    bool m_constructionDidFinish { false };
 
 #if ENABLE(DARK_MODE_CSS)
     OptionSet<ColorScheme> m_colorScheme;
 #endif
 
-    bool m_activeParserWasAborted { false };
-    bool m_writeRecursionIsTooDeep { false };
-    bool m_wellFormed { false };
-    bool m_createRenderers { true };
+    DocumentCompatibilityMode m_compatibilityMode { DocumentCompatibilityMode::NoQuirksMode };
 
-    bool m_hasNodesWithMissingStyle { false };
+    Vector<Function<void()>> m_pendingCompressionDictionaryLoads;
+
+    RenderTreeState m_renderTreeState { RenderTreeState::NotBuilt };
+
+    OriginKeyed m_isOriginKeyed { OriginKeyed::No };
+
+    // These flags are kept as full bool members rather than joining the bitfield block below
+    // because they are bound by reference (via SetForScope or std::exchange), which a bitfield
+    // cannot be.
     // But sometimes you need to ignore pending stylesheet count to
     // force an immediate layout when requested by JS.
     bool m_ignorePendingStylesheets { false };
+    bool m_inRenderTreeUpdate { false };
+    bool m_isInStyleInterleavedLayout { false };
+    bool m_renderingIsSuppressedForViewTransition { false };
+    bool m_enableRenderingIsSuppressedForViewTransitionAfterUpdateRendering { false };
+#if ASSERT_ENABLED
+    bool m_inHitTesting { false };
+#endif
 
-    bool m_hasElementUsingStyleBasedEditability { false };
-    bool m_focusNavigationStartingNodeIsRemoved { false };
-
-    bool m_printing { false };
-    bool m_paginatedForScreen { false };
-
-    DocumentCompatibilityMode m_compatibilityMode { DocumentCompatibilityMode::NoQuirksMode };
-    bool m_compatibilityModeLocked { false }; // This is cheaper than making setCompatibilityMode virtual.
+    // Consolidated boolean flags. Keep these together so the compiler packs them into a few
+    // bytes instead of one byte-plus-padding each.
+    bool m_hasXMLDeclaration : 1 { false };
+    bool m_constructionDidFinish : 1 { false };
+    bool m_activeParserWasAborted : 1 { false };
+    bool m_writeRecursionIsTooDeep : 1 { false };
+    bool m_wellFormed : 1 { false };
+    bool m_createRenderers : 1 { true };
+    bool m_hasNodesWithMissingStyle : 1 { false };
+    bool m_hasElementUsingStyleBasedEditability : 1 { false };
+    bool m_focusNavigationStartingNodeIsRemoved : 1 { false };
+    bool m_printing : 1 { false };
+    bool m_paginatedForScreen : 1 { false };
+    bool m_compatibilityModeLocked : 1 { false }; // This is cheaper than making setCompatibilityMode virtual.
 
     // FIXME: Merge these 2 variables into an enum. Also, FrameLoader::m_didCallImplicitClose
     // is almost a duplication of this data, so that should probably get merged in too.
     // FIXME: Document::m_processingLoadEvent and DocumentLoader::m_wasOnloadDispatched are roughly the same
     // and should be merged.
-    bool m_processingLoadEvent { false };
-    bool m_loadEventFinished { false };
-
-    bool m_visuallyOrdered { false };
-    bool m_bParsing { false }; // FIXME: rename
-
-    bool m_needsFullStyleRebuild { false };
-    bool m_inStyleRecalc { false };
-    bool m_inRenderTreeUpdate { false };
-    bool m_isResolvingTreeStyle { false };
-    bool m_isInStyleInterleavedLayout { false };
-
-    bool m_gotoAnchorNeededAfterStylesheetsLoad { false };
-
-    bool m_isSynthesized { false };
-    bool m_isNonRenderedPlaceholder { false };
-
-    bool m_sawElementsInKnownNamespaces { false };
-    bool m_isSrcdocDocument { false };
-
-    bool m_renderTreeBeingDestroyed { false };
-    bool m_hasPreparedForDestruction { false };
-
-    bool m_hasStyleWithViewportUnits { false };
-    bool m_needsDOMWindowResizeEvent { false };
-    bool m_needsVisualViewportResizeEvent { false };
-    bool m_needsVisualViewportScrollEvent { false };
-    bool m_isTimerThrottlingEnabled { false };
-    bool m_isSuspended { false };
-
-    bool m_scheduledTasksAreSuspended { false };
-
-    bool m_areDeviceMotionAndOrientationUpdatesSuspended { false };
-
-    bool m_didEnqueueFirstContentfulPaint { false };
-
-    OriginKeyed m_isOriginKeyed { OriginKeyed::No };
-
-    bool m_mayHaveRenderedSVGForeignObjects { false };
-    bool m_mayHaveRenderedSVGRootElements { false };
-
-    bool m_userHasInteractedWithMediaElement { false };
-
-    bool m_hasEverHadSelectionInsideTextFormControl { false };
-
-    bool m_updateTitleTaskScheduled { false };
-
-    bool m_shouldPreventEnteringBackForwardCacheForTesting { false };
-    bool m_hasLoadedThirdPartyScript { false };
-    bool m_hasLoadedThirdPartyFrame { false };
-    bool m_hasVisuallyNonEmptyCustomContent { false };
-
-    bool m_visibilityHiddenDueToDismissal { false };
-
+    bool m_processingLoadEvent : 1 { false };
+    bool m_loadEventFinished : 1 { false };
+    bool m_visuallyOrdered : 1 { false };
+    bool m_bParsing : 1 { false }; // FIXME: rename
+    bool m_needsFullStyleRebuild : 1 { false };
+    bool m_inStyleRecalc : 1 { false };
+    bool m_isResolvingTreeStyle : 1 { false };
+    bool m_gotoAnchorNeededAfterStylesheetsLoad : 1 { false };
+    bool m_isSynthesized : 1 { false };
+    bool m_isNonRenderedPlaceholder : 1 { false };
+    bool m_sawElementsInKnownNamespaces : 1 { false };
+    bool m_isSrcdocDocument : 1 { false };
+    bool m_hasPreparedForDestruction : 1 { false };
+    bool m_hasStyleWithViewportUnits : 1 { false };
+    bool m_needsDOMWindowResizeEvent : 1 { false };
+    bool m_needsVisualViewportResizeEvent : 1 { false };
+    bool m_needsVisualViewportScrollEvent : 1 { false };
+    bool m_isTimerThrottlingEnabled : 1 { false };
+    bool m_isSuspended : 1 { false };
+    bool m_scheduledTasksAreSuspended : 1 { false };
+    bool m_areDeviceMotionAndOrientationUpdatesSuspended : 1 { false };
+    bool m_didEnqueueFirstContentfulPaint : 1 { false };
+    bool m_mayHaveRenderedSVGForeignObjects : 1 { false };
+    bool m_mayHaveRenderedSVGRootElements : 1 { false };
+    bool m_userHasInteractedWithMediaElement : 1 { false };
+    bool m_hasEverHadSelectionInsideTextFormControl : 1 { false };
+    bool m_updateTitleTaskScheduled : 1 { false };
+    bool m_shouldPreventEnteringBackForwardCacheForTesting : 1 { false };
+    bool m_hasLoadedThirdPartyScript : 1 { false };
+    bool m_hasLoadedThirdPartyFrame : 1 { false };
+    bool m_hasVisuallyNonEmptyCustomContent : 1 { false };
+    bool m_visibilityHiddenDueToDismissal : 1 { false };
+    bool m_shouldNotFireMutationEvents : 1 { false };
+    bool m_hasViewTransitionPseudoElementTree : 1 { false };
+    bool m_isDirAttributeDirty : 1 { false };
+    bool m_usesHeadingOffsetAttribute : 1 { false };
+    bool m_scheduledDeferredAXObjectCacheUpdate : 1 { false };
+    bool m_wasRemovedLastRefCalled : 1 { false };
+    bool m_hasBeenRevealed : 1 { false };
+    bool m_visualUpdatesAllowedChangeRequiresLayoutMilestones : 1 { false };
+    bool m_visualUpdatesAllowedChangeCompletesPageTransition : 1 { false };
+    bool m_requiresTrustedTypes : 1 { false };
 #if ENABLE(XSLT)
-    bool m_hasPendingXSLTransforms { false };
+    bool m_hasPendingXSLTransforms : 1 { false };
+    bool m_hasLoggedXSLTDeprecationWarning : 1 { false };
 #endif
-
 #if ENABLE(MEDIA_STREAM)
-    bool m_hasHadCaptureMediaStreamTrack { false };
+    bool m_hasHadCaptureMediaStreamTrack : 1 { false };
 #endif
-
 #if HAVE(SUPPORT_HDR_DISPLAY)
-    bool m_hasHDRContent { false };
+    bool m_hasHDRContent : 1 { false };
 #endif
-
-    bool m_hasViewTransitionPseudoElementTree { false };
-    bool m_renderingIsSuppressedForViewTransition { false };
-    bool m_enableRenderingIsSuppressedForViewTransitionAfterUpdateRendering { false };
-
 #if ENABLE(TOUCH_ACTION_REGIONS)
-    bool m_mayHaveElementsWithNonAutoTouchAction { false };
+    bool m_mayHaveElementsWithNonAutoTouchAction : 1 { false };
 #endif
 #if ENABLE(EDITABLE_REGION)
-    bool m_mayHaveEditableElements { false };
+    bool m_mayHaveEditableElements : 1 { false };
 #endif
 #if ENABLE(TELEPHONE_NUMBER_DETECTION)
-    bool m_isTelephoneNumberParsingAllowed { true };
+    bool m_isTelephoneNumberParsingAllowed : 1 { true };
 #endif
-
-#if ASSERT_ENABLED
-    bool m_inHitTesting { false };
-#endif
-    bool m_isDirAttributeDirty { false };
-
-    bool m_scheduledDeferredAXObjectCacheUpdate { false };
-    bool m_wasRemovedLastRefCalled { false };
-
-    bool m_hasBeenRevealed { false };
-    bool m_visualUpdatesAllowedChangeRequiresLayoutMilestones { false };
-    bool m_visualUpdatesAllowedChangeCompletesPageTransition { false };
-
-    bool m_requiresTrustedTypes { false };
 
     static bool hasEverCreatedAnAXObjectCache;
 

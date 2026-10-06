@@ -152,6 +152,8 @@ static WebCore::WebGPU::VertexFormat toVertexFormat(MTLVertexFormat format)
         return WebCore::WebGPU::VertexFormat::Sint32x3;
     case MTLVertexFormatInt4:
         return WebCore::WebGPU::VertexFormat::Sint32x4;
+    case MTLVertexFormatInt1010102Normalized:
+        return WebCore::WebGPU::VertexFormat::Snorm1010102;
     case MTLVertexFormatUInt1010102Normalized:
         return WebCore::WebGPU::VertexFormat::Unorm1010102;
     case MTLVertexFormatUChar4Normalized_BGRA:
@@ -186,6 +188,24 @@ static WebModel::IndexType toIndexType(MTLIndexType indexType)
         return WebModel::IndexType::UInt16;
     case MTLIndexTypeUInt32:
         return WebModel::IndexType::UInt32;
+    default:
+        RELEASE_ASSERT_NOT_REACHED("%s - USD file is corrupt", __PRETTY_FUNCTION__);
+    }
+}
+
+static WebModel::VertexStepFunction toStepFunction(MTLVertexStepFunction stepFunction)
+{
+    switch (stepFunction) {
+    case MTLVertexStepFunctionConstant:
+        return WebModel::VertexStepFunction::Constant;
+    case MTLVertexStepFunctionPerVertex:
+        return WebModel::VertexStepFunction::PerVertex;
+    case MTLVertexStepFunctionPerInstance:
+        return WebModel::VertexStepFunction::PerInstance;
+    case MTLVertexStepFunctionPerPatch:
+        return WebModel::VertexStepFunction::PerPatch;
+    case MTLVertexStepFunctionPerPatchControlPoint:
+        return WebModel::VertexStepFunction::PerPatchControlPoint;
     default:
         RELEASE_ASSERT_NOT_REACHED("%s - USD file is corrupt", __PRETTY_FUNCTION__);
     }
@@ -454,6 +474,8 @@ static WebModel::VertexLayout convert(WKBridgeVertexLayout *layout)
         .bufferIndex = layout.bufferIndex,
         .bufferOffset = layout.bufferOffset,
         .bufferStride = layout.bufferStride,
+        .stepFunction = toStepFunction(layout.stepFunction),
+        .stepRate = layout.stepRate,
     };
 }
 static Vector<WebModel::VertexLayout> convert(NSArray<WKBridgeVertexLayout *> *layouts)

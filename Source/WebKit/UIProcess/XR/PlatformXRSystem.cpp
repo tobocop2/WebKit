@@ -74,8 +74,14 @@ void PlatformXRSystem::invalidate(InvalidationReason reason)
     if (!page)
         return;
 
-    if (m_immersiveSessionState == ImmersiveSessionState::Idle)
+    // Multi-view case is handled: if two views have enumerated devices (so the coordinator is Idle), when one view is torn down, the
+    // instance would be destroyed for the other view. This is not a problem, as the remaining view will re-create an instance either
+    // in getPrmiaryDeviceInfo() or in startSession().
+    if (m_immersiveSessionState == ImmersiveSessionState::Idle) {
+        if (reason == InvalidationReason::State && xrCoordinator())
+            xrCoordinator()->stopWhenIdle();
         return;
+    }
 
     if (xrCoordinator())
         xrCoordinator()->endSessionIfExists(*page);
@@ -154,8 +160,10 @@ static bool checkFeaturesConsent(const std::optional<PlatformXR::Device::Feature
     return result;
 }
 
-void PlatformXRSystem::requestPermissionOnSessionFeatures(IPC::Connection& connection, const WebCore::SecurityOriginData& securityOriginData, PlatformXR::SessionMode mode, const PlatformXR::Device::FeatureList& granted, const PlatformXR::Device::FeatureList& consentRequired, const PlatformXR::Device::FeatureList& consentOptional, const PlatformXR::Device::FeatureList& requiredFeaturesRequested, const PlatformXR::Device::FeatureList& optionalFeaturesRequested, CompletionHandler<void(std::optional<PlatformXR::Device::FeatureList>&&)>&& completionHandler)
+void PlatformXRSystem::requestPermissionOnSessionFeatures(IPC::Connection& connection, IPC::Untrusted<WebCore::SecurityOriginData>&& untrustedOrigin, PlatformXR::SessionMode mode, const PlatformXR::Device::FeatureList& granted, const PlatformXR::Device::FeatureList& consentRequired, const PlatformXR::Device::FeatureList& consentOptional, const PlatformXR::Device::FeatureList& requiredFeaturesRequested, const PlatformXR::Device::FeatureList& optionalFeaturesRequested, CompletionHandler<void(std::optional<PlatformXR::Device::FeatureList>&&)>&& completionHandler)
 {
+    auto securityOriginData = WTF::move(untrustedOrigin).unsafeExtractWithoutValidation(IPC::UnvalidatedReason::NeedsReview);
+
     ASSERT(RunLoop::isMain());
 
     RefPtr page = m_page.get();
@@ -289,7 +297,7 @@ void PlatformXRSystem::submitFrame(IPC::Connection& connection)
 }
 
 #if ENABLE(WEBXR_HIT_TEST)
-void PlatformXRSystem::requestHitTestSource(const PlatformXR::HitTestOptions& hitTestOptions, CompletionHandler<void(Expected<PlatformXR::HitTestSource, WebCore::ExceptionData>)>&& passedCompletionHandler)
+void PlatformXRSystem::requestHitTestSource(const PlatformXR::HitTestOptions& hitTestOptions, CompletionHandler<void(std::expected<PlatformXR::HitTestSource, WebCore::ExceptionData>)>&& passedCompletionHandler)
 {
     auto completionHandler = [passedCompletionHandler = WTF::move(passedCompletionHandler)](WebCore::ExceptionOr<PlatformXR::HitTestSource> exceptionOrValue) mutable {
         if (exceptionOrValue.hasException()) {
@@ -320,7 +328,7 @@ void PlatformXRSystem::deleteHitTestSource(PlatformXR::HitTestSource source)
         xrCoordinator->deleteHitTestSource(*page, source);
 }
 
-void PlatformXRSystem::requestTransientInputHitTestSource(const PlatformXR::TransientInputHitTestOptions& hitTestOptions, CompletionHandler<void(Expected<PlatformXR::TransientInputHitTestSource, WebCore::ExceptionData>)>&& passedCompletionHandler)
+void PlatformXRSystem::requestTransientInputHitTestSource(const PlatformXR::TransientInputHitTestOptions& hitTestOptions, CompletionHandler<void(std::expected<PlatformXR::TransientInputHitTestSource, WebCore::ExceptionData>)>&& passedCompletionHandler)
 {
     auto completionHandler = [passedCompletionHandler = WTF::move(passedCompletionHandler)](WebCore::ExceptionOr<PlatformXR::TransientInputHitTestSource> exceptionOrValue) mutable {
         if (exceptionOrValue.hasException()) {

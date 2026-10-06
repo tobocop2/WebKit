@@ -23,11 +23,13 @@
 #pragma once
 
 #include <WebCore/CachedResource.h>
+#include <WebCore/FloatSize.h>
 #include <WebCore/Image.h>
 #include <WebCore/ImageObserver.h>
 #include <WebCore/IntRect.h>
 #include <WebCore/LayoutSize.h>
 #include <WebCore/SVGImageCache.h>
+#include <WebCore/StyleLinkParameters.h>
 #include <wtf/HashMap.h>
 #include <wtf/HashSet.h>
 
@@ -36,8 +38,8 @@ namespace WebCore {
 class CachedImageClient;
 class CachedResourceLoader;
 class WeakPtrImplWithEventTargetData;
-class FloatSize;
 class MemoryCache;
+class NativeImage;
 class RenderElement;
 class RenderObject;
 class SecurityOrigin;
@@ -56,7 +58,7 @@ public:
     bool currentFrameKnownToBeOpaque(const RenderElement*);
     bool currentFrameIsComplete(const RenderElement*);
 
-    std::pair<WeakPtr<Image>, float> brokenImage(float deviceScaleFactor) const; // Returns an image and the image's resolution scale factor.
+    std::pair<WeakPtr<BitmapImage>, float> brokenImage(float deviceScaleFactor) const; // Returns an image and the image's resolution scale factor.
     bool NODELETE willPaintBrokenImage() const;
 
     bool canRender(const RenderElement* renderer, float multiplier) { return !errorOccurred() && !imageSizeForRenderer(renderer, multiplier).isEmpty(); }
@@ -64,11 +66,11 @@ public:
     void setAllowsOrientationOverride(bool b) { m_allowsOrientationOverride = b; }
     bool allowsOrientationOverride() const { return m_allowsOrientationOverride; }
 
-    void setContainerContextForClient(const CachedImageClient&, const LayoutSize&, float, const URL&);
-    bool usesImageContainerSize() const { return m_image && m_image->usesContainerSize(); }
-    bool imageHasNaturalAspectRatio() const { return m_image && m_image->hasNaturalAspectRatio(); }
-    bool imageHasRelativeWidth() const { return m_image && m_image->hasRelativeWidth(); }
-    bool imageHasRelativeHeight() const { return m_image && m_image->hasRelativeHeight(); }
+    void setContainerContextForClient(const CachedImageClient&, const LayoutSize&, float, const URL&, const Style::LinkParameters&);
+    bool usesImageContainerSize() const { return m_image && protect(m_image)->usesContainerSize(); }
+    bool imageHasNaturalAspectRatio() const { return m_image && protect(m_image)->hasNaturalAspectRatio(); }
+    bool imageHasRelativeWidth() const { return m_image && protect(m_image)->hasRelativeWidth(); }
+    bool imageHasRelativeHeight() const { return m_image && protect(m_image)->hasRelativeHeight(); }
 
     void updateBuffer(const FragmentedSharedBuffer&) override;
     void finishLoading(const FragmentedSharedBuffer*, const NetworkLoadMetrics&) override;
@@ -148,10 +150,10 @@ private:
         explicit CachedImageObserver(CachedImage&);
 
         // ImageObserver API
-        URL sourceUrl() const override { return !m_cachedImages.isEmptyIgnoringNullReferences() ? (*m_cachedImages.begin()).url() : URL(); }
-        String mimeType() const override { return !m_cachedImages.isEmptyIgnoringNullReferences() ? (*m_cachedImages.begin()).mimeType() : emptyString(); }
-        unsigned numberOfClients() const override { return !m_cachedImages.isEmptyIgnoringNullReferences() ? (*m_cachedImages.begin()).numberOfClients() : 0; }
-        long long expectedContentLength() const override { return !m_cachedImages.isEmptyIgnoringNullReferences() ? (*m_cachedImages.begin()).expectedContentLength() : 0; }
+        URL sourceUrl() const override { return !m_cachedImages.isEmptyIgnoringNullReferences() ? protect(*m_cachedImages.begin())->url() : URL(); }
+        String mimeType() const override { return !m_cachedImages.isEmptyIgnoringNullReferences() ? protect(*m_cachedImages.begin())->mimeType() : emptyString(); }
+        unsigned numberOfClients() const override { return !m_cachedImages.isEmptyIgnoringNullReferences() ? protect(*m_cachedImages.begin())->numberOfClients() : 0; }
+        long long expectedContentLength() const override { return !m_cachedImages.isEmptyIgnoringNullReferences() ? protect(*m_cachedImages.begin())->expectedContentLength() : 0; }
 
         void encodedDataStatusChanged(const Image&, EncodedDataStatus) final;
         void decodedSizeChanged(const Image&, long long delta) final;
@@ -165,7 +167,7 @@ private:
 
         bool allowsAnimation(const Image&) const final;
         const Settings* settings() final { return !m_cachedImages.isEmptyIgnoringNullReferences() ? (*m_cachedImages.begin()).m_settings.get() : nullptr; }
-        bool useSystemDarkAppearance() const final { return !m_cachedImages.isEmptyIgnoringNullReferences() && m_cachedImages.begin()->useSystemDarkAppearance(); }
+        bool useSystemDarkAppearance() const final { return !m_cachedImages.isEmptyIgnoringNullReferences() && protect(*m_cachedImages.begin())->useSystemDarkAppearance(); }
 
         WeakHashSet<CachedImage> m_cachedImages;
     };
@@ -188,6 +190,7 @@ private:
         LayoutSize containerSize;
         float containerZoom;
         URL imageURL;
+        Style::LinkParameters linkParameters { CSS::Keyword::None { } };
     };
 
     using ContainerContextRequests = HashMap<SingleThreadWeakRef<const CachedImageClient>, ContainerContext>;

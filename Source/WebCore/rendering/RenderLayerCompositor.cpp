@@ -539,7 +539,9 @@ static inline bool compositingLogEnabled()
 {
     return LogCompositing.state == WTFLogChannelState::On;
 }
+#endif
 
+#if ENABLE(TREE_DEBUGGING)
 static inline bool layersLogEnabled()
 {
     return LogLayers.state == WTFLogChannelState::On;
@@ -1152,7 +1154,7 @@ bool RenderLayerCompositor::updateCompositingLayers(CompositingUpdateType update
         }
 
         RefPtr scrollingCoordinator = this->scrollingCoordinator();
-        bool hadSubscrollers = scrollingCoordinator ? scrollingCoordinator->hasSubscrollers(m_renderView.frame().rootFrame().frameID()) : false;
+        bool hadSubscrollers = scrollingCoordinator && scrollingCoordinator->hasSubscrollers(m_renderView.frame().rootFrame().frameID());
 
         UpdateBackingTraversalState traversalState;
         Vector<Ref<GraphicsLayer>> childList;
@@ -1793,10 +1795,13 @@ void RenderLayerCompositor::updateBackingAndHierarchy(RenderLayer& layer, Vector
 
     auto appendForegroundLayerIfNecessary = [&] {
         // If a negative z-order child is compositing, we get a foreground layer which needs to get parented.
-        if (layer.negativeZOrderLayers().size()) {
-            if (layerBacking && layerBacking->foregroundLayer())
-                childList.append(Ref { *layerBacking->foregroundLayer() });
-        }
+        bool needsForegroundLayer = !!layer.negativeZOrderLayers().size();
+#if ENABLE(SPATIAL_PORTAL)
+        // Same thing for `spatial: portal` elements.
+        needsForegroundLayer = needsForegroundLayer || isSpatialPortal(layer.renderer());
+#endif
+        if (needsForegroundLayer && layerBacking && layerBacking->foregroundLayer())
+            childList.append(Ref { *layerBacking->foregroundLayer() });
     };
 
     // After recursing into a composited SVG child, add the overlay "(svg segment N)" layer that paints the
@@ -2045,7 +2050,9 @@ void RenderLayerCompositor::appendDocumentOverlayLayers(Vector<Ref<GraphicsLayer
     if (!page().pageOverlayController().hasDocumentOverlays())
         return;
 
-    Ref<GraphicsLayer> overlayHost = page().pageOverlayController().layerWithDocumentOverlays();
+    // Host the document-overlay root scoped to THIS root frame; under Site Isolation several local
+    // roots can share a process and each needs its own container (a GraphicsLayer has one parent).
+    Ref<GraphicsLayer> overlayHost = page().pageOverlayController().layerWithDocumentOverlaysForFrame(&m_renderView.frameView().frame());
     childList.append(WTF::move(overlayHost));
 }
 
@@ -2131,7 +2138,7 @@ void RenderLayerCompositor::logLayerInfo(const RenderLayer& layer, ASCIILiteral 
 
     logString.append(layer.name(), " - "_s, phase);
 
-    LOG(Compositing, "%s", logString.toString().utf8().data());
+    LOG_WITH_STREAM(Compositing, stream << logString.toString());
 }
 #endif
 
@@ -3306,6 +3313,7 @@ bool RenderLayerCompositor::requiresCompositingLayer(const RenderLayer& layer, R
         || requiresCompositingForViewTransition(renderer)
         || requiresCompositingForVideo(renderer)
         || requiresCompositingForModel(renderer)
+        || requiresCompositingForSpatialPortal(renderer)
         || requiresCompositingForFrame(renderer, queryData)
         || requiresCompositingForPlugin(renderer, queryData)
         || requiresCompositingForOverflowScrolling(*renderer.layer(), queryData)
@@ -3388,6 +3396,7 @@ bool RenderLayerCompositor::requiresOwnBackingStore(const RenderLayer& layer, co
         || requiresCompositingForViewTransition(renderer)
         || requiresCompositingForVideo(renderer)
         || requiresCompositingForModel(renderer)
+        || requiresCompositingForSpatialPortal(renderer)
         || requiresCompositingForFrame(renderer, queryData)
         || requiresCompositingForPlugin(renderer, queryData)
         || requiresCompositingForOverflowScrolling(layer, queryData)
@@ -3443,6 +3452,8 @@ OptionSet<CompositingReason> RenderLayerCompositor::reasonsForCompositing(const 
         reasons.add(CompositingReason::Canvas);
     else if (requiresCompositingForModel(renderer))
         reasons.add(CompositingReason::Model);
+    else if (requiresCompositingForSpatialPortal(renderer))
+        reasons.add(CompositingReason::SpatialPortal);
     else if (requiresCompositingForPlugin(renderer, queryData))
         reasons.add(CompositingReason::Plugin);
     else if (requiresCompositingForFrame(renderer, queryData))
@@ -3565,6 +3576,7 @@ static ASCIILiteral compositingReasonToString(CompositingReason reason)
     case CompositingReason::WillChange: return "will-change"_s;
     case CompositingReason::Root: return "root"_s;
     case CompositingReason::Model: return "model"_s;
+    case CompositingReason::SpatialPortal: return "spatial-portal"_s;
     case CompositingReason::BackdropRoot: return "backdrop root"_s;
     case CompositingReason::AnchorPositioning: return "anchor positioning"_s;
     }
@@ -3676,11 +3688,7 @@ Vector<CompositedClipData> RenderLayerCompositor::computeAncestorClippingStack(c
             return;
 
         auto infiniteRect = LayoutRect::infiniteRect();
-        auto renderableInfiniteRect = [] {
-            // Return a infinite-like rect whose values are such that, when converted to float pixel values, they can reasonably represent device pixels.
-            return LayoutRect(LayoutUnit::nearlyMin() / 32, LayoutUnit::nearlyMin() / 32, LayoutUnit::nearlyMax() / 16, LayoutUnit::nearlyMax() / 16);
-        }();
-
+        auto renderableInfiniteRect = LayoutRect::renderableInfiniteRect();
         if (clipRect.width() == infiniteRect.width()) {
             clipRect.setX(renderableInfiniteRect.x());
             clipRect.setWidth(renderableInfiniteRect.width());
@@ -3817,6 +3825,17 @@ bool RenderLayerCompositor::isCompositedPlugin(const RenderObject& renderer)
 bool RenderLayerCompositor::isSeparated(const RenderObject& renderer)
 {
     return renderer.style().usedTransformStyle3D() == TransformStyle3D::Separated;
+}
+#endif
+
+#if ENABLE(SPATIAL_PORTAL)
+bool RenderLayerCompositor::isSpatialPortal(const RenderObject& renderer)
+{
+    CheckedPtr renderElement = dynamicDowncast<RenderElement>(renderer);
+    if (!renderElement)
+        return false;
+    RefPtr element = renderElement->element();
+    return element && element->establishesSpatialPortal();
 }
 #endif
 
@@ -4029,6 +4048,16 @@ bool RenderLayerCompositor::requiresCompositingForModel(RenderLayerModelObject& 
     return false;
 }
 
+bool RenderLayerCompositor::requiresCompositingForSpatialPortal(RenderLayerModelObject& renderer) const
+{
+#if ENABLE(SPATIAL_PORTAL)
+    return isSpatialPortal(renderer);
+#else
+    UNUSED_PARAM(renderer);
+    return false;
+#endif
+}
+
 bool RenderLayerCompositor::requiresCompositingForPlugin(RenderLayerModelObject& renderer, RequiresCompositingData& queryData) const
 {
     if (!(m_compositingTriggers & ChromeClient::PluginTrigger))
@@ -4120,8 +4149,13 @@ bool RenderLayerCompositor::requiresCompositingForPosition(RenderLayerModelObjec
     if (!m_renderView.settings().acceleratedCompositingForFixedPositionEnabled())
         return false;
 
-    if (isSticky)
-        return isAsyncScrollableStickyLayer(layer);
+    if (isSticky) {
+        // rendererForCompositingTests() substitutes the reflected renderer for a RenderReplica, so `layer` can
+        // be the replica's layer while `renderer` is the sticky renderer being reflected. Ask about the sticky
+        // renderer's own layer; for every other caller this is the layer we were passed.
+        CheckedPtr stickyLayer = renderer.layer();
+        return stickyLayer && isAsyncScrollableStickyLayer(*stickyLayer);
+    }
 
     if (queryData.layoutUpToDate == LayoutUpToDate::No) {
         queryData.reevaluateAfterLayout = true;
@@ -4511,6 +4545,12 @@ bool RenderLayerCompositor::needsContentsCompositingLayer(const RenderLayer& lay
         if (anchor && anchor->isSystemPreviewLink())
             return true;
     }
+#endif
+
+#if ENABLE(SPATIAL_PORTAL)
+    // DOM content goes in the foreground layer by default, the content layer will be a StereoLayer for models.
+    if (isSpatialPortal(layer.renderer()))
+        return true;
 #endif
 
     return false;
@@ -5359,7 +5399,7 @@ void RenderLayerCompositor::updateRootLayerAttachment()
 
 void RenderLayerCompositor::rootLayerAttachmentChanged()
 {
-    // The document-relative page overlay layer (which is pinned to the main frame's layer tree)
+    // The document-relative page overlay layer (which is pinned to the root frame's layer tree)
     // is moved between different RenderLayerCompositors' layer trees, and needs to be
     // reattached whenever we swap in a new RenderLayerCompositor.
     if (m_rootLayerAttachment == RootLayerUnattached)
@@ -5371,10 +5411,14 @@ void RenderLayerCompositor::rootLayerAttachmentChanged()
     if (auto* backing = layer ? layer->backing() : nullptr)
         backing->updateDrawsContent();
 
-    if (!m_renderView.frameView().frame().isMainFrame())
+    // Host the document overlay in the root frame's layer tree. Under Site Isolation the main frame
+    // can be remote here, so the local root frame owns the compositing tree that reaches the screen
+    // (isRootFrameCompositor(), matching appendDocumentOverlayLayers()). Gating on isMainFrame() would
+    // orphan the overlay in a subframe process across a root-layer re-attach.
+    if (!isRootFrameCompositor())
         return;
 
-    Ref<GraphicsLayer> overlayHost = page().pageOverlayController().layerWithDocumentOverlays();
+    Ref<GraphicsLayer> overlayHost = page().pageOverlayController().layerWithDocumentOverlaysForFrame(&m_renderView.frameView().frame());
     RefPtr { m_rootContentsLayer }->addChild(WTF::move(overlayHost));
 }
 
@@ -5699,6 +5743,13 @@ std::optional<ScrollingNodeID> RenderLayerCompositor::updateScrollCoordinationFo
     if (!hasCoordinatedScrolling()) {
         // If this frame isn't coordinated, it cannot contain any scrolling tree nodes.
         return std::nullopt;
+    }
+
+    // With no roles every branch below takes its detach path - short-cut and return the parent node ID.
+    if (roles.isEmpty()) {
+        auto* backing = layer.backing();
+        if (!backing || !backing->hasAnyScrollingNodeID())
+            return treeState.parentNodeID;
     }
 
     auto newNodeID = treeState.parentNodeID;

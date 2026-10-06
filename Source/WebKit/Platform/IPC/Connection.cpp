@@ -71,6 +71,8 @@ constexpr Seconds largeOutgoingMessageQueueTimeThreshold { 20_s };
 
 std::atomic<unsigned> UnboundedSynchronousIPCScope::unboundedSynchronousIPCCount = 0;
 
+thread_local Connection::MessageDispatchScope* Connection::MessageDispatchScope::s_current { nullptr };
+
 #if ENABLE(UNFAIR_LOCK)
 static UnfairLock s_connectionMapLock;
 #else
@@ -314,9 +316,9 @@ Ref<Connection> Connection::createServerConnection(Identifier&& identifier, Thre
     return adoptRef(*new Connection(WTF::move(identifier), true, receiveQueueQOS));
 }
 
-Ref<Connection> Connection::createClientConnection(Identifier&& identifier)
+Ref<Connection> Connection::createClientConnection(Identifier&& identifier, Thread::QOS receiveQueueQOS)
 {
-    return adoptRef(*new Connection(WTF::move(identifier), false));
+    return adoptRef(*new Connection(WTF::move(identifier), false, receiveQueueQOS));
 }
 
 static HashMap<IPC::Connection::UniqueID, ThreadSafeWeakPtr<Connection>>& NODELETE connectionMap() WTF_REQUIRES_LOCK(s_connectionMapLock)
@@ -437,26 +439,25 @@ void Connection::removeMessageReceiver(ReceiverName receiverName, uint64_t desti
 template<typename MessageReceiverType>
 void Connection::dispatchMessageReceiverMessage(MessageReceiverType& messageReceiver, UniqueRef<Decoder>&& decoder)
 {
-#if ASSERT_ENABLED
-    ++m_inDispatchMessageCount;
-#endif
+    bool didReceiveInvalidMessage = false;
+    {
+        MessageDispatchScope dispatchScope { *this };
 
-    messageLog().add(decoder->messageName());
+        messageLog().add(decoder->messageName());
 
-    if (decoder->isSyncMessage()) {
-        auto replyEncoder = makeUniqueRef<Encoder>(MessageName::SyncMessageReply, decoder->syncRequestID().toUInt64());
-        messageReceiver.didReceiveSyncMessage(*this, decoder.get(), replyEncoder);
-        // If the message was not handled or handler tried to decode and marked it invalid, reply with
-        // cancel message. For more info, see Connection:dispatchSyncMessage.
-        std::unique_ptr remainingReplyEncoder = replyEncoder.moveToUniquePtr();
-        if (remainingReplyEncoder)
-            sendMessageImpl(makeUniqueRef<Encoder>(MessageName::CancelSyncMessageReply, decoder->syncRequestID().toUInt64()), { });
-    } else
-        messageReceiver.didReceiveMessage(*this, decoder.get());
+        if (decoder->isSyncMessage()) {
+            auto replyEncoder = makeUniqueRef<Encoder>(MessageName::SyncMessageReply, decoder->syncRequestID().toUInt64());
+            messageReceiver.didReceiveSyncMessage(*this, decoder.get(), replyEncoder);
+            // If the message was not handled or handler tried to decode and marked it invalid, reply with
+            // cancel message. For more info, see Connection:dispatchSyncMessage.
+            std::unique_ptr remainingReplyEncoder = replyEncoder.moveToUniquePtr();
+            if (remainingReplyEncoder)
+                sendMessageImpl(makeUniqueRef<Encoder>(MessageName::CancelSyncMessageReply, decoder->syncRequestID().toUInt64()), { });
+        } else
+            messageReceiver.didReceiveMessage(*this, decoder.get());
 
-#if ASSERT_ENABLED
-    --m_inDispatchMessageCount;
-#endif
+        didReceiveInvalidMessage = dispatchScope.didReceiveInvalidMessage() || !decoder->isValid();
+    }
 
 #if ENABLE(IPC_TESTING_API)
     if (decoder->hasErrorString())
@@ -465,8 +466,10 @@ void Connection::dispatchMessageReceiverMessage(MessageReceiverType& messageRece
     if (m_ignoreInvalidMessageForTesting)
         return;
 #endif
+    // A failing message check is a legitimate runtime condition, but a decode failure here means
+    // the encoder and decoder disagree, which is our own bug.
     ASSERT(decoder->isValid());
-    if (!decoder->isValid())
+    if (didReceiveInvalidMessage && isValid())
         dispatchDidReceiveInvalidMessage(decoder->messageName(), decoder->indicesOfObjectsFailingDecoding());
 }
 
@@ -482,7 +485,8 @@ void Connection::setDidCloseOnConnectionWorkQueueCallback(DidCloseOnConnectionWo
 
 void Connection::setOutgoingMessageQueueIsGrowingLargeCallback(OutgoingMessageQueueIsGrowingLargeCallback&& callback)
 {
-    m_outgoingMessageQueueIsGrowingLargeCallback = WTF::move(callback);
+    Locker locker { m_outgoingMessagesLock };
+    m_outgoingMessageQueueIsGrowingLargeCallback = Box<OutgoingMessageQueueIsGrowingLargeCallback>::create(WTF::move(callback));
 }
 
 bool Connection::open(Client& client, SerialFunctionDispatcher& dispatcher)
@@ -524,7 +528,10 @@ void Connection::invalidate()
         return;
     assertIsCurrent(dispatcher());
     m_client = nullptr;
-    m_outgoingMessageQueueIsGrowingLargeCallback = nullptr;
+    {
+        Locker locker { m_outgoingMessagesLock };
+        m_outgoingMessageQueueIsGrowingLargeCallback = nullptr;
+    }
     {
         Locker locker { m_incomingMessagesLock };
         m_syncState = nullptr;
@@ -639,6 +646,7 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
     bool shouldDispatchMessageSend;
     size_t outgoingMessagesCount;
     bool shouldNotifyOfQueueGrowingLarge;
+    Box<OutgoingMessageQueueIsGrowingLargeCallback> outgoingMessageQueueIsGrowingLargeCallback;
     unsigned maxOutgoingMessageNameCount = 0;
     ASCIILiteral maxOutgoingMessageName;
     {
@@ -648,6 +656,7 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
         outgoingMessagesCount = m_outgoingMessages.size();
         shouldNotifyOfQueueGrowingLarge = m_outgoingMessageQueueIsGrowingLargeCallback && outgoingMessagesCount > largeOutgoingMessageQueueCountThreshold && (MonotonicTime::now() - m_lastOutgoingMessageQueueIsGrowingLargeCallbackCallTime) >= largeOutgoingMessageQueueTimeThreshold;
         if (shouldNotifyOfQueueGrowingLarge) {
+            outgoingMessageQueueIsGrowingLargeCallback = m_outgoingMessageQueueIsGrowingLargeCallback;
             HashCountedSet<ASCIILiteral> outgoingMessageNameCounts;
             for (auto& encoder : m_outgoingMessages) {
                 auto name = description(encoder->messageName());
@@ -668,7 +677,7 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
 #else
         RELEASE_LOG_ERROR(IPC, "Connection::sendMessage(): Too many messages (%zu) in the queue, notifying client (most common: %u %" PUBLIC_LOG_STRING " messages)", outgoingMessagesCount, maxOutgoingMessageNameCount, maxOutgoingMessageName.characters());
 #endif
-        m_outgoingMessageQueueIsGrowingLargeCallback();
+        (*outgoingMessageQueueIsGrowingLargeCallback)();
     }
 
     // It's not clear if calling dispatchWithQOS() will do anything if Connection::sendOutgoingMessages() is already running.
@@ -1078,6 +1087,10 @@ void Connection::processIncomingMessage(UniqueRef<Decoder> message)
     if (message->isAsyncReplyMessage()) {
         // Disallow async replies with invalid destinationIDs to be sent
         if (!AtomicObjectIdentifier<AsyncReplyIDType>::isValidIdentifier(message->destinationID())) {
+            // Drop our SyncMessageState reference while still holding m_incomingMessagesLock. Otherwise the
+            // ~SyncMessageState triggered by this last deref would run without the lock and could race with
+            // invalidate() dropping its own reference (both under m_incomingMessagesLock) on the dispatcher thread.
+            syncState = nullptr;
             incomingMessagesLocker.unlockEarly();
             waitForMessagesLocker.unlockEarly();
 #if ENABLE(IPC_TESTING_API)
@@ -1089,6 +1102,13 @@ void Connection::processIncomingMessage(UniqueRef<Decoder> message)
             return;
         }
         if (auto replyHandlerWithDispatcher = takeAsyncReplyHandlerWithDispatcherWithLockHeld(AtomicObjectIdentifier<AsyncReplyIDType>(message->destinationID()))) {
+            // Drop our SyncMessageState reference while still holding m_incomingMessagesLock, before unlocking to
+            // run the reply handler. Otherwise the ~SyncMessageState triggered by this last deref would run without
+            // the lock and could race with invalidate() dropping its own reference on the dispatcher thread.
+            syncState = nullptr;
+            incomingMessagesLocker.unlockEarly();
+            waitForMessagesLocker.unlockEarly();
+
             replyHandlerWithDispatcher(this, message.moveToUniquePtr());
             return;
         }
@@ -1461,31 +1481,25 @@ void Connection::dispatchMessage(UniqueRef<Decoder> message)
         m_inDispatchMessageMarkedToUseFullySynchronousModeForTesting++;
     }
 
-#if ASSERT_ENABLED
-    ++m_inDispatchMessageCount;
-#endif
-
     bool isDispatchingMessageWhileWaitingForSyncReply = (message->shouldDispatchMessageWhenWaitingForSyncReply() == ShouldDispatchWhenWaitingForSyncReply::Yes)
         || (message->shouldDispatchMessageWhenWaitingForSyncReply() == ShouldDispatchWhenWaitingForSyncReply::YesDuringUnboundedIPC && UnboundedSynchronousIPCScope::hasOngoingUnboundedSyncIPC());
 
     if (isDispatchingMessageWhileWaitingForSyncReply)
         m_inDispatchMessageMarkedDispatchWhenWaitingForSyncReplyCount++;
 
-    bool oldDidReceiveInvalidMessage = m_didReceiveInvalidMessage;
-    m_didReceiveInvalidMessage = false;
+    bool didReceiveInvalidMessage = false;
+    {
+        MessageDispatchScope dispatchScope { *this };
 
-    messageLog().add(message->messageName());
+        messageLog().add(message->messageName());
 
-    if (message->isSyncMessage())
-        dispatchSyncMessage(message.get());
-    else
-        dispatchMessage(message.get());
+        if (message->isSyncMessage())
+            dispatchSyncMessage(message.get());
+        else
+            dispatchMessage(message.get());
 
-    m_didReceiveInvalidMessage |= !message->isValid();
-
-#if ASSERT_ENABLED
-    --m_inDispatchMessageCount;
-#endif
+        didReceiveInvalidMessage = dispatchScope.didReceiveInvalidMessage() || !message->isValid();
+    }
 
     // FIXME: For synchronous messages, we should not decrement the counter until we send a response.
     // Otherwise, we would deadlock if processing the message results in a sync message back after we exit this function.
@@ -1494,9 +1508,6 @@ void Connection::dispatchMessage(UniqueRef<Decoder> message)
 
     if (message->shouldUseFullySynchronousModeForTesting())
         m_inDispatchMessageMarkedToUseFullySynchronousModeForTesting--;
-
-    bool didReceiveInvalidMessage = m_didReceiveInvalidMessage;
-    m_didReceiveInvalidMessage = oldDidReceiveInvalidMessage;
 
 #if ENABLE(IPC_TESTING_API)
     if (m_ignoreInvalidMessageForTesting)
@@ -1743,6 +1754,12 @@ bool Connection::shouldCrashOnMessageCheckFailure()
 void Connection::setShouldCrashOnMessageCheckFailure(bool shouldCrash)
 {
     s_shouldCrashOnMessageCheckFailure = shouldCrash;
+}
+
+void Connection::logFailedMessageCheck(const String& reason, const String& function, const String& file, unsigned line)
+{
+    RELEASE_LOG_FAULT_WITH_PAYLOAD(IPC, "%s %u: Invalid message dispatched %s: %s", file.utf8(), line, function.utf8(), reason.utf8());
+    CRASH_IF_TESTING
 }
 
 } // namespace IPC

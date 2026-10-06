@@ -32,10 +32,12 @@
 #include "Document.h"
 #include "JSDOMExceptionHandling.h"
 #include "JSDOMWindowCustom.h"
+#include "JSWindowProxy.h"
 #include "LocalFrame.h"
 #include "LocalFrameInlines.h"
 #include "ScriptController.h"
 #include "Timer.h"
+#include "WindowProxy.h"
 #include <JavaScriptCore/JSLock.h>
 #include <wtf/MainThread.h>
 #include <wtf/RunLoop.h>
@@ -64,18 +66,25 @@ void FrameDebugger::attachDebugger()
     if (!frame)
         return;
 
-    Ref world = mainThreadNormalWorldSingleton();
-    CheckedRef script = frame->script();
-    auto* globalObject = script->globalObject(world);
-    // globalObject() may lazily create the JSWindowProxy, which fires didClearWindowObjectInWorld
-    // and attaches us via FrameDebuggerAgent::didClearWindowObjectInWorld. Guard against double-attach.
-    if (globalObject && !globalObject->debugger())
-        attach(globalObject);
+    Ref windowProxy = frame->windowProxy();
+    for (auto& jsWindowProxy : windowProxy->jsWindowProxiesAsVector()) {
+        auto* globalObject = jsWindowProxy->window();
+        if (globalObject && !globalObject->debugger())
+            attach(globalObject);
+    }
 }
 
 void FrameDebugger::detachDebugger(bool isBeingDestroyed)
 {
     JSC::Debugger::detachDebugger(isBeingDestroyed);
+
+    // Undo attachDebugger(), skipping global objects it left to another debugger (detach() asserts membership).
+    Ref windowProxy = m_frame->windowProxy();
+    for (auto& jsWindowProxy : windowProxy->jsWindowProxiesAsVector()) {
+        auto* globalObject = jsWindowProxy->window();
+        if (globalObject && isAttached(globalObject))
+            detach(globalObject, JSC::Debugger::TerminatingDebuggingSession);
+    }
 
     if (!isBeingDestroyed)
         recompileAllJSFunctions();
@@ -147,6 +156,13 @@ void FrameDebugger::runEventLoopWhilePausedInternal()
 bool FrameDebugger::isContentScript(JSGlobalObject* state) const
 {
     return &currentWorld(*state) != &mainThreadNormalWorldSingleton() || JSC::Debugger::isContentScript(state);
+}
+
+URL FrameDebugger::sourceURLBase(JSGlobalObject* state) const
+{
+    if (RefPtr context = uncheckedDowncast<JSDOMGlobalObject>(state)->scriptExecutionContext())
+        return context->url();
+    return { };
 }
 
 void FrameDebugger::reportException(JSGlobalObject* state, JSC::Exception* exception) const

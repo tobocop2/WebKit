@@ -35,8 +35,16 @@ namespace WebCore {
 
 class ResourceError;
 
-WEBCORE_EXPORT extern const ASCIILiteral errorDomainWebKitInternal; // Used for errors that won't be exposed to clients.
-WEBCORE_EXPORT extern const ASCIILiteral errorDomainWebKitServiceWorker; // Used for errors that happen when loading a resource from a service worker.
+inline constexpr ASCIILiteral errorDomainWebKitInternal { "WebKitInternal"_s }; // Used for errors that won't be exposed to clients.
+inline constexpr ASCIILiteral errorDomainWebKitServiceWorker { "WebKitServiceWorker"_s }; // Used for errors that happen when loading a resource from a service worker.
+
+// Shared with API::Error in the WebKit layer, which cannot be included here.
+#if USE(GLIB)
+inline constexpr ASCIILiteral errorDomainWebKitNetwork { "WebKitNetworkError"_s };
+#else
+inline constexpr ASCIILiteral errorDomainWebKitNetwork { "WebKitErrorDomain"_s };
+#endif
+inline constexpr int errorCodeHTTPSUpgradeRedirectLoop { 304 };
 
 enum class ResourceErrorBaseType : uint8_t {
     Null,

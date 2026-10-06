@@ -56,6 +56,7 @@
 #include "HTMLStyleElement.h"
 #include "InputEvent.h"
 #include "InspectorInstrumentation.h"
+#include "JSNodeCustom.h"
 #include "KeyboardEvent.h"
 #include "LiveNodeListInlines.h"
 #include "LocalDOMWindow.h"
@@ -122,7 +123,6 @@ struct SameSizeAsNode : EventTarget, CanMakeCheckedPtr<SameSizeAsNode> {
 public:
 #if ASSERT_ENABLED
     bool inRemovedLastRefFunction;
-    bool adoptionIsRequired;
     bool deletionHasBegun;
 #endif
     uint32_t refCountAndParentBit;
@@ -384,10 +384,7 @@ Node::Node(Document& document, NodeType type, OptionSet<TypeFlag> flags)
     ASSERT(nodeType() == type);
     ASSERT(isMainThread());
 
-    // Allow code to ref the Document while it is being constructed to make our life easier.
-    if (isDocumentNode())
-        relaxAdoptionRequirement();
-    else
+    if (!isDocumentNode())
         document.incrementReferencingNodeCount();
 
 #if !defined(NDEBUG) || DUMP_NODE_STATISTICS
@@ -410,7 +407,6 @@ Node::~Node()
 {
     ASSERT(isMainThread());
     ASSERT(deletionHasBegun());
-    ASSERT(!m_adoptionIsRequired);
 
     InspectorInstrumentation::willDestroyDOMNode(*this);
 
@@ -508,20 +504,20 @@ Ref<NodeList> Node::childNodes()
     return ensureRareData().ensureNodeLists().ensureEmptyChildNodeList(*this);
 }
 
-Node *Node::lastDescendant() const
+Node* Node::lastDescendant() const
 {
-    Node *n = const_cast<Node *>(this);
-    while (n && n->lastChild())
-        n = n->lastChild();
-    return n;
+    Node* node = const_cast<Node*>(this);
+    while (auto* child = node->lastChild())
+        node = child;
+    return node;
 }
 
 Node* Node::firstDescendant() const
 {
-    Node *n = const_cast<Node *>(this);
-    while (n && n->firstChild())
-        n = n->firstChild();
-    return n;
+    Node* node = const_cast<Node*>(this);
+    while (auto* child = node->firstChild())
+        node = child;
+    return node;
 }
 
 Element* Node::previousElementSibling() const
@@ -879,7 +875,7 @@ static Node::Editability NODELETE computeEditabilityFromComputedStyle(const Styl
 
 Node::Editability Node::computeEditabilityWithStyle(const Style::ComputedStyle* incomingStyle, UserSelectAllTreatment treatment, ShouldUpdateStyle shouldUpdateStyle) const
 {
-    if (!document().hasLivingRenderTree() || isPseudoElement())
+    if (!document().canEverRender() || isPseudoElement())
         return Editability::ReadOnly;
 
     Ref document = this->document();
@@ -1271,7 +1267,7 @@ bool Node::canStartSelection() const
         if (style.userDrag() == UserDrag::Element && style.usedUserSelect() == UserSelect::None)
             return false;
     }
-    return parentOrShadowHostNode() ? protect(parentOrShadowHostNode())->canStartSelection() : true;
+    return !parentOrShadowHostNode() || protect(parentOrShadowHostNode())->canStartSelection();
 }
 
 Element* Node::shadowHost() const
@@ -1522,7 +1518,7 @@ void Node::removingSteps(RemovalType removalType, ContainerNode& oldParentOfRemo
     }
 }
 
-void Node::movingSteps(bool, ContainerNode&)
+void Node::movingSteps(IsSubtreeRoot, ContainerNode&)
 {
     invalidateStyle(Style::Validity::SubtreeInvalid, Style::InvalidationMode::InsertedIntoAncestor);
 }
@@ -2279,6 +2275,16 @@ void Node::moveTreeToNewScope(Node& root, TreeScope& oldScope, TreeScope& newSco
     }
 }
 
+inline void Node::adoptCustomElementRegistryIntoScopedRegistryDocument()
+{
+    // Called during adoption only when the destination document's custom element registry is scoped.
+    // An element that inherits the global custom element registry (neither uses the null registry
+    // nor an explicit scoped registry) has no global registry to inherit in such a document, so it
+    // ends up with a null custom element registry.
+    if (is<Element>(*this) && !usesNullCustomElementRegistry() && !usesScopedCustomElementRegistryMap())
+        setUsesNullCustomElementRegistry();
+}
+
 void Node::moveNodeToNewDocumentFastCase(Document& oldDocument, Document& newDocument)
 {
     ASSERT(!oldDocument.shouldInvalidateNodeListAndCollectionCaches());
@@ -2292,8 +2298,13 @@ void Node::moveNodeToNewDocumentFastCase(Document& oldDocument, Document& newDoc
     ASSERT(!transientMutationObserverRegistry());
     ASSERT(!oldDocument.numberOfIntersectionObservers());
 
+    ensureWrapperForAdoptedNodeWithForeignGlobalObjectIfNeeded(*this, oldDocument, newDocument);
+
     if (usesNullCustomElementRegistry() && !newDocument.usesNullCustomElementRegistry()) [[unlikely]]
         clearUsesNullCustomElementRegistry();
+
+    if (RefPtr newRegistry = newDocument.customElementRegistry(); newRegistry && newRegistry->isScoped()) [[unlikely]]
+        adoptCustomElementRegistryIntoScopedRegistryDocument();
 
     if (!hasTypeFlag(TypeFlag::HasDidMoveToNewDocument) && !hasEventTargetFlag(EventTargetFlag::HasLangAttr) && !hasEventTargetFlag(EventTargetFlag::HasXMLLangAttr)
         && !isDefinedCustomElement())
@@ -2305,11 +2316,16 @@ void Node::moveNodeToNewDocumentFastCase(Document& oldDocument, Document& newDoc
 
 void Node::moveNodeToNewDocumentSlowCase(Document& oldDocument, Document& newDocument)
 {
+    ensureWrapperForAdoptedNodeWithForeignGlobalObjectIfNeeded(*this, oldDocument, newDocument);
+
     newDocument.incrementReferencingNodeCount();
     oldDocument.decrementReferencingNodeCount();
 
     if (usesNullCustomElementRegistry() && !newDocument.usesNullCustomElementRegistry()) [[unlikely]]
         clearUsesNullCustomElementRegistry();
+
+    if (RefPtr newRegistry = newDocument.customElementRegistry(); newRegistry && newRegistry->isScoped()) [[unlikely]]
+        adoptCustomElementRegistryIntoScopedRegistryDocument();
 
     if (hasRareData()) {
         if (auto* nodeLists = rareData()->nodeLists())
@@ -2830,8 +2846,8 @@ void Node::defaultEventHandler(Event& event)
 
 bool Node::willRespondToMouseMoveEvents() const
 {
-    // FIXME: Why is the iOS code path different from the non-iOS code path?
-#if !PLATFORM(IOS_FAMILY)
+    // FIXME: Why is the Cocoa code path different from the non-Cocoa code path?
+#if !PLATFORM(COCOA)
     auto* element = dynamicDowncast<Element>(*this);
     if (!element)
         return false;
@@ -2869,10 +2885,15 @@ bool Node::willRespondToMouseClickEvents(const Style::ComputedStyle* styleToUse)
     return willRespondToMouseClickEventsWithEditability(computeEditabilityForMouseClickEvents(styleToUse));
 }
 
+bool Node::hasActivationBehavior() const
+{
+    return false;
+}
+
 bool Node::willRespondToMouseClickEventsWithEditability(Editability editability) const
 {
-    // FIXME: Why is the iOS code path different from the non-iOS code path?
-#if !PLATFORM(IOS_FAMILY)
+    // FIXME: Why is the Cocoa code path different from the non-Cocoa code path?
+#if !PLATFORM(COCOA)
     auto* element = dynamicDowncast<Element>(*this);
     if (!element)
         return false;
@@ -2990,7 +3011,7 @@ void Node::setUsesEffectiveTextDirection(bool value)
 
 bool Node::inRenderedDocument() const
 {
-    return isConnected() && document().hasLivingRenderTree();
+    return isConnected() && document().renderTreeState() == Document::RenderTreeState::Built;
 }
 
 void Node::notifyInspectorOfRendererChange()

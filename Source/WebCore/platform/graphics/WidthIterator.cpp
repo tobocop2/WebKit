@@ -93,7 +93,7 @@ inline auto WidthIterator::applyFontTransforms(GlyphBuffer& glyphBuffer, unsigne
     for (unsigned i = lastGlyphCount; i < glyphBufferSize; ++i)
         beforeWidth += width(advances[i]);
 
-    auto initialAdvance = font.applyTransforms(glyphBuffer, lastGlyphCount, m_currentCharacterIndex, m_enableKerning, m_requiresShaping, m_fontCascade->fontDescription().computedLocale(), m_run->text(), direction());
+    auto initialAdvance = font.applyTransforms(glyphBuffer, lastGlyphCount, m_currentCharacterIndex, m_enableKerning, m_requiresShaping, m_fontCascade->fontDescription().usedLocale(), m_run->text(), direction());
 
     glyphBufferSize = glyphBuffer.size();
     advances = glyphBuffer.advances();
@@ -379,7 +379,7 @@ static void NODELETE updateCharacterAndSmallCapsIfNeeded(SmallCapsState& smallCa
 
 static RefPtr<Font> applyTextSpacingTrimIfNeeded(GlyphData& glyphData, char32_t character, TextSpacingTrim textSpacingTrim)
 {
-    if (textSpacingTrim.isSpaceAll())
+    if (textSpacingTrim.isSpaceAll() || !glyphData.font)
         return nullptr;
     TextSpacing::CharactersData charactersData = { .currentCharacter = character, .currentCharacterClass = TextSpacing::characterClass(character) };
     if (RefPtr halfWidthFont = TextSpacing::getHalfWidthFontIfNeeded(*protect(glyphData.font), textSpacingTrim, charactersData)) {
@@ -467,18 +467,20 @@ inline void WidthIterator::advanceInternal(TextIterator& textIterator, GlyphBuff
             continue;
         }
 
-        width = Ref { * advanceInternalState.nextRangeFont }->widthForGlyph(glyph, Font::SyntheticBoldInclusion::Exclude); // We apply synthetic bold after shaping, in applyCSSVisibilityRules().
+        Ref currentRangeFont = *advanceInternalState.nextRangeFont;
+
+        width = currentRangeFont->widthForGlyph(glyph);
         advanceInternalState.widthOfCurrentFontRange += width;
 
         if (FontCascade::treatAsSpace(characterToWrite))
-            advanceInternalState.charactersTreatedAsSpace.constructAndAppend(advanceInternalState.currentCharacterIndex, characterToWrite == space, characterToWrite == tabCharacter ? width : advanceInternalState.nextRangeFont->spaceWidth(Font::SyntheticBoldInclusion::Exclude));
+            advanceInternalState.charactersTreatedAsSpace.constructAndAppend(advanceInternalState.currentCharacterIndex, characterToWrite == space, characterToWrite == tabCharacter ? width : currentRangeFont->spaceWidth());
 
-        m_glyphBounds.computeIfNeeded(glyph, Ref { *advanceInternalState.nextRangeFont }, advanceInternalState.currentCharacterIndex, width);
+        m_glyphBounds.computeIfNeeded(glyph, currentRangeFont, advanceInternalState.currentCharacterIndex, width);
 
         if (m_forTextEmphasis && !FontCascade::canReceiveTextEmphasis(characterToWrite))
             glyph = deletedGlyph;
 
-        addToGlyphBuffer(glyphBuffer, glyph,  Ref { *advanceInternalState.nextRangeFont }, width, advanceInternalState.currentCharacterIndex, characterToWrite);
+        addToGlyphBuffer(glyphBuffer, glyph, currentRangeFont, width, advanceInternalState.currentCharacterIndex, characterToWrite);
 
         advanceToNextCharacter();
 
@@ -499,8 +501,7 @@ auto WidthIterator::calculateAdditionalWidth(GlyphBuffer& glyphBuffer, GlyphBuff
 
     if (character == tabCharacter && m_run->allowTabs()) {
         Ref font = glyphBuffer.fontAt(trailingGlyphIndex);
-        // Synthetic bold will be handled in applyCSSVisibilityRules() later.
-        auto newWidth = m_fontCascade->tabWidth(font, m_run->tabSize(), position, Font::SyntheticBoldInclusion::Exclude);
+        auto newWidth = m_fontCascade->tabWidth(font, m_run->tabSize(), position);
         auto currentWidth = width(glyphBuffer.advanceAt(trailingGlyphIndex));
         rightAdditionalWidth += newWidth - currentWidth;
     }
@@ -747,17 +748,6 @@ void WidthIterator::applyCSSVisibilityRules(GlyphBuffer& glyphBuffer, unsigned g
 
     float yPosition = height(glyphBuffer.initialAdvance());
 
-    auto adjustForSyntheticBold = [&](auto index) {
-        auto& advance = glyphBuffer.advances(index)[0];
-        // Only embolden glyphs that advance the pen, like the "zero width lurkers" letter-spacing guard.
-        if (!width(advance))
-            return;
-        auto glyph = glyphBuffer.glyphAt(index);
-        auto syntheticBoldOffset = glyph == deletedGlyph ? 0 : glyphBuffer.fontAt(index).syntheticBoldOffset();
-        m_runWidthSoFar += syntheticBoldOffset;
-        setWidth(advance, width(advance) + syntheticBoldOffset);
-    };
-
     auto clobberGlyph = [&](auto index, auto newGlyph) {
         glyphBuffer.glyphs(index)[0] = newGlyph;
     };
@@ -796,14 +786,9 @@ void WidthIterator::applyCSSVisibilityRules(GlyphBuffer& glyphBuffer, unsigned g
             // Instead, we should probably somehow have the caller pass in a Font/glyph pair to use in this situation.
             if (auto spaceGlyph = glyphBuffer.fontAt(i).spaceGlyph())
                 clobberGlyph(i, spaceGlyph);
-            adjustForSyntheticBold(i);
-            continue;
-        case noBreakSpace:
-            adjustForSyntheticBold(i);
             continue;
         case tabCharacter:
             makeGlyphInvisible(i);
-            adjustForSyntheticBold(i);
             continue;
         }
 
@@ -821,8 +806,6 @@ void WidthIterator::applyCSSVisibilityRules(GlyphBuffer& glyphBuffer, unsigned g
             clobberAdvance(i, protect(glyphBuffer.fontAt(i))->widthForGlyph(visibleGlyph));
             continue;
         }
-
-        adjustForSyntheticBold(i);
     }
 }
 

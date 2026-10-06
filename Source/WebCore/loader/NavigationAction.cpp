@@ -35,7 +35,7 @@
 #include "HistoryItem.h"
 #include "LocalFrame.h"
 #include "MouseEvent.h"
-#include "OriginAccessPatterns.h"
+#include "NavigationNavigationType.h"
 
 namespace WebCore {
 
@@ -66,16 +66,6 @@ NavigationAction::NavigationAction(NavigationAction&&) = default;
 
 NavigationAction& NavigationAction::operator=(const NavigationAction&) = default;
 NavigationAction& NavigationAction::operator=(NavigationAction&&) = default;
-
-static bool shouldTreatAsSameOriginNavigation(const Document& document, const URL& url)
-{
-    return url.protocolIsAbout() || url.protocolIsData() || (url.protocolIsBlob() && protect(document.securityOrigin())->canRequest(url, OriginAccessPatternsForWebProcess::singleton()));
-}
-
-static bool shouldTreatAsSameOriginNavigation(const NavigationRequester& requester, const URL& url)
-{
-    return url.protocolIsAbout() || url.protocolIsData() || (url.protocolIsBlob() && Ref { requester.securityOrigin }->canRequest(url, OriginAccessPatternsForWebProcess::singleton()));
-}
 
 static std::optional<NavigationAction::UIEventWithKeyStateData> keyStateDataForFirstEventWithKeyState(Event* event)
 {
@@ -113,7 +103,6 @@ NavigationAction::NavigationAction(const NavigationRequester& requester, const R
     , m_mouseEventData { mouseEventDataForFirstMouseEvent(event) }
     , m_type { navigationType(frameLoadType, isFormSubmission, !!event) }
 {
-    m_treatAsSameOriginNavigation = shouldTreatAsSameOriginNavigation(requester, originalRequest.url());
     setDownloadAttribute(downloadAttribute);
     setSourceElement(sourceElement);
     setShouldOpenExternalURLsPolicy(shouldOpenExternalURLsPolicy);
@@ -127,7 +116,6 @@ NavigationAction::NavigationAction(Document& requester, const ResourceRequest& o
     , m_keyStateEventData { keyStateDataForFirstEventWithKeyState(event) }
     , m_mouseEventData { mouseEventDataForFirstMouseEvent(event) }
     , m_type { type }
-    , m_treatAsSameOriginNavigation { shouldTreatAsSameOriginNavigation(requester, originalRequest.url()) }
 {
     setDownloadAttribute(downloadAttribute);
     setSourceElement(sourceElement);
@@ -147,7 +135,6 @@ NavigationAction::NavigationAction(FrameLoadRequest& request, NavigationType typ
     , m_keyStateEventData { keyStateDataForFirstEventWithKeyState(event) }
     , m_mouseEventData { mouseEventDataForFirstMouseEvent(event) }
     , m_type { type }
-    , m_treatAsSameOriginNavigation { shouldTreatAsSameOriginNavigation(protect(request.requester()).get(), request.resourceRequest().url()) }
 {
 }
 
@@ -161,6 +148,24 @@ NavigationAction NavigationAction::copyWithShouldOpenExternalURLsPolicy(ShouldOp
 void NavigationAction::setSourceBackForwardItem(HistoryItem* item)
 {
     m_sourceBackForwardItemIdentifier = item ? std::make_optional(item->itemID()) : std::nullopt;
+}
+
+NavigationHistoryBehavior NavigationAction::navigationHistoryBehavior() const
+{
+    if (!m_navigationAPIType)
+        return NavigationHistoryBehavior::Auto;
+
+    switch (*m_navigationAPIType) {
+    case NavigationNavigationType::Push:
+        return NavigationHistoryBehavior::Push;
+    case NavigationNavigationType::Replace:
+        return NavigationHistoryBehavior::Replace;
+    case NavigationNavigationType::Reload:
+        return NavigationHistoryBehavior::Reload;
+    case NavigationNavigationType::Traverse:
+        break;
+    }
+    return NavigationHistoryBehavior::Auto;
 }
 
 }

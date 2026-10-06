@@ -47,6 +47,7 @@
 #import <SecurityInterface/SFCertificatePanel.h>
 #import <SecurityInterface/SFCertificateView.h>
 #import <WebCore/CertificateInfo.h>
+#import <WebCore/DiagnosticLoggingClient.h>
 #import <WebCore/InspectorFrontendClient.h>
 #import <WebCore/LocalFrame.h>
 #import <WebCore/Page.h>
@@ -373,7 +374,7 @@ bool WebInspectorFrontendClient::supportsDiagnosticLogging()
 
 void WebInspectorFrontendClient::logDiagnosticEvent(const String& eventName, const WebCore::DiagnosticLoggingClient::ValueDictionary& dictionary)
 {
-    if (auto* page = frontendPage())
+    if (RefPtr page = frontendPage())
         page->diagnosticLoggingClient().logDiagnosticMessageWithValueDictionary(eventName, "Legacy Web Inspector Frontend Diagnostics"_s, dictionary, WebCore::ShouldSample::No);
 }
 #endif

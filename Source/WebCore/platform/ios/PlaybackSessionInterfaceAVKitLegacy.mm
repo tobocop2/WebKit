@@ -41,9 +41,7 @@
 
 #import <pal/cf/CoreMediaSoftLink.h>
 #import <pal/cocoa/AVFoundationSoftLink.h>
-
-SOFTLINK_AVKIT_FRAMEWORK()
-SOFT_LINK_CLASS_OPTIONAL(AVKit, AVValueTiming)
+#import <pal/cocoa/AVKitSoftLink.h>
 
 namespace WebCore {
 
@@ -114,7 +112,7 @@ void PlaybackSessionInterfaceAVKitLegacy::currentTimeChanged(double currentTime,
         return;
 
     NSTimeInterval anchorTimeStamp = ![m_playerController rate] ? NAN : anchorTime;
-    AVValueTiming *timing = [getAVValueTimingClassSingleton() valueTimingWithAnchorValue:currentTime
+    AVValueTiming *timing = [PAL::getAVValueTimingClassSingleton() valueTimingWithAnchorValue:currentTime
         anchorTimeStamp:anchorTimeStamp rate:0];
 
     [m_playerController setTiming:timing];
@@ -214,7 +212,7 @@ void PlaybackSessionInterfaceAVKitLegacy::legibleMediaSelectionOptionsChanged(co
     [m_playerController setCurrentLegibleMediaSelectionOption:selectedOption.get()];
 }
 
-void PlaybackSessionInterfaceAVKitLegacy::externalPlaybackChanged(bool enabled, PlaybackSessionModel::ExternalPlaybackTargetType targetType, const String& localizedDeviceName)
+void PlaybackSessionInterfaceAVKitLegacy::externalPlaybackChanged(bool enabled, PlaybackSessionModel::ExternalPlaybackTargetType targetType, const String& localizedDeviceName, const String& localizedRouteName)
 {
     AVPlayerControllerExternalPlaybackType externalPlaybackType = AVPlayerControllerExternalPlaybackTypeNone;
     if (enabled && targetType == PlaybackSessionModel::ExternalPlaybackTargetType::TargetTypeAirPlay)
@@ -222,8 +220,12 @@ void PlaybackSessionInterfaceAVKitLegacy::externalPlaybackChanged(bool enabled, 
     else if (enabled && targetType == PlaybackSessionModel::ExternalPlaybackTargetType::TargetTypeTVOut)
         externalPlaybackType = AVPlayerControllerExternalPlaybackTypeTVOut;
 
+    RetainPtr<NSString> airPlayDeviceLocalizedName;
+    if (localizedRouteName.isEmpty())
+        airPlayDeviceLocalizedName = localizedDeviceName.createNSString();
+
     WebAVPlayerController* playerController = m_playerController.get();
-    playerController.externalPlaybackAirPlayDeviceLocalizedName = localizedDeviceName.createNSString().get();
+    playerController.externalPlaybackAirPlayDeviceLocalizedName = airPlayDeviceLocalizedName.get();
     playerController.externalPlaybackType = externalPlaybackType;
     playerController.externalPlaybackActive = enabled;
 }

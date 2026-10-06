@@ -607,7 +607,7 @@ void MediaPlayerPrivateWebM::addSecurityOrigin(const ResourceResponse& response)
     m_origins.add(SecurityOrigin::create(response.url()));
 }
 
-void MediaPlayerPrivateWebM::seekToTarget(const SeekTarget& target)
+Ref<MediaTimePromise> MediaPlayerPrivateWebM::seekToTarget(const SeekTarget& target)
 {
     assertIsMainThread();
     ALWAYS_LOG(LOGIDENTIFIER, "time = ", target.time, ", negativeThreshold = ", target.negativeThreshold, ", positiveThreshold = ", target.positiveThreshold);
@@ -618,6 +618,9 @@ void MediaPlayerPrivateWebM::seekToTarget(const SeekTarget& target)
     if (m_seekTimer.isActive())
         m_seekTimer.stop();
     m_seekTimer.startOneShot(0_s);
+
+    m_seekPromise.emplace(PlatformMediaError::Cancelled);
+    return *m_seekPromise;
 }
 
 void MediaPlayerPrivateWebM::seekInternal()
@@ -688,12 +691,12 @@ void MediaPlayerPrivateWebM::completeSeek(const MediaTime& seekedTime)
     monitorReadyState();
 
     ensureOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, seekedTime] {
-        if (RefPtr protectedThis = weakThis.get()) {
-            if (RefPtr player = protectedThis->m_player.get()) {
-                player->seeked(seekedTime);
-                player->timeChanged();
-            }
-        }
+        RefPtr protectedThis = weakThis.get();
+        if (!protectedThis)
+            return;
+        assertIsMainThread();
+        if (auto seekPromise = std::exchange(protectedThis->m_seekPromise, std::nullopt))
+            seekPromise->resolve(seekedTime);
     });
 }
 
@@ -910,12 +913,12 @@ RefPtr<VideoFrame> MediaPlayerPrivateWebM::videoFrameForCurrentTime()
     return m_lastVideoFrame;
 }
 
-DestinationColorSpace MediaPlayerPrivateWebM::colorSpace()
+ColorSpace MediaPlayerPrivateWebM::colorSpace()
 {
     assertIsMainThread();
     updateLastImage();
     RefPtr lastImage = m_lastImage;
-    return lastImage ? lastImage->colorSpace() : DestinationColorSpace::SRGB();
+    return lastImage ? lastImage->colorSpace() : ColorSpace::SRGB();
 }
 
 Ref<MediaPlayer::BitmapImagePromise> MediaPlayerPrivateWebM::bitmapImageForCurrentTime()
@@ -1019,7 +1022,7 @@ void MediaPlayerPrivateWebM::setDuration(MediaTime duration)
             if (RefPtr player = protectedThis->m_player.get())
                 player->timeChanged();
         });
-    })->track(m_stallRequest);
+    })->track(protect(m_stallRequest));
 
     m_duration = WTF::move(duration);
     ensureOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, durationCopy = m_duration] {
@@ -1599,7 +1602,7 @@ void MediaPlayerPrivateWebM::didProvideMediaDataForTrackId(Ref<MediaSampleAVFObj
         m_readyForMoreSamplesMap[trackId] = true;
         return;
     }
-    if (m_seeking || m_layerRequiresFlush)
+    if (seeking() || m_layerRequiresFlush)
         return;
     notifyClientWhenReadyForMoreSamples(trackId);
 }
@@ -1948,6 +1951,12 @@ WebCore::HostingContext MediaPlayerPrivateWebM::hostingContext() const
 {
     assertIsMainThread();
     return m_renderer->hostingContext();
+}
+
+Ref<MediaPlayer::HostingContextPromise> MediaPlayerPrivateWebM::requestHostingContext()
+{
+    assertIsMainThread();
+    return m_renderer->requestHostingContext();
 }
 
 void MediaPlayerPrivateWebM::setVideoLayerSizeFenced(const WebCore::FloatSize& size, WTF::MachSendRightAnnotated&& sendRightAnnotated)

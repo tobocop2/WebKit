@@ -87,11 +87,11 @@ struct GenericSequenceConverter {
     {
         auto& vm = JSC::getVM(&lexicalGlobalObject);
         auto scope = DECLARE_THROW_SCOPE(vm);
-        WebCore::forEachInIterable(&lexicalGlobalObject, object, scopedLambda<void(JSC::VM&, JSC::JSGlobalObject*, JSC::JSValue)>([&sequence](JSC::VM& vm, JSC::JSGlobalObject* lexicalGlobalObject, JSC::JSValue nextValue) {
+        WebCore::forEachInIterable(&lexicalGlobalObject, object, [&sequence](JSC::VM& vm, JSC::JSGlobalObject* lexicalGlobalObject, JSC::JSValue nextValue) {
             auto scope = DECLARE_THROW_SCOPE(vm);
 
             InnerConverter::convert(scope, *lexicalGlobalObject, nextValue, sequence);
-        }));
+        });
         RETURN_IF_EXCEPTION(scope, Result::exception());
 
         return Result { WTF::move(sequence) };
@@ -106,11 +106,11 @@ struct GenericSequenceConverter {
     {
         auto& vm = JSC::getVM(&lexicalGlobalObject);
         auto scope = DECLARE_THROW_SCOPE(vm);
-        WebCore::forEachInIterable(lexicalGlobalObject, object, method, scopedLambda<void(JSC::VM&, JSC::JSGlobalObject&, JSC::JSValue)>([&sequence](JSC::VM& vm, JSC::JSGlobalObject& lexicalGlobalObject, JSC::JSValue nextValue) {
+        WebCore::forEachInIterable(lexicalGlobalObject, object, method, [&sequence](JSC::VM& vm, JSC::JSGlobalObject& lexicalGlobalObject, JSC::JSValue nextValue) {
             auto scope = DECLARE_THROW_SCOPE(vm);
 
             InnerConverter::convert(scope, lexicalGlobalObject, nextValue, sequence);
-        }));
+        });
         RETURN_IF_EXCEPTION(scope, Result::exception());
 
         return Result { WTF::move(sequence) };
@@ -353,8 +353,12 @@ template<> struct Converter<IDLFrozenArray<IDLUnrestrictedFloat>> : Detail::Nume
 template<> struct Converter<IDLFrozenArray<IDLDouble>> : Detail::NumericSequenceConverter<IDLFrozenArray<IDLDouble>> { };
 template<> struct Converter<IDLFrozenArray<IDLUnrestrictedDouble>> : Detail::NumericSequenceConverter<IDLFrozenArray<IDLUnrestrictedDouble>> { };
 
-template<typename T, size_t N> struct Converter<IDLSequence<T, N>> : Detail::SequenceConverter<IDLSequence<T, N>> { };
-template<typename T, size_t N> struct Converter<IDLFrozenArray<T, N>> : Detail::SequenceConverter<IDLFrozenArray<T, N>> { };
+template<typename T, size_t N> struct Converter<IDLSequence<T, N>> : Detail::SequenceConverter<IDLSequence<T, N>> {
+    static_assert(!std::is_same_v<T, IDLAny>, "sequence<any> is insecure as input; use a concrete type");
+};
+template<typename T, size_t N> struct Converter<IDLFrozenArray<T, N>> : Detail::SequenceConverter<IDLFrozenArray<T, N>> {
+    static_assert(!std::is_same_v<T, IDLAny>, "FrozenArray<any> is insecure as input; use a concrete type");
+};
 
 template<typename T, size_t N> struct JSConverter<IDLSequence<T, N>> {
     static constexpr bool needsState = true;

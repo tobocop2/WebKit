@@ -133,6 +133,7 @@ namespace WebCore {
     macro(CSSCounterStyleRule) \
     macro(CSSColor) \
     macro(CSSColorValue) \
+    macro(CSSEnvironmentMapRule) \
     macro(CSSFunctionDeclarations) \
     macro(CSSFunctionDescriptors) \
     macro(CSSFunctionRule) \
@@ -196,6 +197,7 @@ namespace WebCore {
     macro(DigitalCredential) \
     macro(DocumentTimeline) \
     macro(DynamicsCompressorNode) \
+    macro(ElementImage) \
     macro(ElementInternals) \
     macro(EncodedAudioChunk) \
     macro(EncodedVideoChunk) \
@@ -237,6 +239,7 @@ namespace WebCore {
     macro(GPUComputePipeline) \
     macro(GPUDevice) \
     macro(GPUDeviceLostInfo) \
+    macro(GPUError) \
     macro(GPUExternalTexture) \
     macro(GPUInternalError) \
     macro(GPUMapMode) \
@@ -293,6 +296,9 @@ namespace WebCore {
     macro(ImageBitmap) \
     macro(ImageBitmapRenderingContext) \
     macro(ImageCapture) \
+    macro(ImageDecoder) \
+    macro(ImageTrack) \
+    macro(ImageTrackList) \
     macro(IdleDeadline) \
     macro(InputDeviceInfo) \
     macro(InputEvent) \
@@ -338,6 +344,7 @@ namespace WebCore {
     macro(NavigationCurrentEntryChangeEvent) \
     macro(NavigationDestination) \
     macro(NavigationHistoryEntry) \
+    macro(NavigationPrecommitController) \
     macro(NavigationPreloadManager) \
     macro(NavigationTransition) \
     macro(NavigatorCredentials) \
@@ -355,6 +362,7 @@ namespace WebCore {
     macro(OffscreenCanvasRenderingContext2D) \
     macro(Origin) \
     macro(OscillatorNode) \
+    macro(PaintEvent) \
     macro(PaintRenderingContext2D) \
     macro(PannerNode) \
     macro(PaymentAddress) \
@@ -429,7 +437,6 @@ namespace WebCore {
     macro(RemotePlayback) \
     macro(Request) \
     macro(Response) \
-    macro(SFrameTransform) \
     macro(SFrameTransformErrorEvent) \
     macro(SQLError) \
     macro(SQLResultSet) \
@@ -514,7 +521,7 @@ namespace WebCore {
     macro(WebKitMediaKeyNeededEvent) \
     macro(WebKitMediaKeySession) \
     macro(WebKitMediaKeys) \
-    macro(WebKitSerializedNode) \
+    macro(WebKitNodeSnapshot) \
     macro(WebKitJSHandle) \
     macro(WebSocket) \
     macro(WebTransport) \
@@ -525,6 +532,7 @@ namespace WebCore {
     macro(WebTransportReceiveStream) \
     macro(WebTransportSendGroup) \
     macro(WebTransportSendStream) \
+    macro(WebTransportWriter) \
     macro(WindowClient) \
     macro(Worker) \
     macro(Worklet) \

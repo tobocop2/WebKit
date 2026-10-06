@@ -50,7 +50,7 @@
 #include "HTMLSrcsetParser.h"
 #include "InspectorInstrumentation.h"
 #include "JSDOMPromiseDeferred.h"
-#include "LazyLoadImageObserver.h"
+#include "LazyLoadElementObserver.h"
 #include "LegacyRenderSVGImage.h"
 #include "LocalFrame.h"
 #include "Logging.h"
@@ -212,7 +212,7 @@ void ImageLoader::updateFromElement(RelevantMutation relevantMutation)
     // down the raw HTML parsing case by loading images we don't intend to display.
     Ref element = this->element();
     Ref document = element->document();
-    if (!document->hasLivingRenderTree())
+    if (!document->canEverRender())
         return;
 
     auto attr = element->imageSourceURL();
@@ -384,7 +384,7 @@ void ImageLoader::didUpdateCachedImage(RelevantMutation relevantMutation, RefPtr
                 updateRenderer();
 
             if (m_lazyImageLoadState == LazyImageLoadState::Deferred)
-                LazyLoadImageObserver::observe(protect(element()));
+                LazyLoadElementObserver::observe(protect(element()));
 
             // If newImage is cached, addClient() will result in the load event
             // being queued to fire.
@@ -461,7 +461,7 @@ void ImageLoader::notifyFinished(CachedResource& resource, const NetworkLoadMetr
     m_pendingURL = { };
 
     if (isDeferred()) {
-        LazyLoadImageObserver::unobserve(protect(element()), protect(document()));
+        LazyLoadElementObserver::unobserve(protect(element()), protect(document()));
         m_lazyImageLoadState = LazyImageLoadState::FullImage;
         LOG_WITH_STREAM(LazyLoading, stream << "ImageLoader " << this << " notifyFinished() for element " << element() << " setting lazy load state to " << m_lazyImageLoadState);
     }
@@ -685,7 +685,8 @@ void ImageLoader::dispatchPendingBeforeLoadEvent()
         return;
     if (!m_image)
         return;
-    if (!element().document().hasLivingRenderTree())
+    Ref document = element().document();
+    if (!document->canEverRender())
         return;
     m_hasPendingBeforeLoadEvent = false;
     if (!element().isConnected())
@@ -700,7 +701,9 @@ void ImageLoader::dispatchPendingLoadEvent()
     if (!m_image)
         return;
     m_hasPendingLoadEvent = false;
-    if (element().document().hasLivingRenderTree())
+    Ref protectedElement = element();
+    Ref document = protectedElement->document();
+    if (document->canEverRender())
         dispatchLoadEvent();
 
     // Only consider updating the protection ref-count of the Element immediately before returning
@@ -714,8 +717,10 @@ void ImageLoader::dispatchPendingErrorEvent()
         return;
     m_hasPendingErrorEvent = false;
     loadEventSender().cancelEvent(*this, eventNames().errorEvent);
-    if (element().document().hasLivingRenderTree())
-        protect(element())->dispatchEvent(Event::create(eventNames().errorEvent, Event::CanBubble::No, Event::IsCancelable::No));
+    Ref protectedElement = element();
+    Ref document = protectedElement->document();
+    if (document->canEverRender())
+        protectedElement->dispatchEvent(Event::create(eventNames().errorEvent, Event::CanBubble::No, Event::IsCancelable::No));
 
     // Only consider updating the protection ref-count of the Element immediately before returning
     // from this function as doing so might result in the destruction of this ImageLoader.
@@ -756,7 +761,7 @@ void ImageLoader::resetLazyImageLoading(Document& document)
     LOG_WITH_STREAM(LazyLoading, stream << "ImageLoader " << this << " resetLazyImageLoading - state is " << m_lazyImageLoadState);
 
     if (isDeferred())
-        LazyLoadImageObserver::unobserve(protect(element()), document);
+        LazyLoadElementObserver::unobserve(protect(element()), document);
     m_lazyImageLoadState = LazyImageLoadState::None;
 }
 

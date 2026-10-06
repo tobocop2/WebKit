@@ -189,7 +189,7 @@ static constexpr std::array<uint8_t, 512> shiftTable {
 
 inline uint16_t NODELETE convertFloatToHalfFloat(float f)
 {
-    unsigned temp = *(reinterpret_cast<unsigned *>(&f));
+    uint32_t temp = std::bit_cast<uint32_t>(f);
     unsigned signexp = (temp >> 23) & 0x1ff;
     return baseTable[signexp] + ((temp & 0x007fffff) >> shiftTable[signexp]);
 }
@@ -240,13 +240,8 @@ template<> ALWAYS_INLINE void unpack<GraphicsContextGL::DataFormat::BGRA8, uint8
     pixelsPerRow = std::min<unsigned>(destination32.size(), pixelsPerRow);
     for (unsigned i = 0; i < pixelsPerRow; ++i) {
         uint32_t bgra = source32[i];
-#if CPU(BIG_ENDIAN)
-        uint32_t brMask = 0xff00ff00;
-        uint32_t gaMask = 0x00ff00ff;
-#else
         uint32_t brMask = 0x00ff00ff;
         uint32_t gaMask = 0xff00ff00;
-#endif
         uint32_t rgba = (((bgra >> 16) | (bgra << 16)) & brMask) | (bgra & gaMask);
         destination32[i] = rgba;
     }

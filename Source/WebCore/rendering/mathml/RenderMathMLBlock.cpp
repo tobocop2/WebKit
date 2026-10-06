@@ -43,7 +43,6 @@
 #include "RenderObjectInlines.h"
 #include "RenderTableInlines.h"
 #include "RenderView.h"
-#include "Settings.h"
 #include <wtf/TZoneMallocInlines.h>
 
 namespace WebCore {
@@ -119,11 +118,8 @@ LayoutUnit toUserUnits(const MathMLElement::Length& length, const Style::Compute
     // Zoom for logical units is accounted for either in the font info or referenceValue.
     case MathMLElement::LengthType::Em:
         return LayoutUnit(length.value * style.fontCascade().size());
-    case MathMLElement::LengthType::Ex: {
-        // When evaluation-time zoom is enabled, font metrics already include the zoom factor.
-        auto zoomFactor = style.fontDescription().evaluationTimeZoomEnabled() ? 1.0f : style.usedZoom();
-        return LayoutUnit(length.value * style.metricsOfPrimaryFont().xHeight().value_or(0) * zoomFactor);
-    }
+    case MathMLElement::LengthType::Ex:
+        return LayoutUnit(length.value * style.metricsOfPrimaryFont().xHeight().value_or(0));
     case MathMLElement::LengthType::MathUnit:
         return LayoutUnit(length.value * style.fontCascade().size() / 18);
     case MathMLElement::LengthType::Percentage:
@@ -145,7 +141,7 @@ std::optional<LayoutUnit> RenderMathMLTable::firstLineBaseline() const
     // By default the vertical center of <mtable> is aligned on the math axis.
     // This is different than RenderTable::firstLineBoxBaseline, which returns the baseline of the first row of a <table>.
     auto baseline = logicalHeight() / 2 + axisHeight(style());
-    return { settings().subpixelInlineLayoutEnabled() ? baseline : LayoutUnit(baseline.toInt()) };
+    return { baseline };
 }
 
 void RenderMathMLBlock::layoutItems(RelayoutChildren relayoutChildren)
@@ -183,14 +179,14 @@ void RenderMathMLBlock::layoutItems(RelayoutChildren relayoutChildren)
 
         setLogicalHeight(std::max(logicalHeight(), verticalOffset + borderAndPaddingAfter() + childVerticalMarginBoxExtent + horizontalScrollbarHeight()));
 
-        horizontalOffset += child->marginStart();
+        horizontalOffset += child->marginStart(child->writingMode());
 
         LayoutUnit childHorizontalExtent = child->borderBoxWidth();
         LayoutPoint childLocation(writingMode().isBidiLTR() ? horizontalOffset : borderBoxWidth() - horizontalOffset - childHorizontalExtent,
-            verticalOffset + child->marginBefore());
+            verticalOffset + child->marginBefore(child->writingMode()));
 
         child->setLocation(childLocation);
-        horizontalOffset += childHorizontalExtent + child->marginEnd();
+        horizontalOffset += childHorizontalExtent + child->marginEnd(child->writingMode());
         if (!everHadLayout && child->checkForRepaintDuringLayout())
             child->repaint();
     }

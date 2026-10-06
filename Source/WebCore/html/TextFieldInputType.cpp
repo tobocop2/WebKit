@@ -310,8 +310,7 @@ bool TextFieldInputType::shouldSubmitImplicitly(Event& event)
 RenderPtr<RenderElement> TextFieldInputType::createInputRenderer(Style::ComputedStyle&& style)
 {
     ASSERT(element());
-    // FIXME: https://github.com/llvm/llvm-project/pull/142471 Moving style is not unsafe.
-    SUPPRESS_UNCOUNTED_ARG return createRenderer<RenderTextControlSingleLine>(RenderObject::Type::TextControlSingleLine, *protect(element()), WTF::move(style));
+    return createRenderer<RenderTextControlSingleLine>(RenderObject::Type::TextControlSingleLine, *protect(element()), WTF::move(style));
 }
 
 bool TextFieldInputType::shouldHaveSpinButton() const
@@ -428,6 +427,8 @@ void TextFieldInputType::removeShadowSubtree()
     if (RefPtr autoFillButton = m_autoFillButton.get())
         autoFillButton->removeOwner();
     m_autoFillButton = nullptr;
+    if (RefPtr dataListDropdownIndicator = m_dataListDropdownIndicator)
+        dataListDropdownIndicator->removeOwner();
     m_dataListDropdownIndicator = nullptr;
     m_container = nullptr;
 }

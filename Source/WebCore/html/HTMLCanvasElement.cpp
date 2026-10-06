@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2004-2023 Apple Inc. All rights reserved.
+ * Copyright (C) 2004-2026 Apple Inc. All rights reserved.
  * Copyright (C) 2007 Alp Toker <alp@atoker.com>
  * Copyright (C) 2010 Torch Mobile (Beijing) Co. Ltd. All rights reserved.
  *
@@ -32,10 +32,12 @@
 #include "Blob.h"
 #include "BlobCallback.h"
 #include "CanvasGradient.h"
+#include "CanvasPaintEvent.h"
 #include "CanvasPattern.h"
 #include "CanvasRenderingContext2D.h"
 #include "CanvasRenderingContext2DSettings.h"
 #include "ContainerNodeInlines.h"
+#include "DOMMatrix.h"
 #include "DocumentQuirks.h"
 #include "DocumentView.h"
 #include "ElementInlines.h"
@@ -92,7 +94,6 @@
 
 #if ENABLE(WEBXR)
 #include "LocalDOMWindow.h"
-#include "Navigator.h"
 #include "NavigatorWebXR.h"
 #include "WebXRSystem.h"
 #endif
@@ -113,8 +114,8 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(HTMLCanvasElement);
 using namespace HTMLNames;
 
 // These values come from the WhatWG/W3C HTML spec.
-const int defaultWidth = 300;
-const int defaultHeight = 150;
+constexpr int defaultWidth = 300;
+constexpr int defaultHeight = 150;
 
 HTMLCanvasElement::HTMLCanvasElement(const QualifiedName& tagName, Document& document)
     : HTMLElement(tagName, document, TypeFlag::HasDidMoveToNewDocument)
@@ -145,6 +146,7 @@ HTMLCanvasElement::~HTMLCanvasElement()
     // avoided in destructors, but works as long as it's done before HTMLCanvasElement destructs completely.
     notifyObserversCanvasDestroyed();
     removeCanvasNeedingPreparationForDisplayOrFlush();
+    protect(document())->cancelCanvasPaintEvent(*this);
 }
 
 bool HTMLCanvasElement::hasPresentationalHintsForAttribute(const QualifiedName& name) const
@@ -170,6 +172,10 @@ void HTMLCanvasElement::attributeChanged(const QualifiedName& name, const AtomSt
         if (!isControlledByOffscreen())
             didUpdateSizeProperties();
     }
+
+    if (name == layoutsubtreeAttr)
+        invalidateStyleAndRenderersForSubtree();
+
     HTMLElement::attributeChanged(name, oldValue, newValue, attributeModificationReason);
 }
 
@@ -194,7 +200,7 @@ bool HTMLCanvasElement::canContainRangeEndPoint() const
 
 bool HTMLCanvasElement::canStartSelection() const
 {
-    return false;
+    return layoutSubtree() && HTMLElement::canStartSelection();
 }
 
 ExceptionOr<void> HTMLCanvasElement::setHeight(unsigned value)
@@ -211,6 +217,53 @@ ExceptionOr<void> HTMLCanvasElement::setWidth(unsigned value)
         return Exception { ExceptionCode::InvalidStateError };
     setAttributeWithoutSynchronization(widthAttr, AtomString::number(limitToOnlyHTMLNonNegative(value, defaultWidth)));
     return { };
+}
+
+void HTMLCanvasElement::setLayoutSubtree(bool layoutSubtree)
+{
+    setBooleanAttribute(layoutsubtreeAttr, layoutSubtree);
+}
+
+bool HTMLCanvasElement::layoutSubtree() const
+{
+    return hasAttributeWithoutSynchronization(layoutsubtreeAttr);
+}
+
+void HTMLCanvasElement::requestPaint()
+{
+    protect(document())->requestCanvasPaintEvent(*this);
+}
+
+void HTMLCanvasElement::dispatchPaintEvent()
+{
+    // FIXME: Populate changedElements.
+    dispatchEvent(CanvasPaintEvent::create(eventNames().paintEvent, { }, Event::IsTrusted::Yes));
+}
+
+ExceptionOr<Ref<DOMMatrix>> HTMLCanvasElement::getElementTransform(const CanvasElementImageSource&, DOMMatrix&)
+{
+    return Exception { ExceptionCode::InvalidStateError };
+}
+
+ExceptionOr<Ref<CanvasElementImage>> HTMLCanvasElement::captureElementImage(Element& drawableElement)
+{
+    if (auto snapshot = drawableElementSnapshot(drawableElement))
+        return CanvasElementImage::create(WTF::move(*snapshot));
+
+    return Exception { ExceptionCode::InvalidStateError };
+}
+
+std::optional<CanvasElementSnapshot> HTMLCanvasElement::drawableElementSnapshot(Element& drawableElement) const
+{
+    CheckedPtr drawableRenderer = drawableElement.renderer();
+    if (!drawableRenderer)
+        return std::nullopt;
+
+    CheckedPtr canvasRenderer = dynamicDowncast<RenderHTMLCanvas>(renderer());
+    if (!canvasRenderer)
+        return std::nullopt;
+
+    return canvasRenderer->drawableRendererSnapshot(*drawableRenderer);
 }
 
 void HTMLCanvasElement::setSizeForControllingContext(IntSize newSize)
@@ -357,8 +410,12 @@ RefPtr<CanvasRenderingContext> HTMLCanvasElement::getContext(const String& type)
         return getContextWebGL(HTMLCanvasElement::toWebGLVersion(type));
 #endif
 
-    if (HTMLCanvasElement::isWebGPUType(type))
-        return getContextWebGPU(type, nullptr);
+    if (HTMLCanvasElement::isWebGPUType(type)) {
+        RefPtr<GPU> gpu;
+        if (RefPtr window = document().window())
+            gpu = protect(window->navigator())->gpu();
+        return getContextWebGPU(type, gpu);
+    }
 
     return nullptr;
 }
@@ -567,9 +624,9 @@ std::optional<FloatRect> HTMLCanvasElement::computeDirtyRectangleIfNeeded(const 
     return dirtyRect;
 }
 
-void HTMLCanvasElement::didDraw(const std::optional<FloatRect>& rect, ShouldApplyPostProcessingToDirtyRect shouldApplyPostProcessingToDirtyRect)
+void HTMLCanvasElement::willUpdateContents(const std::optional<FloatRect>& rect, ShouldApplyPostProcessingToDirtyRect shouldApplyPostProcessingToDirtyRect)
 {
-    clearCopiedImage();
+    m_copiedImage = nullptr;
     if (CheckedPtr renderer = renderBox()) {
         const std::optional<FloatRect> dirtyRect = computeDirtyRectangleIfNeeded(rect);
         if (usesContentsAsLayerContents())
@@ -577,7 +634,7 @@ void HTMLCanvasElement::didDraw(const std::optional<FloatRect>& rect, ShouldAppl
         else if (dirtyRect)
             renderer->repaintRectangle(enclosingIntRect(*dirtyRect));
     }
-    CanvasBase::didDraw(rect, shouldApplyPostProcessingToDirtyRect);
+    CanvasBase::willUpdateContents(rect, shouldApplyPostProcessingToDirtyRect);
 }
 
 void HTMLCanvasElement::didUpdateSizeProperties()
@@ -592,7 +649,7 @@ void HTMLCanvasElement::didUpdateSizeProperties()
     IntSize newSize(w, h);
     bool sizeChanged = oldSize != newSize;
     CanvasBase::setSize(newSize);
-    clearCopiedImage();
+    m_copiedImage = nullptr;
     if (m_context)
         m_context->didUpdateCanvasSizeProperties(sizeChanged);
     if (CheckedPtr canvasRenderer = dynamicDowncast<RenderHTMLCanvas>(renderer())) {
@@ -762,7 +819,7 @@ RefPtr<ImageData> HTMLCanvasElement::getImageData()
         return nullptr;
 
     postProcessPixelBufferResults(*pixelBuffer);
-    return ImageData::create(pixelBuffer.releaseNonNull());
+    return ImageData::create(Ref<ArrayPixelBuffer>(pixelBuffer.releaseNonNull()));
 #else
     return nullptr;
 #endif
@@ -792,7 +849,7 @@ RefPtr<VideoFrame> HTMLCanvasElement::toVideoFrame()
     // FIXME: This can likely be optimized quite a bit, especially in the cases where
     // the ImageBuffer is backed by GPU memory already and/or is in the GPU process by
     // specializing toVideoFrame() in ImageBufferBackend to not use getPixelBuffer().
-    auto pixelBuffer = imageBuffer->getPixelBuffer({ AlphaPremultiplication::Unpremultiplied, PixelFormat::BGRA8, DestinationColorSpace::SRGB() }, { { }, imageBuffer->truncatedLogicalSize() });
+    auto pixelBuffer = imageBuffer->getPixelBuffer({ AlphaPremultiplication::Unpremultiplied, PixelFormat::BGRA8, ColorSpace::SRGB() }, { { }, imageBuffer->truncatedLogicalSize() });
     if (!pixelBuffer)
         return nullptr;
 
@@ -832,17 +889,11 @@ SecurityOrigin* HTMLCanvasElement::securityOrigin() const
 
 Image* HTMLCanvasElement::copiedImage() const
 {
-    if (!m_copiedImage) {
-        RefPtr buffer = const_cast<HTMLCanvasElement*>(this)->makeRenderingResultsAvailable(ShouldApplyPostProcessingToDirtyRect::No);
-        if (buffer)
-            m_copiedImage = BitmapImage::create(buffer->copyNativeImage());
-    }
+    if (m_copiedImage)
+        return m_copiedImage.get();
+    if (RefPtr image = copyNativeImage())
+        m_copiedImage = BitmapImage::create(WTF::move(image));
     return m_copiedImage.get();
-}
-
-void HTMLCanvasElement::clearCopiedImage() const
-{
-    m_copiedImage = nullptr;
 }
 
 bool HTMLCanvasElement::virtualHasPendingActivity() const
@@ -875,6 +926,7 @@ void HTMLCanvasElement::didMoveToNewDocument(Document& oldDocument, Document& ne
         oldDocument.removeCanvasNeedingPreparationForDisplayOrFlush(*context);
         newDocument.addCanvasNeedingPreparationForDisplayOrFlush(*context);
     }
+    oldDocument.cancelCanvasPaintEvent(*this);
     HTMLElement::didMoveToNewDocument(oldDocument, newDocument);
 }
 

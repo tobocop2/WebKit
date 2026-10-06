@@ -52,6 +52,7 @@ enum class SDKAlignedBehavior {
     DefaultsToExcludingBackgroundsWhenPrinting,
     DefaultsToPassiveTouchListenersOnDocument,
     DefaultsToPassiveWheelListenersOnDocument,
+    DisableNonStandardSearchInputResultsAttribute,
     DoesNotDrainTheMicrotaskQueueWhenCallingObjC,
     DoesNotParseStringEndingWithFullStopAsFloatingPointNumber,
     DoesNotAddIntrinsicMarginsToFormControls,
@@ -81,6 +82,7 @@ enum class SDKAlignedBehavior {
     NoExpandoIndexedPropertiesOnWindow,
     NoPokerBrosBuiltInTagQuirk,
     NoShowModalDialog,
+    NoTextValueForCSSColor,
     NoTypedArrayAPIQuirk,
     NoUnconditionalUniversalSandboxExtension,
     NoUNIQLOLazyIframeLoadingQuirk,
@@ -146,6 +148,9 @@ enum class SDKAlignedBehavior {
     ScrollPocketInFullscreen,
     IgnorePageLocationDuringHardPocketEligibilityCheck,
     AdjustColorExtensionsForHorizontalBannerViewOverlays,
+    NoMediaLayerTeardownOnPageVisibilityChangeQuirk,
+    NetworkProcessInheritsNetworkAccessFromUIProcess,
+    UserSelectSupersedesWebkitUserSelect,
 
     NumberOfBehaviors
 };
@@ -172,6 +177,8 @@ WTF_EXPORT_PRIVATE void clearApplicationBundleIdentifierTestingOverride();
 WTF_EXPORT_PRIVATE void setApplicationAuditToken(audit_token_t);
 WTF_EXPORT_PRIVATE std::optional<audit_token_t> applicationAuditToken();
 #endif
+
+WTF_EXPORT_PRIVATE bool isInBaseSystem();
 
 namespace CocoaApplication {
 
@@ -228,6 +235,7 @@ WTF_EXPORT_PRIVATE bool isWebProcess();
 WTF_EXPORT_PRIVATE bool isMobileStore();
 WTF_EXPORT_PRIVATE bool isUNIQLOApp();
 WTF_EXPORT_PRIVATE bool isDOFUSTouch();
+WTF_EXPORT_PRIVATE bool isMoonPlayer();
 WTF_EXPORT_PRIVATE bool isMyRideK12();
 WTF_EXPORT_PRIVATE bool isTableau();
 WTF_EXPORT_PRIVATE bool isTubular();
@@ -257,5 +265,7 @@ using WTF::setSDKAlignedBehaviors;
 using WTF::applicationAuditToken;
 using WTF::setApplicationAuditToken;
 #endif
+
+using WTF::isInBaseSystem;
 
 #endif // PLATFORM(COCOA)

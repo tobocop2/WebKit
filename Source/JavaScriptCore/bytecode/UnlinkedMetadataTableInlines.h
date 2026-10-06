@@ -27,6 +27,7 @@
 
 #include "MetadataTable.h"
 #include "UnlinkedMetadataTable.h"
+#include <array>
 #include <wtf/FastMalloc.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -42,14 +43,62 @@ ALWAYS_INLINE UnlinkedMetadataTable::UnlinkedMetadataTable()
 {
 }
 
-ALWAYS_INLINE UnlinkedMetadataTable::UnlinkedMetadataTable(bool is32Bit, unsigned numValueProfiles, unsigned lastOffset)
+// A finalized table as it comes out of the bytecode cache: the caller fills in the offset table; the value-profile /
+// metadata buffer is allocated at link().
+ALWAYS_INLINE UnlinkedMetadataTable::UnlinkedMetadataTable(bool is32Bit, unsigned numValueProfiles)
     : m_hasMetadata(true)
     , m_isFinalized(false)
     , m_isLinked(false)
     , m_is32Bit(is32Bit)
     , m_numValueProfiles(numValueProfiles)
-    , m_rawBuffer(static_cast<uint8_t*>(MetadataTableMalloc::zeroedMalloc((sizeof(ValueProfile) * numValueProfiles) + sizeof(LinkingData) + lastOffset)))
+    , m_rawBuffer(static_cast<uint8_t*>(MetadataTableMalloc::zeroedMalloc(is32Bit ? s_offset16TableSize + s_offset32TableSize : s_offset16TableSize)))
 {
+}
+
+ALWAYS_INLINE UnlinkedMetadataTable::UnlinkedMetadataTable(unsigned numValueProfiles, std::span<const uint32_t> persistentSteps)
+    : m_hasMetadata(true)
+    , m_isFinalized(true)
+    , m_isLinked(false)
+    , m_is32Bit(false) // decided by link(), which lays the table out; nothing reads the offset table of an unlinked steps-backed table
+    , m_isBackedBySteps(true)
+    , m_numValueProfiles(numValueProfiles)
+    , m_stepsCount(persistentSteps.size())
+    , m_steps(persistentSteps.data())
+    , m_rawBuffer(nullptr)
+{
+}
+
+template<typename OffsetType>
+unsigned UnlinkedMetadataTable::expandSteps(std::span<const uint32_t> steps, OffsetType* table)
+{
+    // finalize()'s layout, from (opcode, count) pairs instead of the preprocess buffer. 64-bit so that counts out of a
+    // payload cannot wrap the offset; a table too big for 32-bit offsets is refused rather than truncated.
+    uint64_t offset = s_offset16TableSize;
+    unsigned i = 0;
+    for (uint32_t step : steps) {
+        unsigned opcode = step >> stepIndexShift;
+        RELEASE_ASSERT(opcode >= i && opcode < s_offsetTableEntries - 1); // ascending, as the encoder wrote them
+        for (; i <= opcode; ++i) {
+            if (table)
+                table[i] = offset; // aligned when accessed, as in finalize()
+        }
+        offset = roundUpToMultipleOf(metadataAlignment(static_cast<OpcodeID>(opcode)), offset);
+        offset += static_cast<uint64_t>(step & stepCountMask) * metadataSize(static_cast<OpcodeID>(opcode));
+        RELEASE_ASSERT(offset + s_offset32TableSize <= std::numeric_limits<Offset32>::max());
+    }
+    for (; i < s_offsetTableEntries; ++i) {
+        if (table)
+            table[i] = offset;
+    }
+    if (offset > UINT16_MAX) {
+        ASSERT(!table || sizeof(OffsetType) == sizeof(Offset32));
+        if (table) {
+            for (i = 0; i < s_offsetTableEntries; ++i)
+                table[i] += s_offset32TableSize;
+        }
+        return offset + s_offset32TableSize;
+    }
+    return offset;
 }
 
 ALWAYS_INLINE UnlinkedMetadataTable::UnlinkedMetadataTable(EmptyTag)
@@ -66,6 +115,14 @@ ALWAYS_INLINE unsigned UnlinkedMetadataTable::addEntry(OpcodeID opcodeID)
     ASSERT(!m_isFinalized && opcodeID < s_offsetTableEntries - 1);
     m_hasMetadata = true;
     return preprocessBuffer()[opcodeID]++;
+}
+
+ALWAYS_INLINE void UnlinkedMetadataTable::restartForReemit()
+{
+    ASSERT(!m_isFinalized && !m_isBackedBySteps);
+    memset(preprocessBuffer(), 0, sizeof(Offset32) * s_offsetTableEntries);
+    m_numValueProfiles = 0;
+    m_hasMetadata = false;
 }
 
 ALWAYS_INLINE unsigned UnlinkedMetadataTable::addValueProfile()
@@ -104,6 +161,8 @@ ALWAYS_INLINE size_t UnlinkedMetadataTable::sizeInBytesForGC(MetadataTable& meta
     // Be careful not to touch m_rawBuffer if this metadataTable is not owning it.
     // It is possible that, m_rawBuffer is realloced in the other thread while we are accessing here.
     size_t result = metadataTable.totalSize();
+    if (metadataTable.valueProfilePredictions())
+        result += m_numValueProfiles * sizeof(SpeculatedType);
     if (metadataTable.buffer() == buffer()) {
         ASSERT(m_isLinked);
         if (m_is32Bit)
@@ -120,24 +179,42 @@ ALWAYS_INLINE RefPtr<MetadataTable> UnlinkedMetadataTable::link()
     if (!m_hasMetadata)
         return nullptr;
 
-    unsigned totalSize = this->totalSize();
+    unsigned valueProfileSize = m_numValueProfiles * sizeof(EncodedJSValue);
+    unsigned totalSize;
+    std::array<Offset32, s_offsetTableEntries> expanded;
+    bool expandsSteps = m_isBackedBySteps && !m_isLinked;
+    if (expandsSteps) {
+        // One walk over the steps sizes the allocation, decides the offset width and produces the table (narrowed below
+        // if it fits 16 bits); later CodeBlocks of this UnlinkedCodeBlock copy the linked table.
+        unsigned endOffset = expandSteps(std::span { m_steps, m_stepsCount }, expanded.data());
+        m_is32Bit = endOffset > UINT16_MAX;
+        totalSize = valueProfileSize + endOffset;
+    } else
+        totalSize = this->totalSize();
     unsigned offsetTableSize = this->offsetTableSize();
-    unsigned valueProfileSize = m_numValueProfiles * sizeof(ValueProfile);
-    uint8_t* buffer;
+    uint8_t* buffer = static_cast<uint8_t*>(MetadataTableMalloc::zeroedMalloc(sizeof(LinkingData) + totalSize));
+    uint8_t* table = buffer + valueProfileSize + sizeof(LinkingData);
+    if (expandsSteps) {
+        if (m_is32Bit)
+            memcpy(table + s_offset16TableSize, expanded.data(), s_offsetTableEntries * sizeof(Offset32)); // offsetTable16()[0] stays 0: MetadataTable::is32Bit()
+        else {
+            auto* table16 = std::bit_cast<Offset16*>(table);
+            for (unsigned i = 0; i < s_offsetTableEntries; ++i)
+                table16[i] = static_cast<Offset16>(expanded[i]);
+        }
+    } else
+        memcpy(table, this->buffer(), offsetTableSize);
     if (!m_isLinked) {
+        if (m_rawBuffer)
+            MetadataTableMalloc::free(m_rawBuffer);
+        m_rawBuffer = buffer;
         m_isLinked = true;
-        buffer = m_rawBuffer;
     } else {
 #if ENABLE(METADATA_STATISTICS)
         MetadataStatistics::numberOfCopiesFromLinking++;
         MetadataStatistics::linkingCopyMemory += sizeof(LinkingData) + totalSize;
 #endif
-        buffer = static_cast<uint8_t*>(MetadataTableMalloc::malloc(sizeof(LinkingData) + totalSize));
-        memcpy(buffer + valueProfileSize + sizeof(LinkingData), m_rawBuffer + valueProfileSize + sizeof(LinkingData), offsetTableSize);
     }
-    // FIXME: Is this needed since we'll clear the data in the CodeBlock Constructor... Plus I could see caching value profiles being profitable.
-    memset(buffer, 0, valueProfileSize);
-    memset(buffer + valueProfileSize + sizeof(LinkingData) + offsetTableSize, 0, totalSize - offsetTableSize - valueProfileSize);
     return adoptRef(*new (buffer + valueProfileSize + sizeof(LinkingData)) MetadataTable(*this));
 }
 
@@ -149,10 +226,21 @@ ALWAYS_INLINE void UnlinkedMetadataTable::unlink(MetadataTable& metadataTable)
 
     if (metadataTable.buffer() == buffer()) {
         ASSERT(m_isLinked);
+        if (m_isBackedBySteps) {
+            MetadataTableMalloc::free(m_rawBuffer);
+            m_rawBuffer = nullptr;
+            m_isLinked = false;
+            return;
+        }
+        unsigned offsetTableSize = this->offsetTableSize();
+        uint8_t* compact = static_cast<uint8_t*>(MetadataTableMalloc::malloc(offsetTableSize));
+        memcpy(compact, buffer(), offsetTableSize);
+        MetadataTableMalloc::free(m_rawBuffer);
+        m_rawBuffer = compact;
         m_isLinked = false;
         return;
     }
-    MetadataTableMalloc::free(metadataTable.valueProfilesEnd() + -static_cast<ptrdiff_t>(numValueProfiles()));
+    MetadataTableMalloc::free(metadataTable.valueProfileBucketsEnd() + -static_cast<ptrdiff_t>(numValueProfiles()));
 }
 
 } // namespace JSC

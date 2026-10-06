@@ -158,7 +158,7 @@ public:
     void play();
     void pause();
 
-    void seekToTarget(const WebCore::SeekTarget&);
+    void seekToTarget(const WebCore::SeekTarget&, CompletionHandler<void(std::expected<WebCore::MediaTimeUpdateData, WebCore::PlatformMediaError>)>&&);
 
     void setVolumeLocked(bool);
     void setVolume(double);
@@ -250,7 +250,6 @@ private:
     void mediaPlayerReadyStateChanged() final;
     void mediaPlayerVolumeChanged() final;
     void mediaPlayerMuteChanged() final;
-    void mediaPlayerSeeked(const MediaTime&) final;
     void mediaPlayerTimeChanged() final;
     void mediaPlayerDurationChanged() final;
     void mediaPlayerSizeChanged() final;
@@ -345,6 +344,8 @@ private:
     void maybeUpdateCachedVideoMetrics();
     void updateCachedVideoMetrics();
 
+    void updateCachedMediaCharacteristics();
+
     void createAudioSourceProvider();
     void setShouldEnableAudioSourceProvider(bool);
 
@@ -363,15 +364,14 @@ private:
 
 #if PLATFORM(COCOA)
     WebCore::FloatSize mediaPlayerVideoLayerSize() const final;
-    void nativeImageForCurrentTime(CompletionHandler<void(std::optional<WTF::MachSendRight>&&, WebCore::DestinationColorSpace)>&&);
-    void colorSpace(CompletionHandler<void(WebCore::DestinationColorSpace)>&&);
+    void nativeImageForCurrentTime(CompletionHandler<void(std::optional<WTF::MachSendRight>&&, WebCore::ColorSpace)>&&);
+    void colorSpace(CompletionHandler<void(WebCore::ColorSpace)>&&);
 #endif
     void videoFrameForCurrentTimeIfChanged(CompletionHandler<void(std::optional<RemoteVideoFrameProxy::Properties>&&, bool)>&&);
     void bitmapImageForCurrentTime(CompletionHandler<void(std::optional<WebCore::ShareableBitmap::Handle>&&)>&&);
 
     void setShouldDisableHDR(bool);
-    using LayerHostingContextCallback = WebCore::MediaPlayer::LayerHostingContextCallback;
-    void requestHostingContext(LayerHostingContextCallback&&);
+    void requestHostingContext(CompletionHandler<void(WebCore::HostingContext)>&&);
     void setShouldCheckHardwareSupport(bool);
 #if HAVE(SPATIAL_TRACKING_LABEL)
     void setDefaultSpatialTrackingLabel(const String&);

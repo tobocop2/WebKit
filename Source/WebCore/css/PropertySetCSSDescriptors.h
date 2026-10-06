@@ -46,7 +46,7 @@ public:
     virtual ~PropertySetCSSDescriptors();
 
     void clearParentRule() { m_parentRule = nullptr; }
-    void NODELETE reattach(MutableStyleProperties&);
+    void reattach(MutableStyleProperties&);
 
     virtual StyleRuleType ruleType() const = 0;
 
@@ -71,6 +71,9 @@ protected:
 
     bool isExposed(CSSPropertyID) const;
     RefPtr<DeprecatedCSSOMValue> wrapForDeprecatedCSSOM(CSSValue*);
+
+    // Maps an author-facing name to its stored id (`size` -> `page-size` within @page).
+    CSSPropertyID resolvePropertyName(const String&) const;
 
     enum class MutationType : uint8_t { NoChanges, StyleAttributeChanged, PropertyChanged };
     [[nodiscard]] bool willMutate();

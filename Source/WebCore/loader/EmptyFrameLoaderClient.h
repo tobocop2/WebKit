@@ -89,7 +89,7 @@ private:
     void NODELETE dispatchWillClose() final;
     void NODELETE dispatchDidStartProvisionalLoad() final;
     void NODELETE dispatchDidReceiveTitle(const StringWithDirection&) final;
-    void NODELETE dispatchDidCommitLoad(std::optional<HasInsecureContent>, std::optional<UsedLegacyTLS>, std::optional<WasPrivateRelayed>) final;
+    void NODELETE dispatchDidCommitLoad(const std::optional<BackForwardCacheCommitData>&) final;
     void NODELETE dispatchDidFailProvisionalLoad(const ResourceError&, WillContinueLoading, WillInternallyHandleFailure) final;
     void NODELETE dispatchDidFailLoad(const ResourceError&) final;
     void NODELETE dispatchDidFinishDocumentLoad() final;
@@ -164,7 +164,8 @@ private:
     ShouldGoToHistoryItem NODELETE shouldGoToHistoryItem(HistoryItem&, IsSameDocumentNavigation) const final;
     bool NODELETE supportsAsyncShouldGoToHistoryItem() const final;
     void NODELETE shouldGoToHistoryItemAsync(HistoryItem&, CompletionHandler<void(ShouldGoToHistoryItem)>&&) const final;
-    void NODELETE dispatchGoToBackForwardItemAtIndex(int steps, FrameLoadType) final;
+    void NODELETE dispatchGoToBackForwardItemAtIndex(int steps) final;
+    void NODELETE dispatchEnqueueHistoryTraversalDelta(int delta) final;
 
     void NODELETE saveViewStateToItem(HistoryItem&) final;
     bool NODELETE canCachePage() const final;
@@ -191,7 +192,7 @@ private:
 
     bool NODELETE isEmptyFrameLoaderClient() const override;
     void NODELETE prefetchDNS(const String&) final;
-    void sendH2Ping(const URL&, CompletionHandler<void(Expected<Seconds, ResourceError>&&)>&&) final;
+    void sendH2Ping(const URL&, CompletionHandler<void(std::expected<Seconds, ResourceError>&&)>&&) final;
 
 #if USE(QUICK_LOOK)
     RefPtr<LegacyPreviewLoaderClient> createPreviewLoaderClient(const String&, const String&) final;

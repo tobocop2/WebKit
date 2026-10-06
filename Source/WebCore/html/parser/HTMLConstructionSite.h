@@ -123,7 +123,7 @@ public:
     void insertFormattingElement(AtomHTMLToken&&);
     void insertHTMLHeadElement(AtomHTMLToken&&);
     void insertHTMLBodyElement(AtomHTMLToken&&);
-    void insertHTMLFormElement(AtomHTMLToken&&);
+    void insertHTMLFormElement(AtomHTMLToken&&, bool isParsingTemplateContents);
     void insertScriptElement(AtomHTMLToken&&);
     void insertTextNode(const String&);
     void insertForeignElement(AtomHTMLToken&&, const AtomString& namespaceURI);
@@ -162,6 +162,7 @@ public:
     HTMLStackItem& currentStackItem() const LIFETIME_BOUND { return m_openElements.topStackItem(); }
     HTMLStackItem* oneBelowTop() const LIFETIME_BOUND { return m_openElements.oneBelowTop(); }
     TreeScope& treeScopeForCurrentNode();
+    ContainerNode& containerForCurrentNode();
     Document& ownerDocumentForCurrentNode();
     HTMLElementStack& openElements() const LIFETIME_BOUND { return m_openElements; }
     HTMLFormattingElementList& activeFormattingElements() const LIFETIME_BOUND { return m_activeFormattingElements; }
@@ -205,7 +206,7 @@ private:
 
     void attachLater(Ref<ContainerNode>&& parent, Ref<Node>&& child, bool selfClosing = false);
 
-    void findFosterSite(HTMLConstructionSiteTask&);
+    void recordFosterSite(HTMLConstructionSiteTask&);
 
     std::tuple<RefPtr<HTMLElement>, RefPtr<JSCustomElementInterface>, RefPtr<CustomElementRegistry>> createHTMLElementOrFindCustomElementInterface(AtomHTMLToken&);
     Ref<HTMLElement> createHTMLElement(AtomHTMLToken&);

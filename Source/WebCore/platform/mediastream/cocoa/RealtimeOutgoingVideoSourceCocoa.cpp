@@ -67,8 +67,6 @@ RealtimeOutgoingVideoSourceCocoa::~RealtimeOutgoingVideoSourceCocoa() = default;
 
 void RealtimeOutgoingVideoSourceCocoa::videoFrameAvailable(VideoFrame& videoFrame, VideoFrameTimeMetadata)
 {
-    ASSERT(!m_isApplyingRotation);
-
 #if !RELEASE_LOG_DISABLED
     if (!(++m_numberOfFrames % 60))
         ALWAYS_LOG(LOGIDENTIFIER, "frame ", m_numberOfFrames);
@@ -92,7 +90,7 @@ void RealtimeOutgoingVideoSourceCocoa::videoFrameAvailable(VideoFrame& videoFram
     auto colorSpace = [&] {
         if (auto pixelFormat = convertVideoFramePixelFormat(videoFrame.pixelFormat(), true)) {
             if (isRGBVideoPixelFormat(*pixelFormat))
-                return PlatformVideoColorSpace { PlatformVideoColorPrimaries::Bt709, PlatformVideoTransferCharacteristics::Bt709, PlatformVideoMatrixCoefficients::Bt709, false };
+                return PlatformVideoColorSpace { .primaries = PlatformVideoColorPrimaries::Bt709, .transfer = PlatformVideoTransferCharacteristics::Bt709, .matrix = PlatformVideoMatrixCoefficients::Bt709, .fullRange = false };
         }
         return videoFrame.colorSpace();
     }();

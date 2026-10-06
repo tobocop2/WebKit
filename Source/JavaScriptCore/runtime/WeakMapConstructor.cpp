@@ -34,6 +34,7 @@
 namespace JSC {
 
 const ClassInfo WeakMapConstructor::s_info = { "Function"_s, &Base::s_info, nullptr, nullptr, CREATE_METHOD_TABLE(WeakMapConstructor) };
+CLASSINFO_KEEP_ADDRESS_UNIQUE(WeakMapConstructor);
 
 void WeakMapConstructor::finishCreation(VM& vm, WeakMapPrototype* prototype)
 {
@@ -104,12 +105,12 @@ JSC_DEFINE_HOST_FUNCTION(constructWeakMap, (JSGlobalObject* globalObject, CallFr
             return;
         }
 
-        MarkedArgumentBuffer arguments;
-        arguments.append(key);
-        arguments.append(value);
-        ASSERT(!arguments.hasOverflowed());
+        auto arguments = WTF::toArray<EncodedJSValue>({
+            JSValue::encode(key),
+            JSValue::encode(value),
+        });
         scope.release();
-        call(globalObject, adderFunction, adderFunctionCallData, weakMap, arguments);
+        call(globalObject, adderFunction, adderFunctionCallData, weakMap, ArgList { arguments.data(), arguments.size() });
     });
 
     return JSValue::encode(weakMap);

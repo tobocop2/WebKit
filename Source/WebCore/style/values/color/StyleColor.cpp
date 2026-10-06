@@ -48,7 +48,12 @@
 #include "StyleColorResolutionState.h"
 #include "StyleColorResolver.h"
 #include "StyleComputedStyle.h"
+#include "StyleComputedStyleBase+GettersInlines.h"
+#include "StyleComputedStyleBase+SettersInlines.h"
+#include "StyleComputedStyle+GettersInlines.h"
+#include "StyleComputedStyle+InitialInlines.h"
 #include "StyleContrastColor.h"
+#include "StyleDisplay.h"
 #include "StyleHexColor.h"
 #include "StyleKeywordColor.h"
 #include "StyleLightDarkColor.h"
@@ -105,6 +110,11 @@ Color::Color(CSS::Keyword::White)
 }
 
 Color::Color(ResolvedColor&& color)
+    : value { WTF::move(color) }
+{
+}
+
+Color::Color(CurrentAccentColor&& color)
     : value { WTF::move(color) }
 {
 }
@@ -257,9 +267,9 @@ WTF::String Color::debugDescription() const
     return ts.release();
 }
 
-WebCore::Color Color::resolveColor(const WebCore::Color& currentColor) const
+WebCore::Color Color::resolveColor(const ResolvedColors& resolvedColors) const
 {
-    return switchOn([&](const auto& kind) { return WebCore::Style::resolveColor(kind, currentColor); });
+    return switchOn([&](const auto& kind) { return WebCore::Style::resolveColor(kind, resolvedColors); });
 }
 
 bool Color::containsCurrentColor() const
@@ -328,9 +338,9 @@ template<typename T> Color::ColorKind Color::makeIndirectColor(T&& colorType)
     return { makeUniqueRef<T>(WTF::move(colorType)) };
 }
 
-WebCore::Color resolveColor(const Color& value, const WebCore::Color& currentColor)
+WebCore::Color resolveColor(const Color& value, const ResolvedColors& resolvedColors)
 {
-    return value.resolveColor(currentColor);
+    return value.resolveColor(resolvedColors);
 }
 
 bool containsCurrentColor(const Color& value)
@@ -375,22 +385,6 @@ Color toStyleColor(const CSS::Color& value, ColorResolutionState& state)
     return WTF::switchOn(value, [&](const auto& color) { return toStyleColor(color, state); });
 }
 
-Color toStyleColor(const CSS::Color& value, Ref<const Document> document, const ComputedStyle& style, const CSSToLengthConversionData& conversionData, ForVisitedLink forVisitedLink)
-{
-    auto resolutionState = ColorResolutionState {
-        .document = document,
-        .style = style,
-        .conversionData = conversionData,
-        .forVisitedLink = forVisitedLink
-    };
-    return toStyleColor(value, resolutionState);
-}
-
-Color toStyleColor(const CSS::Color& value, const BuilderState& builderState, ForVisitedLink forVisitedLink)
-{
-    return toStyleColor(value, builderState.document(), builderState.style(), builderState.cssToLengthConversionData(), forVisitedLink);
-}
-
 auto ToCSS<Color>::operator()(const Color& value, const Style::ComputedStyle& style) -> CSS::Color
 {
     ColorResolver colorResolver { style };
@@ -399,12 +393,43 @@ auto ToCSS<Color>::operator()(const Color& value, const Style::ComputedStyle& st
 
 auto ToStyle<CSS::Color>::operator()(const CSS::Color& value, const BuilderState& builderState, ForVisitedLink forVisitedLink) -> Color
 {
-    return toStyleColor(value, builderState.document(), builderState.style(), builderState.cssToLengthConversionData(), forVisitedLink);
+    auto resolutionState = ColorResolutionState {
+        .document = builderState.document(),
+        .style = builderState.style(),
+        .conversionData = builderState.cssToLengthConversionData(),
+        .forVisitedLink = forVisitedLink
+    };
+    return toStyleColor(value, resolutionState);
 }
 
 auto ToStyle<CSS::Color>::operator()(const CSS::Color& value, const BuilderState& builderState) -> Color
 {
     return toStyle(value, builderState, ForVisitedLink::No);
+}
+
+
+static Color resolveInternalCurrentBackgroundColor(BuilderState& builderState, ForVisitedLink forVisitedLink)
+{
+    builderState.style().setUsesCurrentBackgroundColorKeyword();
+
+    auto propertyID = builderState.cssPropertyID();
+    bool includesSelf = propertyID != CSSPropertyBackgroundColor
+        && propertyID != CSSPropertyColor
+        && propertyID != CSSPropertyAccentColor;
+
+    if (includesSelf) {
+        CheckedRef style = builderState.style();
+        auto backgroundColor = style->backgroundColor();
+        // A display:contents element generates no box and paints no background, so it doesn't participate.
+        if (backgroundColor != ComputedStyle::initialBackgroundColor()
+            && style->display() != DisplayType::Contents)
+            return ColorResolver { style }.colorResolvingCurrentColor(backgroundColor);
+    }
+
+    if (auto& inherited = builderState.parentStyle().currentBackgroundColor(); inherited.isValid())
+        return Color { ResolvedColor { inherited } };
+
+    return toStyle(CSS::Color { CSS::KeywordColor { CSSValueCanvas } }, builderState, forVisitedLink);
 }
 
 auto CSSValueConversion<Color>::operator()(BuilderState& builderState, const CSSValue& value, ForVisitedLink forVisitedLink) -> Color
@@ -416,6 +441,8 @@ auto CSSValueConversion<Color>::operator()(BuilderState& builderState, const CSS
         return toStyle(color->color(), builderState, forVisitedLink);
 
     if (RefPtr keywordValue = dynamicDowncast<CSSKeywordValue>(value)) {
+        if (keywordValue->valueID() == CSSValueInternalCurrentBackgroundColor)
+            return resolveInternalCurrentBackgroundColor(builderState, forVisitedLink);
         if (auto valueID = keywordValue->valueID(); CSS::isColorKeyword(valueID))
             return toStyle(CSS::Color { CSS::KeywordColor { valueID } }, builderState, forVisitedLink);
     }

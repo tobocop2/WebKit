@@ -86,6 +86,7 @@ enum class FrameLoadType : uint8_t {
 enum class IsMetaRefresh : bool { No, Yes };
 enum class WillContinueLoading : bool { No, Yes };
 enum class WillInternallyHandleFailure : bool { No, Yes };
+enum class IsInitialAboutBlank : bool { No, Yes };
 
 enum class ShouldContinuePolicyCheck : bool { No, Yes };
 
@@ -104,13 +105,6 @@ enum class NavigationType : uint8_t {
     Reload,
     FormResubmitted,
     Other
-};
-
-enum class NavigationHistoryBehavior : uint8_t {
-    Auto,
-    Push,
-    Replace,
-    Reload // Internal, not part of the specification
 };
 
 enum class NavigationUpgradeToHTTPSBehavior : uint8_t {
